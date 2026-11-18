@@ -23,7 +23,7 @@ This script asks whether AOI-level associations with PSA change, chiefly for *FO
 
 Pre-specified features (*FOLH1*, Hallmark androgen response, HLA class I, Hallmark IFN-α, p53 core, Beltran 13-gene NE set) are fitted with lmerTest using Kenward–Roger degrees of freedom. Model-based P values can be anti-conservative with few patients, so inference uses 500 permutations of PSA change across patients, with each AOI keeping its patient's value. Transcriptome-wide models use dream with voomWithDreamWeights. Their concordance with patient pseudobulk is measured by Spearman correlation of t statistics, and M3 is calibrated by `N_PERM` patient-level permutations (default 20, the number used for the released results).
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Supplementary Fig. 1c (*FOLH1* patient-permutation P per stratum under M0–M3; drawn by `comp_39_supp_fig6`)
 - Supplementary Tables 75–77 (purity agreement; feature models; transcriptome-wide dream models)

@@ -23,7 +23,7 @@ This script places the tissue findings in the clinical framework of the TheraP c
 
 It first builds a patient-level feature table. Tissue composites are the mean within-stratum z-score over the patient's available PSMA⁺ and PanCK⁺PSMA⁻ pseudobulk (all three compartments for p53, IFN-α and HLA class I). On-treatment induction is the mean standardised paired change. Burden correlations are Spearman with Bonferroni correction across the ten burden variables. *FOLH1* is related to PSA change (linear), PSA50 failure (Firth-penalised logistic) and rPFS and overall survival (Cox), unadjusted and adjusted for log ctDNA fraction alone or with log PSA or SUVmean. PSA50 rates carry exact Clopper–Pearson intervals. ctDNA alterations are related to tissue *FOLH1*, AR and PI3K–AKT–mTOR scores and to SUVmean, with and without ctDNA-fraction adjustment. The script also computes the magnitude of the on-treatment transcriptional shift and univariable hazard ratios.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Fig. 1b (per-patient tissue, ctDNA, PET, RECIP and batch tracks, from `patient_features.qs`)
 - Fig. 2b–d (waterfall coloured by tissue *FOLH1*; PSA50 and rPFS by SUVmean × *FOLH1*) and Fig. 2g (burden-adjusted *FOLH1* models)

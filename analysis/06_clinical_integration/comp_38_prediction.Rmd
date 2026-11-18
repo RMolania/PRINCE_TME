@@ -23,7 +23,7 @@ This script asks whether lesional *FOLH1* adds to whole-body PSMA-PET SUVmean, a
 
 Five nested models (SUV; *FOLH1*; SUV + *FOLH1*; SUV + ctDNA; SUV + *FOLH1* + ctDNA) are compared on the same patients for each *FOLH1* source. Outcomes are PSA50 failure (logistic), capped PSA change (linear) and rPFS (Cox). With few events, leave-one-out AUC is biased downwards, so discrimination is estimated by leave-pair-out validation, by 50 repeats of stratified four-fold cross-validation and by bootstrap optimism correction (500 resamples). Out-of-fold probabilities feed a decision curve. The Riley et al. criteria give the sample size needed to develop such a model.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Fig. 2e (ROC curves from out-of-fold probabilities; drawn by `comp_41_figures_v5`)
 - Supplementary Fig. 1d,e (ROC and decision curve; drawn by `comp_39_supp_fig6`)

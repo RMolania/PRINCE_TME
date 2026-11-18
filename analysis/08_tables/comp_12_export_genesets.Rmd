@@ -23,7 +23,7 @@ Writes every gene set used for programme scoring as one long table (collection, 
 
 Rather than redefining the sets, the script reads the source of `comp_05_signatures` (from `.build/`), locates the block that builds the `sets` list and the `single_genes` vector, and evaluates only that block. The collections are the immune signatures, lineage sets (13-gene NEPC marker set, five-gene AR panel, Hallmark androgen response), the programmes compared with the bone-metastasis literature, bone-cell programmes, Hallmark and Reactome senescence sets, PCCAT L3 cell-type markers, and the single genes analysed individually.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Supplementary Data 5 (gene-set definitions); this base table is copied forward by comp_21b and extended with the Owen et al. comparison programmes by comp_29
 - Methods: Externally defined signatures (immune programmes, Supplementary Data 5)

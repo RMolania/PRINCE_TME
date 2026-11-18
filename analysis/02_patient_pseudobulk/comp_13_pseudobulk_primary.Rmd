@@ -23,9 +23,9 @@ First implementation of the patient-level pseudobulk analysis, adopted after an 
 
 The script tests pre-specified genes (*FOLH1*, *B2M*, *CD276*) and literature programmes against PSA change, response group and rPFS, with exclusion of batch 3 (which holds all intermediate patients) and leave-one-patient-out refits; genes selected in earlier analyses of the same data (*CHGA*, *IBSP*, *CTSK*, bone-remodelling module) form a separate, explicitly exploratory family. It also runs transcriptome-wide limma-voom, paired pre- to on-treatment change, primary–metastasis *FOLH1* concordance, within-lesion *FOLH1* heterogeneity and an elastic-net PSA50 prediction with permutation calibration.
 
-Genes here are filtered with edgeR `filterByExpr`. The analysis reported in the manuscript is the identical code run on the negative-probe (LOQ) gene universe in `comp_13b_pseudobulk_loq`; the outputs of this script feed only the interim figure and table sets (comp_14, comp_15) and the interim π₁ table of comp_13c.
+Genes here are filtered with edgeR `filterByExpr`. The primary analysis is the identical code run on the negative-probe (LOQ) gene universe in `comp_13b_pseudobulk_loq`; the outputs of this script feed only the interim figure and table sets (comp_14, comp_15) and the interim π₁ table of comp_13c.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Intermediate results used by comp_13c, comp_14 and comp_15; superseded in the final Supplementary Tables (S15–S21 are rebuilt from comp_13b by comp_47)
 - Supplementary Fig. 6 (via comp_14: batch-adjusted pseudobulk feature tests compared with AOI-level RUV mixed models)

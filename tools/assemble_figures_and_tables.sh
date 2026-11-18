@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Assemble the manuscript figure set and supplementary files from results/,
+# Assemble the final figure set and supplementary files from results/,
 # then build the combined PDF of figures with their legends.
 #
-# Figure scripts were developed in successive versions (Manuscript, _v2 ... _v5), and the final
+# Figure scripts were developed in successive versions (results folders Manuscript, Manuscript_v2 ... _v5), and the final
 # numbering re-uses panels from several of them. Five scripts are re-rendered without plot titles
-# (comp_44_run_notitle); the final figures are then copied under their manuscript numbers.
+# (comp_44_run_notitle); the final figures are then copied under their final numbers.
 # Run by run_pipeline.sh after the last analysis step; can also be run on its own.
 # =============================================================================
 set -eu
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; export PRINCE_ROOT="$ROOT"; cd "$ROOT"
-R=results; N=$R/notitle; M=$R/Manuscript_v5; F=manuscript/figures; S=manuscript/supplementary
+R=results; N=$R/notitle; M=$R/Manuscript_v5; F=figures_and_tables/figures; S=figures_and_tables/supplementary
 mkdir -p "$N" "$F" "$S"
 
 # title-free renders of the earlier figure scripts whose panels appear in the final figure set
@@ -47,6 +47,6 @@ cp $M/Supplementary_Tables_v5.xlsx $S/Supplementary_Tables_v6.xlsx
 cp $M/Supplementary_Data_*.csv $S/
 echo "supplementary files copied to $S"
 
-# combined PDF of all figures, each followed by its legend (legends: manuscript/figure_legends.md; needs reportlab)
-python3 tools/make_figures_pdf.py manuscript/figure_legends.md manuscript/PRINCE_figures_with_legends.pdf \
+# combined PDF of all figures, each followed by its legend (legends: figures_and_tables/figure_legends.md; needs reportlab)
+python3 tools/make_figures_pdf.py figures_and_tables/figure_legends.md figures_and_tables/PRINCE_figures_with_legends.pdf \
   || echo "combined figure PDF skipped (needs the python package reportlab)"

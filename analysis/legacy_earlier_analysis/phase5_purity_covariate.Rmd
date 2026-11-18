@@ -23,12 +23,12 @@ This is a legacy script from the earlier all-site analysis (primary tumours plus
 
 Its frozen top tables with purity (`data/previous_analysis/Phase5_Purity/*_toptable_with_purity.csv`) are read by comp_18. comp_18 shows that purity adjustment reproduces the direction of the earlier named genes but not their transcriptome-wide significance at patient level.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Extended Data Fig. 8a (earlier AOI-level gene counts with ESTIMATE purity as a covariate), via comp_18 reading the frozen `data/previous_analysis/Phase5_Purity/*_toptable_with_purity.csv`
 - Results: Re-evaluation of earlier neuroendocrine, purity and bone-niche findings
 
-**Pipeline step:** `./run_pipeline.sh --legacy` (optional; not needed to reproduce the manuscript, whose frozen inputs are in `data/previous_analysis/`). Approximate runtime: minutes to tens of minutes.
+**Pipeline step:** `./run_pipeline.sh --legacy` (optional; not needed to reproduce the current analysis, whose frozen inputs are in `data/previous_analysis/`). Approximate runtime: minutes to tens of minutes.
 
 **Inputs**
 

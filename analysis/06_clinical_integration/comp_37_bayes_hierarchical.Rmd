@@ -25,7 +25,7 @@ The model is fitted to the six pre-treatment strata (primary analysis) and to al
 
 Posteriors are sampled with a blocked Gibbs sampler: location parameters are drawn jointly from their Gaussian full conditional and each scale by slice sampling on the log scale. Stan/NUTS was tried first but failed during warm-up in the local installation. Convergence is summarised by R-hat and bulk effective sample size from the posterior package.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Supplementary Fig. 1a,b (pooled effects; shrunken *FOLH1* stratum effects; drawn by `comp_39_supp_fig6`)
 - Supplementary Tables 80–82

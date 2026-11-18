@@ -27,7 +27,7 @@ Repeats the main questions at AOI resolution while keeping the patient as the un
 
 **C. On-treatment change.** In patients with Screening and Cycle1 AOIs in a compartment: feature ~ timepoint + (1 | patient), and feature ~ timepoint × PSA + (1 | patient) for differential change by response.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Extended Data Fig. 3a–d (AOI-level arm: permutation calibration, concordance with pseudobulk, on-treatment change, feature mixed models), drawn by `comp_28_figures_v4` (v4 ExtendedDataFig4)
 - Extended Data Fig. 1f (AOI-level gene counts vs permutation null, PSA contrast), drawn by `comp_28_figures_v4` and reused in `comp_41_figures_v5`

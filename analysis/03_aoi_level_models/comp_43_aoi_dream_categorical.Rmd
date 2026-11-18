@@ -23,7 +23,7 @@ This script checks that the main conclusions do not depend on treating response 
 
 Transcriptome-wide models use dream with voomWithDreamWeights on the LOQ gene universe, with cross-hybridising probe families removed. Where any gene reaches FDR < 0.05, the count is calibrated by `N_PERM` permutations of the response label across patients, holding the number of non-responders fixed. Pre-specified features (*FOLH1*, AR, HLA class I, IFN-α, p53 core, NE 13-gene set) are fitted with lmerTest (Kenward–Roger) and 500 patient-level label permutations. Patient pseudobulk limma-voom with the same contrast provides a concordance check (Spearman correlation of t statistics). The patient is the unit of randomisation in every permutation.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Supplementary Table 96 (transcriptome-wide dream, non-responder vs responder: genes at FDR < 0.05/0.1, π₁, *FOLH1*, permutation calibration, concordance)
 - Supplementary Table 97 (pre-specified feature mixed models: difference, Kenward–Roger P, permutation P)

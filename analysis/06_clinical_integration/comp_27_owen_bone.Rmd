@@ -27,7 +27,7 @@ Tests whether the immune differences between primary prostate cancer and bone me
 - **D.** Within-patient association of *CD276* (B7-H3) with IFN-I and HLA-I programmes in the tumour compartments, AOI-level lmer(target ~ *CD276* + (1 | patient)) on standardised values, plus patient-level Spearman correlation.
 - **E.** Owen et al. markers and programmes versus PSA response per stratum (patient pseudobulk: Spearman, lm with batch, excluding batch 3, worst leave-one-patient-out P).
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Fig. 5a–d (primary-to-bone programmes, Owen et al. markers, *CD276* associations, programme–response associations), drawn by `comp_28_figures_v4` and assembled in `comp_41_figures_v5`
 - Extended Data Fig. 6a–d (primary-vs-bone quality controls), via `comp_28` (v4 ExtendedDataFig8)

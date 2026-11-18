@@ -1,6 +1,6 @@
 """Combined PDF of all figures, each followed by its legend.
 
-Usage: python3 tools/make_figures_pdf.py manuscript/figure_legends.md manuscript/PRINCE_figures_with_legends.pdf
+Usage: python3 tools/make_figures_pdf.py figures_and_tables/figure_legends.md figures_and_tables/PRINCE_figures_with_legends.pdf
 Reads the markdown legends file (image line followed by its legend paragraph(s)); images are resolved
 relative to that file. Needs the python package reportlab; uses the Arial fonts shipped with macOS when
 available (Helvetica otherwise).

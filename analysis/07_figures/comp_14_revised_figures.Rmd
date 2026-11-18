@@ -21,9 +21,9 @@ knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
 
 Draws the second (interim) set of main figures from the first patient-level pseudobulk analysis (comp_13, `filterByExpr` gene set): cohort and genome-wide signal, *FOLH1*, on-treatment interferon and p53-target change, and clinical genomics with prediction. Main Figures 1–4 drawn here were later replaced by the LOQ-universe figures of comp_21, comp_28 and comp_41.
 
-One panel set is carried into the final manuscript: the comparison of AOI-level RUV-4 mixed models (comp_05) with batch-adjusted patient pseudobulk for the pre-specified features, saved here as `ExtendedDataFig9`, which becomes Supplementary Fig. 6. It shows whether the earlier AOI-level results agree in direction with the patient-level analysis and how much batch adjustment attenuates them, given that one batch contains all intermediate patients and two of five non-responders.
+One panel set is carried into the final figure and table set: the comparison of AOI-level RUV-4 mixed models (comp_05) with batch-adjusted patient pseudobulk for the pre-specified features, saved here as `ExtendedDataFig9`, which becomes Supplementary Fig. 6. It shows whether the earlier AOI-level results agree in direction with the patient-level analysis and how much batch adjustment attenuates them, given that one batch contains all intermediate patients and two of five non-responders.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Supplementary Fig. 6a, b (AOI-level RUV mixed models versus patient pseudobulk; unadjusted versus batch-adjusted pseudobulk), from `ExtendedDataFig9`
 - Supplementary Table 22 (`ruv_vs_pseudobulk_feature_comparison.csv`, via comp_15)

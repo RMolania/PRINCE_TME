@@ -19,13 +19,13 @@ knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
 
 ## Overview
 
-This script draws the first manuscript figure set (Nature Medicine format: 183 mm width, 7-pt text). It combines outputs from comp_01 to comp_06. Every comparison shown is either a patient-level summary (mean over ROIs or AOIs) or a statistic from the patient mixed models. Figure 1 shows the study design, the PSA waterfall with AOI availability, deconvolved composition and variance partition. Figure 2 covers FOLH1: its association with PSA change across strata, survival by FOLH1 group, primary-to-metastasis concordance and heterogeneity across ROIs. Figure 3 is a programme heatmap with NEPC, CHGA, IBSP and osteoclast panels. Figure 4 shows the paired on-treatment response in PanCK⁺PSMA⁻ AOIs and on-treatment interferon and MHC changes in PSMA⁺ AOIs.
+This script draws the first figure set (Nature Medicine format: 183 mm width, 7-pt text). It combines outputs from comp_01 to comp_06. Every comparison shown is either a patient-level summary (mean over ROIs or AOIs) or a statistic from the patient mixed models. Figure 1 shows the study design, the PSA waterfall with AOI availability, deconvolved composition and variance partition. Figure 2 covers FOLH1: its association with PSA change across strata, survival by FOLH1 group, primary-to-metastasis concordance and heterogeneity across ROIs. Figure 3 is a programme heatmap with NEPC, CHGA, IBSP and osteoclast panels. Figure 4 shows the paired on-treatment response in PanCK⁺PSMA⁻ AOIs and on-treatment interferon and MHC changes in PSMA⁺ AOIs.
 
-These figures were superseded by later figure sets (comp_14, comp_21, comp_28, comp_41). None of the files written here is copied into the final manuscript figures. A few panel titles are fixed text and are not recomputed from the data: the patient count in Fig. 4a (16) and the gene count in Fig. 4b (49).
+These figures were superseded by later figure sets (comp_14, comp_21, comp_28, comp_41). None of the files written here is copied into the final figures. A few panel titles are fixed text and are not recomputed from the data: the patient count in Fig. 4a (16) and the gene count in Fig. 4b (49).
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
-- Intermediate: first-draft main Figures 1–4 in `results/Manuscript/`; not used in the final manuscript, whose main figures are produced by comp_41_figures_v5 (via comp_28_figures_v4)
+- Intermediate: first-draft main Figures 1–4 in `results/Manuscript/`; not used in the final figure and table set, whose main figures are produced by comp_41_figures_v5 (via comp_28_figures_v4)
 
 **Pipeline step:** `./run_pipeline.sh --only 10_main_figures`. Approximate runtime: minutes.
 

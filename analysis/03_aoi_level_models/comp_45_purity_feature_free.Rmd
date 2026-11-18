@@ -23,7 +23,7 @@ An internal methods review found that the SpatialDecon tumour fraction used as a
 
 SpatialDecon is re-run with the same references, Q3 normalisation, negative-probe background and marker-selection rule as `comp_03b_deconv`, after every gene of every tested feature has been removed from the reference profiles before marker selection. The resulting feature-free tumour fraction is compared with the original. The pre-specified feature models are then refitted for both outcomes. For continuous PSA change (the `comp_35` design), the models are M1f (feature-free purity split) and M3f (M1f + signal-depth split). For non-responder vs responder (the `comp_43` design), they are M1f and M2e (ESTIMATE purity split). Fits use lmerTest with Kenward–Roger degrees of freedom and 500 patient-level permutations with the same seeds, with BH correction across strata × features within each outcome × model. Transcriptome-wide dream models with M1f are refitted without permutation.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Supplementary Table 98 (AOI-level models with a feature-free deconvolved tumour fraction; assembled by `comp_47_supp_tables_audit`)
 - Results: *FOLH1* section (nominal results persisting less consistently with the feature-free tumour fraction; minimum permutation FDR across features and strata)

@@ -21,7 +21,7 @@ knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
 
 Several Extended Data panels were first rendered by the version-1 and version-2 figure scripts (`comp_11_extended_figures`, `comp_14_revised_figures`). This step copies them into `results/Manuscript_v3/` under the numbering of the v3 figure set, together with the exported gene-set table (Supplementary Data 5). Later figure scripts and the supplementary-table builders read these files from `Manuscript_v3/`. No computation is done here.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Intermediate figure files used by `comp_25_supp_tables_v3`, `comp_28_figures_v4` and later steps
 - Supplementary Data 5 (gene sets), copied forward

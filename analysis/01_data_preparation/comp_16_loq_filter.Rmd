@@ -23,7 +23,7 @@ Defines which genes are measurable above background. For each AOI, the limit of 
 
 Within each compartment × timepoint stratum (control AOIs excluded), genes detected in at least 10% of AOIs form the gene universe used by every downstream analysis, including the patient pseudobulk; 5% and 20% sets are kept as sensitivity thresholds. Probe families prone to cross-hybridisation (*USP17L*, *PRAMEF*, *NBPF*, olfactory receptors) are excluded. The per-AOI percentage of genes above LOQ is also stored and defines the low-signal AOIs (< 5%) excluded in sensitivity analyses.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Extended Data Fig. 1b–e (per-AOI LOQ, % genes above LOQ, gene-universe size by threshold, detection of selected genes), via comp_28/comp_41
 - Supplementary Table 23 (LOQ and gene universes per stratum, via comp_25)

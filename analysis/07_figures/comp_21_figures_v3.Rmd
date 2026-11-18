@@ -21,9 +21,9 @@ knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
 
 Draws the third (interim) figure set, the first built on the negative-probe gene universe and the LOQ-universe pseudobulk analysis (comp_13b): main Figures 1–4 (design and background, *FOLH1* and AR activity, on-treatment p53 and interferon change, re-evaluation of earlier findings) and Extended Data panels for the deconvolution comparison, background and gene detection, purity, and the low-signal-AOI sensitivity analysis.
 
-Only `ExtendedDataFig2` (SpatialDecon versus BayesPrism) is carried into the final manuscript, as Extended Data Fig. 2 after title removal. The other figures were redrawn in comp_28 and comp_41. The script also writes the LOQ-universe p53 target table, which becomes Supplementary Table 26, and π₁ per stratum. The deconvolution method for the composition panel is read from an optional `decision.txt` and defaults to SpatialDecon, the method chosen in comp_19.
+Only `ExtendedDataFig2` (SpatialDecon versus BayesPrism) is carried into the final figure and table set, as Extended Data Fig. 2 after title removal. The other figures were redrawn in comp_28 and comp_41. The script also writes the LOQ-universe p53 target table, which becomes Supplementary Table 26, and π₁ per stratum. The deconvolution method for the composition panel is read from an optional `decision.txt` and defaults to SpatialDecon, the method chosen in comp_19.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Extended Data Fig. 2a–d (deconvolution comparison; notitle render via comp_44)
 - Supplementary Table 26 (`p53_core_target_paired_induction_LOQ.csv`, via comp_25)

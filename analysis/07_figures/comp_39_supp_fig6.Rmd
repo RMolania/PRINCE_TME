@@ -19,11 +19,11 @@ knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
 
 ## Overview
 
-Figure script that assembles the robustness and patient-selection analyses added after the v4 figure set into one six-panel figure. Panels: (a) pooled response effects from the Bayesian hierarchical model; (b) shrunken stratum-specific *FOLH1* effects; (c) *FOLH1* patient-permutation P from AOI-level mixed models with between- and within-patient purity terms; (d) cross-validated ROC curves for PSA50 failure; (e) decision curve; (f) the pre-specified radiobiology panel. The file is written as `Manuscript_v4/SupplementaryFig6` and becomes Supplementary Fig. 1 of the manuscript. No statistics are computed here; every value is read from the R13–R16 outputs.
+Figure script that assembles the robustness and patient-selection analyses added after the v4 figure set into one six-panel figure. Panels: (a) pooled response effects from the Bayesian hierarchical model; (b) shrunken stratum-specific *FOLH1* effects; (c) *FOLH1* patient-permutation P from AOI-level mixed models with between- and within-patient purity terms; (d) cross-validated ROC curves for PSA50 failure; (e) decision curve; (f) the pre-specified radiobiology panel. The file is written as `Manuscript_v4/SupplementaryFig6` and becomes Supplementary Fig. 1 of the study. No statistics are computed here; every value is read from the R13–R16 outputs.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
-- Supplementary Fig. 1a–f (released as `Manuscript_v4/SupplementaryFig6`, copied to `manuscript/figures/` by `tools/assemble_figures.sh`)
+- Supplementary Fig. 1a–f (released as `Manuscript_v4/SupplementaryFig6`, copied to `figures_and_tables/figures/` by `tools/assemble_figures_and_tables.sh`)
 
 **Pipeline step:** `./run_pipeline.sh --only 39_supp_fig6`. Approximate runtime: seconds.
 

@@ -23,7 +23,7 @@ Extends the cumulative Supplementary Tables workbook. It loads the v2 workbook w
 
 The workbook is built up step by step (`comp_15` → `comp_25` → `comp_29` → `comp_42` → `comp_47`). The sheets added here are carried unchanged into the final workbook, released as Supplementary_Tables_v6.xlsx.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Supplementary Tables 23–37 (sheets S23_LOQ_summary to S37_standR_perm)
 - Methods: Background and gene universe (S23–S26); Deconvolution (S27–S29); Reconciliation with earlier analyses and the standR workflow (S30–S33, S36, S37); Externally defined signatures (S34, S35)

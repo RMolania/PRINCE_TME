@@ -19,11 +19,11 @@ knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
 
 ## Overview
 
-This is the last step in building the Supplementary Tables workbook (comp_15 → 25 → 29 → 42 → 47). It came out of an internal audit of the workbook. In the v5 workbook, sheets S15–S21 still held the pre-LOQ pseudobulk results, while the manuscript text reports the analysis on the LOQ gene universe. This script replaces those sheets with the `C13_pseudobulk_LOQ` equivalents and recomputes π₁ (1 − π₀, limma `propTrueNull`, lfdr method) from the LOQ-universe limma results.
+This is the last step in building the Supplementary Tables workbook (comp_15 → 25 → 29 → 42 → 47). It came out of an internal audit of the workbook. In the v5 workbook, sheets S15–S21 still held the pre-LOQ pseudobulk results, while the study text reports the analysis on the LOQ gene universe. This script replaces those sheets with the `C13_pseudobulk_LOQ` equivalents and recomputes π₁ (1 − π₀, limma `propTrueNull`, lfdr method) from the LOQ-universe limma results.
 
 It also adds the robustness tables built by the later scripts: the feature-free purity adjustment (S98, comp_45), *FOLH1* adjusted for signal depth (S99, comp_46), technical confounding (S100, comp_49), on-treatment change of the immune microenvironment (S101, comp_50), the STAMPEDE signatures (S102, comp_51), pre-treatment *FOLH1* versus the on-treatment response (S103, comp_52) and the morphometric PSMA⁺ share (S104, comp_53). Each sheet carries its caption in row 1. Because `openxlsx` appends replaced sheets at the end, the workbook is reopened at the end and the sheets are put back in numerical order.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Supplementary Tables 15–21 (patient-level feature tests, transcriptome-wide summary, π₁, paired programmes, p53 targets, *FOLH1* primary–metastasis concordance, PSA50 prediction), replaced with LOQ-universe results
 - Supplementary Table 98 (AOI-level models with a feature-free SpatialDecon tumour fraction)

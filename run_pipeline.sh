@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # =============================================================================
-# PRINCE spatial transcriptomics: run the full analysis behind the manuscript.
+# PRINCE spatial transcriptomics: run the full analysis.
 #
 #   ./run_pipeline.sh                 extract code from every R Markdown file, run all default steps in order,
-#                                     then assemble the manuscript figures and supplementary files
+#                                     then assemble the final figures and supplementary files
 #   ./run_pipeline.sh --from STEP     start at STEP (step ids are listed in steps.tsv)
 #   ./run_pipeline.sh --only STEP     run a single step
 #   ./run_pipeline.sh --render STEP   knit one step's R Markdown to an HTML report in reports/
@@ -70,5 +70,5 @@ while IFS=$'\t' read -r st folder sc mode note; do
 done < steps.tsv
 
 if [ -z "$ONLY" ] && [ $LEGACY == 0 ]; then
-  bash tools/assemble_manuscript_files.sh && echo "[$(date '+%F %T')] PIPELINE DONE" >> "$LOG/_pipeline.log"
+  bash tools/assemble_figures_and_tables.sh && echo "[$(date '+%F %T')] PIPELINE DONE" >> "$LOG/_pipeline.log"
 fi

@@ -23,7 +23,7 @@ Extends the cumulative Supplementary Tables workbook (v3 from `comp_25_supp_tabl
 
 It also writes the gene-level Supplementary Data (patient-pseudobulk and AOI-level gene results; primary-to-bone gene results) and extends the gene-set table (Supplementary Data 5) with the programmes used for the Owen et al. comparison. Although it is numbered before them, this script reads the outputs of `comp_30`–`comp_38`, so it must be run after those analyses.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Supplementary Tables 38–85 (sheets S38_AOI_tw_summary to S85_sample_size), carried unchanged into the final workbook
 - Supplementary Data 1 (gene-level results: patient pseudobulk and AOI level), copied forward by `comp_42_supp_tables_v5`

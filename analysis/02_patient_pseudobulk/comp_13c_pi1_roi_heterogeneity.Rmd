@@ -23,7 +23,7 @@ Produces two small derived tables. (1) The estimated fraction of response-associ
 
 Part (1) reads the interim `C13_pseudobulk` limma results (comp_13, `filterByExpr` genes); the π₁ values in the final Supplementary Table 17 are recomputed from the LOQ-universe results by comp_47. Part (2) uses the LOQ gene universe and is the version reported.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Extended Data Fig. 4b (ROI-level summaries of *FOLH1* and Hallmark androgen response versus PSA change), via comp_28
 - Supplementary Table 60 (via comp_29)

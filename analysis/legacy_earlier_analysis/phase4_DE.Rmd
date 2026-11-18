@@ -21,14 +21,14 @@ knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "results_le
 
 This is a legacy script from the earlier all-site analysis (primary tumours plus metastatic biopsies from bone, lymph node and soft tissue). It is included for transparency and is not part of the bone-only pipeline. In each of the six archival and pre-treatment strata, it tested non-responders against responders at AOI level with limma-voom. Patient was treated as a blocking factor through two-pass `duplicateCorrelation` with `voomWithQualityWeights`, and the RUV-4 factors from phase3 were included as covariates. Models with and without the RUV covariates were compared, and a pseudobulk-by-patient model was run on one stratum (archival CD45⁺) as a cross-check of the blocking approach.
 
-These AOI-level results produced the large gene counts reported earlier. The current manuscript re-evaluates them at patient level (Extended Data Fig. 8a). Its frozen top tables with RUV covariates (`data/previous_analysis/Phase4_DE/*_toptable_with_RUV.csv`) are read by comp_18.
+These AOI-level results produced the large gene counts reported earlier. The current analysis re-evaluates them at patient level (Extended Data Fig. 8a). Its frozen top tables with RUV covariates (`data/previous_analysis/Phase4_DE/*_toptable_with_RUV.csv`) are read by comp_18.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Extended Data Fig. 8a (earlier AOI-level gene counts at FDR < 0.05), via comp_18 reading the frozen `data/previous_analysis/Phase4_DE/*_toptable_with_RUV.csv`
 - Results: Re-evaluation of earlier neuroendocrine, purity and bone-niche findings
 
-**Pipeline step:** `./run_pipeline.sh --legacy` (optional; not needed to reproduce the manuscript, whose frozen inputs are in `data/previous_analysis/`). Approximate runtime: minutes to tens of minutes (two-pass duplicateCorrelation per model).
+**Pipeline step:** `./run_pipeline.sh --legacy` (optional; not needed to reproduce the current analysis, whose frozen inputs are in `data/previous_analysis/`). Approximate runtime: minutes to tens of minutes (two-pass duplicateCorrelation per model).
 
 **Inputs**
 

@@ -23,7 +23,7 @@ This script asks whether the *FOLH1*–response association simply reflects how 
 
 The share is related to PSA change (Spearman, 5,000-permutation P, worst leave-one-out P, and lm with batch), to response group, rPFS, PSMA-PET SUVmean and tissue *FOLH1*. The script also tests whether adjusting for the share changes the *FOLH1*–PSA association. Paired pre- to on-treatment change is tested, and progression biopsies are described. As a separate technical check, pseudobulk *FOLH1* is refitted against PSA change with the log total nuclei of the pseudobulked AOIs as a covariate.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Supplementary Table 104 (assembled by comp_47)
 - Results: morphometric PSMA⁺ share only inconsistently associated with response; *FOLH1* association robust to nuclei count (Supplementary Table 100 text)

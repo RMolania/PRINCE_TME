@@ -33,7 +33,7 @@ Gene sets are scored with singscore as the primary method and with the mean z-sc
 
 Each score is related to outcome by two mixed models: score ~ PSA change (per 50%) + batch + (1 | patient), and score ~ non-responder + batch + (1 | patient) with intermediate patients excluded. FDR is controlled within stratum × collection. An association is called method-concordant when singscore and mean z-score give the same sign with P < 0.05. PSMA⁺ Screening and all Cycle1 strata are flagged as low confidence. The per-AOI scores saved here are reused by the crosstalk, outcome-model and first-set figure scripts.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Supplementary Table 6 (programme score versus outcome, all strata, singscore and z-score), written to the workbook by comp_11
 - Methods: Reconciliation with earlier analyses and the standR workflow (earlier AOI-level programme models)

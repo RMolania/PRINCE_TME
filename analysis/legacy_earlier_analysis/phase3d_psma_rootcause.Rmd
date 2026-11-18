@@ -23,12 +23,12 @@ This is a legacy script from the earlier all-site analysis (primary tumours plus
 
 For the six archival and pre-treatment strata, with the same filtering and RUV-4 setup as phase3, it compares the relative metric with an absolute measure (gene-wise between-batch sum of squares) for k = 0–5. It also identifies technical and biological drivers of the raw PCs, decomposes the change in positive-control F into numerator and denominator, measures the batch effect in control technical-replicate tissue, and flags AOI outliers by RLE. Of its outputs, only `batch_metrics_relative_vs_absolute.csv` is used in the current analysis, as a frozen input.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Supplementary Fig. 5a (relative versus absolute batch variance across RUV-4 k), plotted by comp_11 (its ExtendedDataFig1) from the frozen `data/previous_analysis/Phase3d_PSMA_RootCause/batch_metrics_relative_vs_absolute.csv`
 - Results: re-evaluation of earlier findings (RUV normalisation, Supplementary Fig. 5)
 
-**Pipeline step:** `./run_pipeline.sh --legacy` (optional; not needed to reproduce the manuscript, whose frozen inputs are in `data/previous_analysis/`). Approximate runtime: minutes.
+**Pipeline step:** `./run_pipeline.sh --legacy` (optional; not needed to reproduce the current analysis, whose frozen inputs are in `data/previous_analysis/`). Approximate runtime: minutes.
 
 **Inputs**
 

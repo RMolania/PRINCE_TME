@@ -30,7 +30,7 @@ Before the bone-only restriction, this script checks the sample and AOI labels a
 
 The comparison of the lab sheet with the colData labels, and the documented anatomical site of each block, are handled by a companion script (`comp_62a_lab_crosscheck.py`, named in the header). The documented sites were the basis for excluding the lymph-node and soft-tissue samples.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Methods: Patients and samples (documented anatomical site of every block; exclusion of ten lymph-node or soft-tissue biopsies and one lymph-node archival block)
 - Code availability: comp_62 (annotation audit and documented tissue sites)

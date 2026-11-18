@@ -23,7 +23,7 @@ Asks whether the main patient-level associations could be explained by differenc
 
 Four checks are made: (A) whether composition itself differs with response; (B) the key features (*FOLH1*, Hallmark androgen, HLA-I, Hallmark IFN-α, IFN-I/STING, p53 core) refitted as feature ~ PSA + batch with tumour, tumour + immune, or tumour + bone/marrow covariates; (C) whether composition shifts between paired pre- and on-treatment biopsies, and whether feature induction persists after regressing each patient's change on their change in tumour (and immune) fraction, where the intercept is the change expected with unchanged composition; and (D) transcriptome-wide PSA association with composition covariates.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Extended Data Fig. 4c (*FOLH1* vs PSA change with composition covariates), 4d (on-treatment induction adjusted for change in composition) and 4e (on-treatment programmes vs PSA change with composition covariates), drawn by `comp_28_figures_v4` (v4 ExtendedDataFig9)
 - Supplementary Tables 55–59 (S55_composition_vs_response to S59_tw_adj_composition), via `comp_29_supp_tables_v4`

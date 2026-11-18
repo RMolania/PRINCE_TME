@@ -23,7 +23,7 @@ Links patient-level tissue features with the imaging and ctDNA data of the compa
 
 The questions are: (A) does tissue *FOLH1* or AR activity track whole-body PSMA-PET avidity, FDG-PET and baseline ctDNA fraction? On-treatment tissue is compared with cycle-5 PSMA SUVmean. (B) Does tissue *FOLH1* add to PSMA-PET SUVmean in explaining PSA change (nested linear models, F-test)? (C) Do tissue features differ by ctDNA *TP53*/*PTEN*/*RB1* status? (D) Do on-treatment tissue features differ by 12-week RECIP response or by detectable (≥ 1%) week-12 ctDNA? (E) Where do *ATM*-, *SPOP*- and MMRd-altered patients fall within each stratum's distribution of tissue programmes?
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Extended Data Fig. 5a (tissue *FOLH1*/AR vs PET and ctDNA), 5b (R² of PSA change, SUVmean ± tissue *FOLH1*) and 5c (percentiles in *ATM*/*SPOP*/MMRd-altered patients), drawn by `comp_28_figures_v4` and assembled in `comp_41_figures_v5`
 - Fig. 4f (Wilcoxon P for on-treatment tissue scores by week-12 ctDNA detection), via `comp_28` panel `e3c`

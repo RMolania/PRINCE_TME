@@ -23,7 +23,7 @@ Estimates cell-type fractions for every AOI with BayesPrism, using the same tiss
 
 BayesPrism receives raw counts. Ribosomal, mitochondrial, *MALAT1* and sex-chromosome genes are removed with `cleanup.genes`, and markers are chosen with `select.marker` to keep the Gibbs sampling tractable. Each reference run is skipped when its output already exists.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Extended Data Fig. 2 (SpatialDecon versus BayesPrism), via comp_19 and comp_21
 - Supplementary Tables 27–29 (via comp_19/comp_25)

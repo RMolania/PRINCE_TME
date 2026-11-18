@@ -25,7 +25,7 @@ The chain is: `addPerROIQC` gene filter (min_count = 5, sample_fraction = 0.9, n
 
 The point of the comparison is the unit of inference: AOIs from the same patient are not independent, and RUV-4 protecting the outcome can inflate discovery. The calibration of these counts against shuffled labels is in `comp_23_standR_permutation`.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Extended Data Fig. 10a (genes at FDR < 0.05, NR vs R, standR AOI-independent vs patient-blocked vs patient pseudobulk), via `comp_24_ed_standR`
 - Supplementary Table 36 (S36_standR), via `comp_25_supp_tables_v3`

@@ -25,7 +25,7 @@ From advanced-disease (CRPC, mCRPC, NEPC) epithelial cells, a state's markers ar
 
 In PRINCE, signatures are scored with singscore over the stratum's LOQ-detected genes at AOI level, and at patient-pseudobulk level by singscore and mean z-score (at least five detected genes). The number of each signature's genes above LOQ is recorded, so poorly measured signatures can be flagged downstream.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Supplementary Table 66 (S66_PCCAT_state_signatures), via `comp_29_supp_tables_v4`
 - Scores used by the association, validation and critical-review analyses of the PCCAT tumour-state scores (`comp_33a`, `comp_33b`, `comp_33c`; Supplementary Tables 67–73)

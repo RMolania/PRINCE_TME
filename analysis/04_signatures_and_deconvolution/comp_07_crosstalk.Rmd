@@ -23,7 +23,7 @@ Each ROI contains co-located immune (CD45⁺) and tumour (PSMA⁺, PanCK⁺PSMA�
 
 Scores come from comp_05 (singscore on RUV-4 data), z-scored expression from comp_02, and tumour fraction from comp_03b. These AOI-level analyses are not calibrated by patient-level permutation and are hypothesis-generating.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Supplementary Fig. 4b–d (ligand–receptor co-expression and within-ROI tumour–immune coupling; drawn by comp_11)
 - Supplementary Table 12 (ligand–receptor co-expression versus outcome), written to the workbook by comp_11

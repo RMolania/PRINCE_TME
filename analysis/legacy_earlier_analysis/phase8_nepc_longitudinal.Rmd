@@ -23,12 +23,12 @@ This is a legacy script from the earlier all-site analysis (primary tumours plus
 
 The per-AOI scores (`data/previous_analysis/Phase8_NEPC_Longitudinal/all_scores_per_AOI.csv`, frozen) are read by comp_18. comp_18 tests whether the earlier reported correlation of the NEPC score with PSMA-PET tumour growth holds with AOIs or patients as observations. All tests in this script are at AOI level and do not account for repeated AOIs per patient.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Results: Re-evaluation of earlier neuroendocrine findings (NEPC score versus PSMA-PET tumour growth at AOI versus patient level), via comp_18 reading the frozen `data/previous_analysis/Phase8_NEPC_Longitudinal/all_scores_per_AOI.csv`
 - Supports the reconciliation shown in Extended Data Fig. 8 (comp_18)
 
-**Pipeline step:** `./run_pipeline.sh --legacy` (optional; not needed to reproduce the manuscript, whose frozen inputs are in `data/previous_analysis/`). Approximate runtime: a few minutes.
+**Pipeline step:** `./run_pipeline.sh --legacy` (optional; not needed to reproduce the current analysis, whose frozen inputs are in `data/previous_analysis/`). Approximate runtime: a few minutes.
 
 **Inputs**
 

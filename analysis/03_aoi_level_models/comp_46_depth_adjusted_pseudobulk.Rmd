@@ -19,9 +19,9 @@ knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
 
 ## Overview
 
-An internal audit found that the manuscript's statement on AOI signal depth had no script or output behind it, so this script was added to make that analysis reproducible. For each compartment × timepoint pseudobulk stratum, signal depth is the patient mean of log(% genes above LOQ) over the AOIs that formed the pseudobulk. The script reports the Spearman correlation of *FOLH1* with signal depth and of signal depth with maximal PSA change. It then compares the primary patient-level model, *FOLH1* ~ PSA change (per 50%) + batch (as in `comp_13b`), with the same model plus signal depth.
+An internal audit found that the reported result on AOI signal depth had no script or output behind it, so this script was added to make that analysis reproducible. For each compartment × timepoint pseudobulk stratum, signal depth is the patient mean of log(% genes above LOQ) over the AOIs that formed the pseudobulk. The script reports the Spearman correlation of *FOLH1* with signal depth and of signal depth with maximal PSA change. It then compares the primary patient-level model, *FOLH1* ~ PSA change (per 50%) + batch (as in `comp_13b`), with the same model plus signal depth.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Supplementary Table 99 (patient pseudobulk *FOLH1* vs PSA change with batch, before and after adjustment for signal depth; assembled by `comp_47_supp_tables_audit`)
 - Results: *FOLH1* section, signal-depth paragraph (correlation of *FOLH1* with signal depth in bone; P values before and after adjustment)

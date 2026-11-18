@@ -21,9 +21,9 @@ knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
 
 Metastasis analyses are restricted to bone so that pre- and on-treatment comparisons stay within a single tissue microenvironment. The script reads the laboratory tissue annotation and reshapes it to one row per patient × timepoint. It then removes every sample whose region summary documents a lymph-node or other soft-tissue lesion, together with the PMC-015 archival block, which came from an obturator lymph node rather than the prostate.
 
-Bone-only copies of the three input objects (raw counts, the QC-annotated object and the QC-filtered object) are written to `data/`, where every downstream script reads them. Per the manuscript, this removed ten metastasis biopsies and one archival block (107 AOIs), and one patient whose only profiled tissue was a lymph node, leaving 32 patients.
+Bone-only copies of the three input objects (raw counts, the QC-annotated object and the QC-filtered object) are written to `data/`, where every downstream script reads them. By design, this removed ten metastasis biopsies and one archival block (107 AOIs), and one patient whose only profiled tissue was a lymph node, leaving 32 patients.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Methods: Patients, samples and outcomes (restriction to bone metastases and exclusion of lymph-node and soft-tissue samples)
 - Intermediate results used by every downstream script (bone-only input objects)

@@ -23,9 +23,9 @@ The primary transcriptome-wide model regresses patient pseudobulk expression on 
 
 For each stratum and model, the script records the number of genes at FDR < 0.1 and < 0.05, π₁, the *FOLH1* and *TRPM8* statistics, the Spearman correlation of moderated t statistics with the reference model, and the maximum leverage of any patient. The aim is to show whether the sparse transcriptome-wide result and the direction of *FOLH1* are stable to reasonable alternative codings.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
-- Not cited directly in the manuscript, and its outputs are not assembled into a Supplementary Table. It is an internal sensitivity analysis of the primary transcriptome-wide model (Results: no gene at FDR < 0.05; Methods: Patient-level pseudobulk).
+- Not reported directly, and its outputs are not assembled into a Supplementary Table. It is an internal sensitivity analysis of the primary transcriptome-wide model (Results: no gene at FDR < 0.05; Methods: Patient-level pseudobulk).
 
 **Pipeline step:** `./run_pipeline.sh --only 54_psa_coding_sensitivity`. Approximate runtime: a few minutes (needs about 20 GB of free memory, checked at start).
 

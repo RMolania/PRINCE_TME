@@ -23,11 +23,11 @@ This is a legacy script from the earlier all-site analysis (primary tumours plus
 
 No output of this script is used in the current analysis.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
-- Not used by the manuscript (legacy; superseded by comp_03b/comp_17/comp_19)
+- Not used in the current analysis (legacy; superseded by comp_03b/comp_17/comp_19)
 
-**Pipeline step:** `./run_pipeline.sh --legacy` (optional; not needed to reproduce the manuscript, whose frozen inputs are in `data/previous_analysis/`). Approximate runtime: under a minute.
+**Pipeline step:** `./run_pipeline.sh --legacy` (optional; not needed to reproduce the current analysis, whose frozen inputs are in `data/previous_analysis/`). Approximate runtime: under a minute.
 
 **Inputs**
 

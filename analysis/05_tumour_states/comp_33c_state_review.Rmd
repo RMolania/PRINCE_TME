@@ -25,7 +25,7 @@ The sections cover: (1) simulated power with five non-responders; (2) single-gen
 
 The patient is the unit of inference throughout: tests use summed-count pseudobulk or per-patient AOI fractions. Purity is the SpatialDecon epithelial-tumour fraction, from the primary reference for archival AOIs and the bone reference otherwise. Partial correlations are rank-based. Control-tissue AOIs appear only as a technical reference for detection rates.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Supplementary Table 72 (patient-level NE marker detection vs response and *FOLH1*; `C2_NE_detection_patient_level_tests.csv`)
 - Supplementary Table 73 (power with five non-responders; `C1_power.csv`)

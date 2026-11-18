@@ -19,13 +19,13 @@ knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
 
 ## Overview
 
-The primary analysis of the manuscript. It asks which pre-specified genes and programmes are associated with PSA response, rPFS and on-treatment change when the patient is the unit of inference. Counts are summed over each patient's AOIs within each compartment × timepoint stratum, normalised by TMM and analysed with batch as a covariate. This is the code of `comp_13_pseudobulk_primary` with one change: the gene universe in each stratum is the set of genes above the negative-probe limit of quantification in at least 10% of AOIs (from `comp_16_loq_filter`), instead of `filterByExpr`.
+The primary analysis of the study. It asks which pre-specified genes and programmes are associated with PSA response, rPFS and on-treatment change when the patient is the unit of inference. Counts are summed over each patient's AOIs within each compartment × timepoint stratum, normalised by TMM and analysed with batch as a covariate. This is the code of `comp_13_pseudobulk_primary` with one change: the gene universe in each stratum is the set of genes above the negative-probe limit of quantification in at least 10% of AOIs (from `comp_16_loq_filter`), instead of `filterByExpr`.
 
 Key design choices: control-tissue AOIs (technical replicates) are excluded; genes selected in earlier analyses of these data form an explicitly exploratory family with its own FDR; robustness is assessed by excluding batch 3, which holds all intermediate patients, and by leave-one-patient-out refits; the PSA50 prediction is calibrated by label permutation.
 
 Environment switches allow sensitivity runs without changing the code. The pipeline runs it twice: by default (output `C13_pseudobulk_LOQ`) and with `EXCL_LOW=1 C13_OUT=C13_pseudobulk_LOQ_exclLow`, which drops AOIs with fewer than 5% of genes above LOQ. The annotation-audit switches (`AUDIT_EXCL`, `SITE_MODE`, `TW_NR`, `SKIP_PRED`, `AOI_KEEP`) are off by default and leave the default run unchanged.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Fig. 2a, f, h (pseudobulk *FOLH1* versus PSA change per stratum; primary versus bone *FOLH1*), via comp_28/comp_41
 - Fig. 3f (on-treatment PSMA⁺ *FOLH1* and rPFS), via comp_28/comp_41
@@ -380,7 +380,7 @@ pair_res <- bind_rows(pair_res); pair_delta <- bind_rows(pair_delta)
 ```
 
 ### E. Primary–metastasis concordance and heterogeneity
-Spearman correlation of pseudobulk *FOLH1* between matched archival primary and pre-treatment bone, per compartment, and the correlation of within-lesion *FOLH1* s.d. (patients with at least three pre-treatment ROIs) with PSA change. The ROI-summary heterogeneity analysis reported in the manuscript is in comp_13c.
+Spearman correlation of pseudobulk *FOLH1* between matched archival primary and pre-treatment bone, per compartment, and the correlation of within-lesion *FOLH1* s.d. (patients with at least three pre-treatment ROIs) with PSA change. The ROI-summary heterogeneity analysis reported in the study is in comp_13c.
 
 ```{r comp-13b-pseudobulk-loq-07}
 ## ---- E. concordance + heterogeneity (raw logCPM) ------------------------------------------

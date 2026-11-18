@@ -1,18 +1,15 @@
-# PRINCE spatial transcriptomics: analysis code
+# PRINCE NanoString Digital Spatial Profiling analysis: integrative analysis with ctDNA and clinical factors
 
-Code and documentation for the manuscript
-
-> **Tumour target expression and on-treatment tumour state are associated with outcome to [¹⁷⁷Lu]Lu-PSMA-617 plus pembrolizumab in metastatic prostate cancer**
-> Ramyar Molania *et al.* (manuscript version 6, November 2026)
+Author: Ramyar Molania
 
 GeoMx whole-transcriptome spatial profiling was applied to primary tumours (archival) and to pre-treatment (Screening) and on-treatment (Cycle 1) bone metastases from 32 patients in the PRINCE trial. Each biopsy was profiled in three compartments: CD45⁺ immune, PSMA⁺ tumour and PanCK⁺PSMA⁻ tumour (550 AOIs).
 
 Every analysis script is an annotated R Markdown file. Each one explains:
 - what the script does and why;
-- which manuscript figures, tables and statements it supports;
+- which figures, tables and results it supports;
 - what it reads and writes.
 
-The code chunks are the exact code used to produce the manuscript results.
+The code chunks are the exact code used to produce the results.
 
 ## Key design decisions
 - **Bone only.** Metastasis analyses use bone biopsies only. Samples documented as lymph-node or soft-tissue lesions are removed in `comp_00b_bone_cohort`, as is the PMC-015 archival block (a lymph node).
@@ -38,13 +35,13 @@ final_analysis/
 │   ├── 08_tables/                 supplementary tables and data
 │   └── legacy_earlier_analysis/   earlier all-site analysis whose results are re-evaluated (optional)
 ├── data/                      # inputs (see data/README.md; patient-level files are not tracked by git)
-├── manuscript/
+├── figures_and_tables/
 │   ├── figures/                   final Figures 1–6, Extended Data Figs 1–10, Supplementary Figs 1–6
 │   ├── supplementary/             Supplementary Tables (xlsx) and Supplementary Data 1–5 (created by the pipeline; not tracked)
 │   ├── figure_legends.md          every figure followed by its legend (renders on GitHub)
 │   └── PRINCE_figures_with_legends.pdf   the same as one PDF
 ├── tools/
-│   ├── assemble_manuscript_files.sh   final figure numbering, supplementary files, figure PDF
+│   ├── assemble_figures_and_tables.sh  final figure numbering, supplementary files, figure PDF
 │   └── make_figures_pdf.py            combined PDF of all figures with their legends
 ├── R_packages.csv             # R packages and versions used
 └── results/                   # created by the pipeline (not tracked)
@@ -69,7 +66,7 @@ PRINCE_MAX_WORKERS=10 ./run_pipeline.sh
 How the runner works:
 1. It extracts the code from every `.Rmd` into `.build/` with `knitr::purl`. The chunks hold the analysis code verbatim; the only extra chunk, used for rendering, is excluded from extraction.
 2. It runs the steps in the order of `steps.tsv`. Logs go to `results/logs/`, and the runner stops at the first failing step.
-3. It runs `tools/assemble_manuscript_files.sh`, which builds the final figure numbering, copies the supplementary files and builds the combined PDF of figures with their legends.
+3. It runs `tools/assemble_figures_and_tables.sh`, which builds the final figure numbering, copies the supplementary files and builds the combined PDF of figures with their legends.
 
 The longest steps are the AOI-level mixed models with patient permutation:
 - `35_pre` and `35_cycle1`: about 3.5 h;
@@ -79,13 +76,13 @@ The longest steps are the AOI-level mixed models with patient permutation:
 
 Random seeds are set inside each script.
 
-## Where each manuscript item comes from
+## Where each figure and table comes from
 
 Figure scripts were developed in successive versions (`Manuscript`, `_v2` … `_v5` under `results/`). The final figure set takes panels from several versions:
 - Figures 1–6 are produced by `comp_41_figures_v5`, which re-uses the code of `comp_28_figures_v4`.
-- The other figures, and the final numbering, come from `tools/assemble_manuscript_files.sh`.
+- The other figures, and the final numbering, come from `tools/assemble_figures_and_tables.sh`.
 
-| Manuscript item | Produced by |
+| Item | Produced by |
 |---|---|
 | Figures 1–6 | `comp_41_figures_v5` (rendered without titles via `comp_44_run_notitle`; uses `comp_28_figures_v4` code) |
 | Extended Data Fig. 1, 5 | `comp_41_figures_v5` |
@@ -100,13 +97,13 @@ Figure scripts were developed in successive versions (`Manuscript`, `_v2` … `_
 | Supplementary Data 3–4 | `comp_48_supp_data_3_4` |
 | Supplementary Data 5 | `comp_12_export_genesets` |
 
-The numbers quoted in the manuscript text are taken from the Supplementary Tables and from the result files named in each script's documentation. The index below lists every script.
+The reported numbers are taken from the Supplementary Tables and from the result files named in each script's documentation. The index below lists every script.
 
 ## Script index
 
 Steps run in this order (`steps.tsv`). Helper and optional scripts are listed at the end.
 
-| # | Step | Script | What it does | Manuscript items |
+| # | Step | Script | What it does | Figures, tables and results |
 |---|---|---|---|---|
 | 1 | `00a_qc` | [`comp_00a_qc`](analysis/01_data_preparation/comp_00a_qc.Rmd) | Segment-aware AOI and gene quality control (all biopsy sites) | Methods: Spatial transcriptomic profiling (AOI quality control that precedes the site restriction and the 550 analysed AOIs); Intermediate results used by comp_00b_bone_cohort and, through its bone-only objects, by every downstream analysis |
 | 2 | `00b_bone_cohort` | [`comp_00b_bone_cohort`](analysis/01_data_preparation/comp_00b_bone_cohort.Rmd) | Definition of the bone-only analysis cohort | Methods: Patients, samples and outcomes (restriction to bone metastases and exclusion of lymph-node and soft-tissue samples); Intermediate results used by every downstream script (bone-only input objects) |
@@ -122,7 +119,7 @@ Steps run in this order (`steps.tsv`). Helper and optional scripts are listed at
 | 12 | `05_signatures` | [`comp_05_signatures`](analysis/04_signatures_and_deconvolution/comp_05_signatures.Rmd) | Signature and pathway-activity scoring with patient mixed models | Supplementary Table 6 (programme score versus outcome, all strata, singscore and z-score), written to the workbook by comp_11; Methods: Reconciliation with earlier analyses and the standR workflow (earlier AOI-level programme models); Intermediate results … |
 | 13 | `06_longitudinal` | [`comp_06_longitudinal`](analysis/04_signatures_and_deconvolution/comp_06_longitudinal.Rmd) | Longitudinal programme change, variance partition and the treatment-induced PanCK⁺PSMA⁻ programme | Supplementary Fig. 3 (programme change in matched patients and primary–metastasis concordance; drawn by comp_11); Supplementary Table 10 (programme change per leg) and Supplementary Table 11 (treatment-induced PanCK⁺PSMA⁻ genes, FDR < 0.05), written to the … |
 | 14 | `07_crosstalk` | [`comp_07_crosstalk`](analysis/04_signatures_and_deconvolution/comp_07_crosstalk.Rmd) | Within-ROI compartment crosstalk, ligand–receptor co-expression and ROI heterogeneity | Supplementary Fig. 4b–d (ligand–receptor co-expression and within-ROI tumour–immune coupling; drawn by comp_11); Supplementary Table 12 (ligand–receptor co-expression versus outcome), written to the workbook by comp_11; Exploratory analyses; not calibrated … |
-| 15 | `08_outcome_models` | [`comp_08_outcome_models`](analysis/04_signatures_and_deconvolution/comp_08_outcome_models.Rmd) | Patient-level univariable outcome models and leave-one-patient-out elastic-net prediction of PSA50 | Supplementary Table 14 (patient-level univariable outcome models), written to the workbook by comp_11; Intermediate results used by comp_11 (its ExtendedDataFig9, which does not appear in the final manuscript) |
+| 15 | `08_outcome_models` | [`comp_08_outcome_models`](analysis/04_signatures_and_deconvolution/comp_08_outcome_models.Rmd) | Patient-level univariable outcome models and leave-one-patient-out elastic-net prediction of PSA50 | Supplementary Table 14 (patient-level univariable outcome models), written to the workbook by comp_11; Intermediate results used by comp_11 (its ExtendedDataFig9, which does not appear in the final figure and table set) |
 | 16 | `17_bayesprism` | [`comp_17_bayesprism`](analysis/04_signatures_and_deconvolution/comp_17_bayesprism.Rmd) | BayesPrism deconvolution with the SpatialDecon references | Extended Data Fig. 2 (SpatialDecon versus BayesPrism), via comp_19 and comp_21; Supplementary Tables 27–29 (via comp_19/comp_25); Supplementary Data 3 (per-AOI BayesPrism fractions, via comp_48); Methods: Deconvolution |
 | 17 | `19_deconv_compare` | [`comp_19_deconv_compare`](analysis/04_signatures_and_deconvolution/comp_19_deconv_compare.Rmd) | SpatialDecon versus BayesPrism on criteria with known answers | Extended Data Fig. 2a–d (between-batch variance in control tissue, compartment ordering, marker concordance, cross-method agreement), via comp_21; Supplementary Tables 27–29 (via comp_25); Results: A background-aware, patient-level framework (choice of … |
 | 18 | `18_nepc_purity_reconcile` | [`comp_18_nepc_purity_reconcile`](analysis/04_signatures_and_deconvolution/comp_18_nepc_purity_reconcile.Rmd) | Re-evaluation of earlier purity-adjusted, neuroendocrine and PET findings at patient level | Extended Data Fig. 8a (genes at FDR < 0.05, earlier AOI-level models versus patient pseudobulk under covariate sets), via comp_28/comp_41; Extended Data Fig. 9a–c (ESTIMATE purity versus tumour fraction, purity by response, earlier named genes under … |
@@ -153,9 +150,9 @@ Steps run in this order (`steps.tsv`). Helper and optional scripts are listed at
 | 43 | `51_grist_signatures` | [`comp_51_grist_signatures`](analysis/06_clinical_integration/comp_51_grist_signatures.Rmd) | STAMPEDE transcriptome signatures (Grist et al.) in PRINCE patient pseudobulk | Supplementary Table 102 (assembled by comp_47); Results: STAMPEDE signatures not associated with PSA change in any pre-treatment stratum; Discussion: generic prognostic classifiers versus target-specific markers; Methods: Signatures (27 of 61 STAMPEDE … |
 | 44 | `52_dose_interferon` | [`comp_52_dose_interferon`](analysis/06_clinical_integration/comp_52_dose_interferon.Rmd) | Pre-treatment target expression and the on-treatment interferon response | Fig. 4h (pre-treatment tumour *FOLH1* versus baseline-adjusted on-treatment IFN-α and HLA class I; drawn by comp_41 from `A_paired_values.csv`); Supplementary Table 103 (assembled by comp_47); Results: *FOLH1* versus on-treatment interferon response, … |
 | 45 | `53_psma_fraction` | [`comp_53_psma_fraction`](analysis/06_clinical_integration/comp_53_psma_fraction.Rmd) | Morphometric PSMA⁺ tumour share and nuclei-adjusted FOLH1 | Supplementary Table 104 (assembled by comp_47); Results: morphometric PSMA⁺ share only inconsistently associated with response; *FOLH1* association robust to nuclei count (Supplementary Table 100 text); Methods: Composition and morphometric analyses |
-| 46 | `54_psa_coding_sensitivity` | [`comp_54_psa_coding_sensitivity`](analysis/06_clinical_integration/comp_54_psa_coding_sensitivity.Rmd) | Sensitivity of the transcriptome-wide pseudobulk model to PSA coding and weighting | Not cited directly in the manuscript, and its outputs are not assembled into a Supplementary Table. It is an internal sensitivity analysis of the primary transcriptome-wide model (Results: no gene at FDR < 0.05; Methods: Patient-level pseudobulk). |
+| 46 | `54_psa_coding_sensitivity` | [`comp_54_psa_coding_sensitivity`](analysis/06_clinical_integration/comp_54_psa_coding_sensitivity.Rmd) | Sensitivity of the transcriptome-wide pseudobulk model to PSA coding and weighting | Not reported directly, and its outputs are not assembled into a Supplementary Table. It is an internal sensitivity analysis of the primary transcriptome-wide model (Results: no gene at FDR < 0.05; Methods: Patient-level pseudobulk). |
 | 47 | `13c_pi1_roi_heterogeneity` | [`comp_13c_pi1_roi_heterogeneity`](analysis/02_patient_pseudobulk/comp_13c_pi1_roi_heterogeneity.Rmd) | Non-null fraction (π₁) and ROI-level heterogeneity of FOLH1 and AR activity | Extended Data Fig. 4b (ROI-level summaries of *FOLH1* and Hallmark androgen response versus PSA change), via comp_28; Supplementary Table 60 (via comp_29); Methods: Composition and heterogeneity sensitivity analyses (spatial heterogeneity); π₁ table: … |
-| 48 | `10_main_figures` | [`comp_10_main_figures`](analysis/07_figures/comp_10_main_figures.Rmd) | First-draft main Figures 1–4 (superseded figure set) | Intermediate: first-draft main Figures 1–4 in `results/Manuscript/`; not used in the final manuscript, whose main figures are produced by comp_41_figures_v5 (via comp_28_figures_v4) |
+| 48 | `10_main_figures` | [`comp_10_main_figures`](analysis/07_figures/comp_10_main_figures.Rmd) | First-draft main Figures 1–4 (superseded figure set) | Intermediate: first-draft main Figures 1–4 in `results/Manuscript/`; not used in the final figure and table set, whose main figures are produced by comp_41_figures_v5 (via comp_28_figures_v4) |
 | 49 | `11_extended_figures` | [`comp_11_extended_figures`](analysis/07_figures/comp_11_extended_figures.Rmd) | First Extended Data figure set and the base Supplementary Tables workbook | Supplementary Fig. 2 (from ExtendedDataFig8 of this script); Supplementary Fig. 3 (from ExtendedDataFig10); Supplementary Fig. 4 (from ExtendedDataFig7); Supplementary Fig. 5 (from ExtendedDataFig1); Supplementary Tables 1–14 (sheets S1–S14 of the workbook … |
 | 50 | `12_export_genesets` | [`comp_12_export_genesets`](analysis/08_tables/comp_12_export_genesets.Rmd) | Export of gene-set definitions (Supplementary Data 5, base table) | Supplementary Data 5 (gene-set definitions); this base table is copied forward by comp_21b and extended with the Owen et al. comparison programmes by comp_29; Methods: Externally defined signatures (immune programmes, Supplementary Data 5) |
 | 51 | `14_revised_figures` | [`comp_14_revised_figures`](analysis/07_figures/comp_14_revised_figures.Rmd) | Interim figure set v2 from the first pseudobulk analysis, and the RUV versus pseudobulk comparison | Supplementary Fig. 6a, b (AOI-level RUV mixed models versus patient pseudobulk; unadjusted versus batch-adjusted pseudobulk), from `ExtendedDataFig9`; Supplementary Table 22 (`ruv_vs_pseudobulk_feature_comparison.csv`, via comp_15); Figures 1–4 and the p53 … |
@@ -164,26 +161,26 @@ Steps run in this order (`steps.tsv`). Helper and optional scripts are listed at
 | 54 | `21b_assemble_v3` | [`comp_21b_assemble_v3`](analysis/07_figures/comp_21b_assemble_v3.Rmd) | Assemble the v3 Extended Data figure set | Intermediate figure files used by `comp_25_supp_tables_v3`, `comp_28_figures_v4` and later steps; Supplementary Data 5 (gene sets), copied forward |
 | 55 | `24_ed_standR` | [`comp_24_ed_standR`](analysis/07_figures/comp_24_ed_standR.Rmd) | Figure: the standR workflow and its calibration (Extended Data Fig. 10) | Extended Data Fig. 10a,b (notitle render of this script by `comp_44_run_notitle`) |
 | 56 | `25_supp_tables_v3` | [`comp_25_supp_tables_v3`](analysis/08_tables/comp_25_supp_tables_v3.Rmd) | Supplementary Tables, v3 additions (S23–S37) | Supplementary Tables 23–37 (sheets S23_LOQ_summary to S37_standR_perm); Methods: Background and gene universe (S23–S26); Deconvolution (S27–S29); Reconciliation with earlier analyses and the standR workflow (S30–S33, S36, S37); Externally defined … |
-| 57 | `28_figures_v4` | [`comp_28_figures_v4`](analysis/07_figures/comp_28_figures_v4.Rmd) | Manuscript v4 figures: panel code reused for the final main and Extended Data figures | Fig. 1a,c; Fig. 2a,f,h; Fig. 3e,f; Fig. 4a–f; Fig. 5a–e; Fig. 6e (panels reused by `comp_41_figures_v5`); Extended Data Fig. 1b–g and Extended Data Fig. 5a–d (panels reused by `comp_41_figures_v5`); Extended Data Fig. 3 (= v4 ExtendedDataFig4), Extended … |
+| 57 | `28_figures_v4` | [`comp_28_figures_v4`](analysis/07_figures/comp_28_figures_v4.Rmd) | Figure set v4: panel code reused for the final main and Extended Data figures | Fig. 1a,c; Fig. 2a,f,h; Fig. 3e,f; Fig. 4a–f; Fig. 5a–e; Fig. 6e (panels reused by `comp_41_figures_v5`); Extended Data Fig. 1b–g and Extended Data Fig. 5a–d (panels reused by `comp_41_figures_v5`); Extended Data Fig. 3 (= v4 ExtendedDataFig4), Extended … |
 | 58 | `29_supp_tables_v4` | [`comp_29_supp_tables_v4`](analysis/08_tables/comp_29_supp_tables_v4.Rmd) | Supplementary Tables, v4 additions (S38–S85) and Supplementary Data 1, 2 and 5 | Supplementary Tables 38–85 (sheets S38_AOI_tw_summary to S85_sample_size), carried unchanged into the final workbook; Supplementary Data 1 (gene-level results: patient pseudobulk and AOI level), copied forward by `comp_42_supp_tables_v5`; Supplementary … |
-| 59 | `39_supp_fig6` | [`comp_39_supp_fig6`](analysis/07_figures/comp_39_supp_fig6.Rmd) | Supplementary figure: Bayesian pooling, purity-split AOI models, selection models and radiobiology | Supplementary Fig. 1a–f (released as `Manuscript_v4/SupplementaryFig6`, copied to `manuscript/figures/` by `tools/assemble_figures.sh`) |
-| 60 | `41_figures_v5` | [`comp_41_figures_v5`](analysis/07_figures/comp_41_figures_v5.Rmd) | Main figures 1–6 and Extended Data figures for the manuscript | Fig. 1a–c, Fig. 2a–h, Fig. 3a–f, Fig. 4a–h, Fig. 5a–e, Fig. 6a–e; Extended Data Fig. 1a–g (`Manuscript_v5/ExtendedDataFig1`); Extended Data Fig. 5a–d (`Manuscript_v5/ExtendedDataFig3`); Extended Data Figs 3, 4, 6, 7, 8 and 9 (v4 Extended Data Figs 4, 9, 8, … |
+| 59 | `39_supp_fig6` | [`comp_39_supp_fig6`](analysis/07_figures/comp_39_supp_fig6.Rmd) | Supplementary figure: Bayesian pooling, purity-split AOI models, selection models and radiobiology | Supplementary Fig. 1a–f (released as `Manuscript_v4/SupplementaryFig6`, copied to `figures_and_tables/figures/` by `tools/assemble_figures_and_tables.sh`) |
+| 60 | `41_figures_v5` | [`comp_41_figures_v5`](analysis/07_figures/comp_41_figures_v5.Rmd) | Main figures 1–6 and Extended Data figures (final set) | Fig. 1a–c, Fig. 2a–h, Fig. 3a–f, Fig. 4a–h, Fig. 5a–e, Fig. 6a–e; Extended Data Fig. 1a–g (`Manuscript_v5/ExtendedDataFig1`); Extended Data Fig. 5a–d (`Manuscript_v5/ExtendedDataFig3`); Extended Data Figs 3, 4, 6, 7, 8 and 9 (v4 Extended Data Figs 4, 9, 8, … |
 | 61 | `42_supp_tables_v5` | [`comp_42_supp_tables_v5`](analysis/08_tables/comp_42_supp_tables_v5.Rmd) | Supplementary Tables: add outcome-framing and categorical AOI-level sheets (S86–S97) | Supplementary Tables 86–95 (tumour burden, ctDNA categories, PET × tissue stratification, genotype–phenotype and prognostic factors); Supplementary Tables 96–97 (categorical non-responder vs responder AOI-level models); Supplementary Data 1–5 (copied … |
 | 62 | `47_supp_tables_audit` | [`comp_47_supp_tables_audit`](analysis/08_tables/comp_47_supp_tables_audit.Rmd) | Supplementary Tables: LOQ-universe replacements and robustness tables S98–S104 | Supplementary Tables 15–21 (patient-level feature tests, transcriptome-wide summary, π₁, paired programmes, p53 targets, *FOLH1* primary–metastasis concordance, PSA50 prediction), replaced with LOQ-universe results; Supplementary Table 98 (AOI-level models … |
 | 63 | `48_supp_data_3_4` | [`comp_48_supp_data_3_4`](analysis/08_tables/comp_48_supp_data_3_4.Rmd) | Supplementary Data 3 and 4: per-AOI deconvolution fractions and programme scores | Supplementary Data 3 (per-AOI deconvolution fractions, SpatialDecon and BayesPrism); Supplementary Data 4 (per-AOI and per-patient programme scores) |
 | optional | `62_annotation_audit` | [`comp_62_annotation_audit`](analysis/01_data_preparation/comp_62_annotation_audit.Rmd) | Expression-based audit of sample and AOI annotation (all sites) | Methods: Patients and samples (documented anatomical site of every block; exclusion of ten lymph-node or soft-tissue biopsies and one lymph-node archival block); Code availability: comp_62 (annotation audit and documented tissue sites); Intermediate … |
-| helper | `44_run_notitle` | [`comp_44_run_notitle`](analysis/07_figures/comp_44_run_notitle.Rmd) | Re-render a figure script without panel titles and subtitles | Produces the title-free files used for Figs 1–6 and Extended Data Figs 1 and 3–9 (via `comp_41_figures_v5`), Extended Data Fig. 2 (via `comp_21_figures_v3`) and Extended Data Fig. 10 (via `comp_24_ed_standR`), as copied by `tools/assemble_figures.sh` |
-| helper | `00_guard` | [`comp_00_guard`](analysis/00_setup/comp_00_guard.Rmd) | Shared set-up: repository paths, thread limits and output guard | No manuscript item directly; shared infrastructure for every analysis script (Code availability). |
+| helper | `44_run_notitle` | [`comp_44_run_notitle`](analysis/07_figures/comp_44_run_notitle.Rmd) | Re-render a figure script without panel titles and subtitles | Produces the title-free files used for Figs 1–6 and Extended Data Figs 1 and 3–9 (via `comp_41_figures_v5`), Extended Data Fig. 2 (via `comp_21_figures_v3`) and Extended Data Fig. 10 (via `comp_24_ed_standR`), as copied by … |
+| helper | `00_guard` | [`comp_00_guard`](analysis/00_setup/comp_00_guard.Rmd) | Shared set-up: repository paths, thread limits and output guard | No figure or table directly; shared infrastructure for every analysis script. |
 | legacy | `phase3_normalization` | [`phase3_normalization`](analysis/legacy_earlier_analysis/phase3_normalization.Rmd) | Legacy: RUV-4 normalisation of pre-treatment strata (earlier all-site analysis) | Legacy. Its RUV factors feed phase4 and phase5, whose frozen top tables (`data/previous_analysis/Phase4_DE`, `Phase5_Purity`) are re-evaluated by comp_18 (Extended Data Fig. 8a).; Background for Supplementary Fig. 5 (RUV-4 normalisation of the earlier … |
 | legacy | `phase3d_psma_rootcause` | [`phase3d_psma_rootcause`](analysis/legacy_earlier_analysis/phase3d_psma_rootcause.Rmd) | Legacy: why PSMA⁺ strata appeared to resist batch correction | Supplementary Fig. 5a (relative versus absolute batch variance across RUV-4 k), plotted by comp_11 (its ExtendedDataFig1) from the frozen `data/previous_analysis/Phase3d_PSMA_RootCause/batch_metrics_relative_vs_absolute.csv`; Results: re-evaluation of … |
 | legacy | `phase4_DE` | [`phase4_DE`](analysis/legacy_earlier_analysis/phase4_DE.Rmd) | Legacy: AOI-level non-responder versus responder differential expression with RUV covariates | Extended Data Fig. 8a (earlier AOI-level gene counts at FDR < 0.05), via comp_18 reading the frozen `data/previous_analysis/Phase4_DE/*_toptable_with_RUV.csv`; Results: Re-evaluation of earlier neuroendocrine, purity and bone-niche findings |
 | legacy | `phase5_purity_covariate` | [`phase5_purity_covariate`](analysis/legacy_earlier_analysis/phase5_purity_covariate.Rmd) | Legacy: ESTIMATE tumour purity as a covariate in the AOI-level differential expression | Extended Data Fig. 8a (earlier AOI-level gene counts with ESTIMATE purity as a covariate), via comp_18 reading the frozen `data/previous_analysis/Phase5_Purity/*_toptable_with_purity.csv`; Results: Re-evaluation of earlier neuroendocrine, purity and … |
-| legacy | `phase6_spatialdecon` | [`phase6_spatialdecon`](analysis/legacy_earlier_analysis/phase6_spatialdecon.Rmd) | Legacy: SpatialDecon (safeTME) deconvolution and CD45⁺ composition | Not used by the manuscript (legacy; superseded by the tissue-matched deconvolution of comp_03b/comp_17/comp_19) |
-| legacy | `phase6b_spatialdecon_fix` | [`phase6b_spatialdecon_fix`](analysis/legacy_earlier_analysis/phase6b_spatialdecon_fix.Rmd) | Legacy: corrected SpatialDecon proportions from beta.granular | Not used by the manuscript (legacy; superseded by comp_03b/comp_17/comp_19) |
+| legacy | `phase6_spatialdecon` | [`phase6_spatialdecon`](analysis/legacy_earlier_analysis/phase6_spatialdecon.Rmd) | Legacy: SpatialDecon (safeTME) deconvolution and CD45⁺ composition | Not used in the current analysis (legacy; superseded by the tissue-matched deconvolution of comp_03b/comp_17/comp_19) |
+| legacy | `phase6b_spatialdecon_fix` | [`phase6b_spatialdecon_fix`](analysis/legacy_earlier_analysis/phase6b_spatialdecon_fix.Rmd) | Legacy: corrected SpatialDecon proportions from beta.granular | Not used in the current analysis (legacy; superseded by comp_03b/comp_17/comp_19) |
 | legacy | `phase8_nepc_longitudinal` | [`phase8_nepc_longitudinal`](analysis/legacy_earlier_analysis/phase8_nepc_longitudinal.Rmd) | Legacy: exploratory NEPC and AR scores and longitudinal trajectories | Results: Re-evaluation of earlier neuroendocrine findings (NEPC score versus PSMA-PET tumour growth at AOI versus patient level), via comp_18 reading the frozen `data/previous_analysis/Phase8_NEPC_Longitudinal/all_scores_per_AOI.csv`; Supports the … |
 
 ## Notes
 
 - `results/`, `.build/` and patient-level input files are not tracked by git. The pipeline regenerates `results/` from the inputs.
-- The earlier all-site analysis (`analysis/legacy_earlier_analysis/`) is included for provenance. Its outputs used in the manuscript are provided as frozen tables in `data/previous_analysis/`. It is not run by default.
+- The earlier all-site analysis (`analysis/legacy_earlier_analysis/`) is included for provenance. Its outputs used in the current analysis are provided as frozen tables in `data/previous_analysis/`. It is not run by default.
 - Run the scripts through `run_pipeline.sh`. It sets `PRINCE_ROOT` and extracts the code; the scripts source the shared set-up from `.build/comp_00_guard.R`.

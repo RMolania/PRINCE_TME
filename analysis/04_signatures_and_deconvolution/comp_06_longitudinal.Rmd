@@ -27,7 +27,7 @@ Programmes are compared across timepoints, so the scores must be on a common sca
 
 The matched-patient counts in the script header predate the bone-only restriction. The bone-only counts are in `results/C1_clinical/matched_sample_availability.csv`.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Supplementary Fig. 3 (programme change in matched patients and primary–metastasis concordance; drawn by comp_11)
 - Supplementary Table 10 (programme change per leg) and Supplementary Table 11 (treatment-induced PanCK⁺PSMA⁻ genes, FDR < 0.05), written to the workbook by comp_11

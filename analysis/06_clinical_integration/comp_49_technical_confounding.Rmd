@@ -23,7 +23,7 @@ This script asks whether the main patient-level findings could be explained by t
 
 The analysis has five parts. (A) Each technical factor is related to PSA change (Spearman) and to non-responder versus responder status (Wilcoxon), with BH correction across all tests. (B) Key features (*FOLH1*, Hallmark androgen response, HLA class I, MHC-I, the IFN/STING programme, Hallmark IFN-α and p53 programmes) are refitted as `feature ~ PSA + batch`: with each factor added in turn, with the continuous factors added jointly, and with the slide-processing experiment in place of batch. (C) Paired pre- to on-treatment induction is re-estimated after regressing each patient's change on the change in technical factors; the intercept is the change expected at constant technical quality. (D) Principal components of each pseudobulk stratum are correlated with PSA change and with the technical factors. (E) The transcriptome-wide pseudobulk model is refitted with technical covariates, and π₁ and FDR counts are recorded.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Supplementary Table 100 (technical confounding; assembled by comp_47)
 - Results: transcriptome-wide signal and its instability to technical covariates (π₁ 0–15% in pre-treatment bone after adjustment; PC1 tracks signal depth)

@@ -21,14 +21,14 @@ knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "results_le
 
 This is a legacy script from the earlier all-site analysis (primary tumours plus metastatic biopsies from bone, lymph node and soft tissue). It is included for transparency and is not part of the bone-only pipeline. It normalised the six archival and pre-treatment compartment strata with RUV-4. RUV-III-PRPS could not be used because the intermediate response group lay entirely within one sequencing batch, so no cross-batch pseudo-replicates existed for it. RUV-4 instead estimates unwanted factors from negative-control genes: the 2,000 singscore stable genes that were retained in the stratum. Genes above LOQ in at least 10% of AOIs were kept, and control AOIs were excluded.
 
-The number of factors k was chosen over a sweep from 1 to 8. Batch variance was measured as the relative metric (maximum batch R² over the top five PCs); positive-control marker F ratios and RLE spread were also recorded. The smallest k was chosen that reduced batch R² by at least 15% while keeping the marker F ratio within 0.7–1.5. The current manuscript shows that this relative metric is misleading for PSMA⁺ AOIs (Supplementary Fig. 5; see phase3d). The unwanted factors estimated here were used as covariates in the earlier AOI-level differential expression (phase4).
+The number of factors k was chosen over a sweep from 1 to 8. Batch variance was measured as the relative metric (maximum batch R² over the top five PCs); positive-control marker F ratios and RLE spread were also recorded. The smallest k was chosen that reduced batch R² by at least 15% while keeping the marker F ratio within 0.7–1.5. The current analysis shows that this relative metric is misleading for PSMA⁺ AOIs (Supplementary Fig. 5; see phase3d). The unwanted factors estimated here were used as covariates in the earlier AOI-level differential expression (phase4).
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Legacy. Its RUV factors feed phase4 and phase5, whose frozen top tables (`data/previous_analysis/Phase4_DE`, `Phase5_Purity`) are re-evaluated by comp_18 (Extended Data Fig. 8a).
 - Background for Supplementary Fig. 5 (RUV-4 normalisation of the earlier analysis; the frozen Phase3d metrics are plotted by comp_11)
 
-**Pipeline step:** `./run_pipeline.sh --legacy` (optional; not needed to reproduce the manuscript, whose frozen inputs are in `data/previous_analysis/`). Approximate runtime: minutes.
+**Pipeline step:** `./run_pipeline.sh --legacy` (optional; not needed to reproduce the current analysis, whose frozen inputs are in `data/previous_analysis/`). Approximate runtime: minutes.
 
 **Inputs**
 

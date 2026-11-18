@@ -23,9 +23,9 @@ This file is sourced at the top of every analysis script (from `.build/`, where 
 
 BLAS and OpenMP threads are fixed at one, and the number of parallel workers used by `dream`, `variancePartition` and similar steps is read from `PRINCE_MAX_WORKERS` (default 4). This keeps the multi-process steps from oversubscribing cores and keeps results reproducible across machines. The file also provides a free-RAM check (macOS `vm_stat`; it does not block on other systems) and `out_path()`, which creates `results/<step>/` and refuses to write into the input data folder.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
-- No manuscript item directly; shared infrastructure for every analysis script (Code availability).
+- No figure or table directly; shared infrastructure for every analysis script.
 
 **Pipeline step:** not run on its own; used by other scripts (see Overview). Approximate runtime: seconds.
 

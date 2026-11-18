@@ -23,7 +23,7 @@ Loading the full PCCAT prostate cancer single-cell atlas takes a large amount of
 
 Unlike the analysis scripts, this step writes its output to `data/refs/`, because the subsample is treated as a derived reference input rather than a result.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Methods: Deconvolution (PCCAT primary-tumour and castration-resistant/NEPC tumour profiles)
 - Intermediate results used by comp_03b_deconv and by later scripts that reuse the subsample (comp_17_bayesprism, comp_20_external_ne_signatures, comp_33_pccat_states, comp_33b_state_validation)

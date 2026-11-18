@@ -21,9 +21,9 @@ knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
 
 This is the earlier AOI-level differential-expression arm. It runs in each of the nine RUV-4-normalised strata from comp_02, where artefact probes and RLE outlier AOIs have already been removed. Expression is modelled with `variancePartition::dream` (voomWithDreamWeights), with a random intercept per patient so that AOIs from the same patient are not treated as independent. The outcome is continuous PSA change, capped at +100% and scaled per 50%, and the model is fitted under three specifications: A, PSA + RUV-4 factors W; B, PSA + study batch (no RUV); C, PSA + W + logit deconvolved tumour fraction. A non-responder versus responder contrast on specification A is fitted in baseline strata with at least three non-responders; Cycle1 strata are excluded.
 
-Genes are called robust only if all of the following hold: FDR < 0.1 in at least two of A/B/C; the same sign in all three specifications and in a patient-level pseudobulk limma-voom fit (PSA + majority batch); and sign stability of at least 90% across leave-one-patient-out pseudobulk refits. Gene-set enrichment uses fgsea on specification-A t statistics (Hallmark, Reactome, KEGG, GO:BP; 15–500 genes). The manuscript's primary inference is patient-level pseudobulk on the LOQ gene universe, run in later scripts. These AOI-level results form part of the reconciliation with earlier analyses.
+Genes are called robust only if all of the following hold: FDR < 0.1 in at least two of A/B/C; the same sign in all three specifications and in a patient-level pseudobulk limma-voom fit (PSA + majority batch); and sign stability of at least 90% across leave-one-patient-out pseudobulk refits. Gene-set enrichment uses fgsea on specification-A t statistics (Hallmark, Reactome, KEGG, GO:BP; 15–500 genes). The study's primary inference is patient-level pseudobulk on the LOQ gene universe, run in later scripts. These AOI-level results form part of the reconciliation with earlier analyses.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Supplementary Table 7 (robust genes), Supplementary Table 8 (DE summary per stratum) and Supplementary Table 9 (fgsea, FDR < 0.05), written to the workbook by comp_11
 - Methods: Reconciliation with earlier analyses and the standR workflow (earlier AOI-level models)

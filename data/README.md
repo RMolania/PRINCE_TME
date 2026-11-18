@@ -2,7 +2,7 @@
 
 All analyses read their inputs from this folder (`PRINCE_DIR` in the code). `reference/` is `PMCC_DIR`.
 Patient-level and unpublished trial data are **not** tracked by git (see `.gitignore`). They must be placed here
-before running the pipeline. MD5 checksums of the exact files used for the manuscript are listed below.
+before running the pipeline. MD5 checksums of the exact files used for the analysis are listed below.
 
 | File | Content | Source | In git |
 |---|---|---|---|

@@ -25,7 +25,7 @@ Stage 1 works in the PCCAT atlas alone. Each signature is re-derived with a 5-fo
 
 The signatures were defined only from the external atlas, so no PRINCE outcome data enter their definition. Control-tissue AOIs are technical replicates and are used here only to estimate measurement noise.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Supplementary Table 67 (leave-donor-out specificity of PCCAT state signatures; `B1_leave_donor_out_AUC.csv`)
 - Supplementary Table 68 (detection above LOQ, coherence and contamination; `B2_measurement_quality_by_stratum.csv`)

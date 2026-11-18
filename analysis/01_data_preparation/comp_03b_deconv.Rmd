@@ -23,7 +23,7 @@ Each AOI is deconvolved with a single-cell reference that matches its tissue of 
 
 To validate the estimates, fractions are correlated (Spearman) with canonical marker expression, and median lineage fractions are compared across compartments. Fine cell types are also grouped into coarse lineages (epithelial tumour, T/NK, B/plasma, myeloid, stromal, endothelial and, in bone, bone cells and erythroid/progenitor cells). The epithelial-tumour fraction from this script is the tumour-fraction covariate in later models. For each stratum, centred log-ratio (CLR) transformed fractions are tested against outcome with mixed models, CLR ~ PSA change (per 50%) + batch + (1 | patient), and with a non-responder versus responder contrast (intermediate patients excluded).
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Supplementary Table 4 (deconvolution validation against marker genes) and Supplementary Table 5 (cell-type fraction versus outcome), written to the workbook by comp_11
 - Fig. 1c (mean SpatialDecon composition per compartment in primary tumour and bone; drawn by comp_28/comp_41 from these fractions)

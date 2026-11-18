@@ -21,11 +21,11 @@ knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data/raw")
 
 This script applies AOI-level and gene-level quality control to the full GeoMx Whole Transcriptome Atlas object. It runs before the bone-only restriction, so it covers every biopsy site and the control tissue microarray. The main SummarizedExperiment does not contain the negative-control (NegProbe) probe counts. These are recovered from a separate count file by rebuilding its column names from each AOI's `segment_display_name` (sample | ROI | segment) with `make.names()`. Before the mapping is used, it is checked by correlating raw counts for randomly chosen shared genes in randomly chosen AOIs. AOIs whose names are duplicated (the same tissue rescanned in another DSP experiment) are flagged as ambiguous.
 
-Each AOI's background is the geometric mean of its negative probes. At this QC stage the limit of quantification is set to 2 × that geometric mean. The manuscript's primary gene universes use a different LOQ (geometric mean × geometric s.d.², with a floor of 2), computed in a later step. An AOI fails QC if sequencing saturation is below 50% or fewer than 5% of genes exceed its LOQ. AOIs without a negative-probe mapping cannot be assessed and are not carried forward. A gene is kept if it exceeds LOQ in at least 10% of QC-passing AOIs in at least one segment. QC failures are cross-tabulated by segment, timepoint and response group, to check that exclusions do not concentrate in one outcome group.
+Each AOI's background is the geometric mean of its negative probes. At this QC stage the limit of quantification is set to 2 × that geometric mean. The study's primary gene universes use a different LOQ (geometric mean × geometric s.d.², with a floor of 2), computed in a later step. An AOI fails QC if sequencing saturation is below 50% or fewer than 5% of genes exceed its LOQ. AOIs without a negative-probe mapping cannot be assessed and are not carried forward. A gene is kept if it exceeds LOQ in at least 10% of QC-passing AOIs in at least one segment. QC failures are cross-tabulated by segment, timepoint and response group, to check that exclusions do not concentrate in one outcome group.
 
 The script sets its own paths rather than sourcing `comp_00_guard.R`. It reads from `data/raw/` and writes the QC'd objects to `data/interim/`, from where `comp_00b_bone_cohort` takes them.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Methods: Spatial transcriptomic profiling (AOI quality control that precedes the site restriction and the 550 analysed AOIs)
 - Intermediate results used by comp_00b_bone_cohort and, through its bone-only objects, by every downstream analysis

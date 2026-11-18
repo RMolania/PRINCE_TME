@@ -21,12 +21,12 @@ knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
 
 The patient is the unit of inference here. Each patient's features are averaged over ROIs at baseline (Archival and Screening separately). They comprise focus programmes and genes from the comp_05 singscores in each compartment, deconvolved lineage and selected cell-type fractions from comp_03b, and a block of clinical and ctDNA features from comp_01 (TP53/PTEN/RB1 and other alterations, ctDNA fraction, alkaline phosphatase, PSMA-PET SUVmean and volume, age, ctDNA TMB). (1) Univariable models: each feature is related to maximal PSA change (Spearman) and to rPFS and PSA-PFS (Cox, per s.d., likelihood-ratio P), with BH-FDR within feature block. (2) Prediction: PSA50 is predicted for each block (and for Screening + clinical) by leave-one-patient-out elastic net (glmnet, α = 0.5, λ chosen by inner leave-one-out cross-validation). Missing values are median-imputed within each training fold. Performance is the out-of-fold AUC with a 2,000-sample bootstrap CI, and the script reports how often each feature is selected across folds.
 
-With roughly 20–30 patients per block, all of these results are hypothesis-generating. The manuscript's patient-selection and exploratory prediction analyses were redone in later scripts with repeated cross-validation and label permutation.
+With roughly 20–30 patients per block, all of these results are hypothesis-generating. The study's patient-selection and exploratory prediction analyses were redone in later scripts with repeated cross-validation and label permutation.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Supplementary Table 14 (patient-level univariable outcome models), written to the workbook by comp_11
-- Intermediate results used by comp_11 (its ExtendedDataFig9, which does not appear in the final manuscript)
+- Intermediate results used by comp_11 (its ExtendedDataFig9, which does not appear in the final figure and table set)
 
 **Pipeline step:** `./run_pipeline.sh --only 08_outcome_models`. Approximate runtime: minutes.
 

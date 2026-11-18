@@ -23,7 +23,7 @@ This script extends the paired p53 and interferon analysis of comp_13b to a fixe
 
 Change is tested by Wilcoxon signed-rank test, with BH correction within compartment × family. Changes with FDR < 0.1 are checked in two ways: by adjusting each patient's change for the change in tumour fraction and in library size and signal depth (testing the intercept), and by an AOI-level mixed model `feature ~ timepoint + (1 | patient)` with Kenward–Roger degrees of freedom. The script also relates change and on-treatment level to PSA change. Library-size-weighted SpatialDecon lineage and selected cell-type fractions are analysed in the same paired design on the logit scale.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Extended Data Fig. 4f,g (on-treatment change of immune programmes, genes and deconvolved fractions; plotted by comp_28 code within comp_41)
 - Supplementary Table 101 (assembled by comp_47)

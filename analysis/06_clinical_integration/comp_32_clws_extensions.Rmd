@@ -27,7 +27,7 @@ Five extensions prompted by a comparison with the CLWS pipeline. The clinical gr
 4. **RUV-III anchored on the control tissue.** The control-tissue AOIs are technical replicates and carry no response information, so they can anchor RUV-III without using the outcome. k is chosen on the between-batch variance of the controls, and patient means of the adjusted data are retested. The controls are used for normalisation only and are excluded from every association test.
 5. **Response-specific primary-to-bone change.** Paired pseudobulk ~ patient + site + site:PSA, gene-wise with 200 patient permutations, and programme-level patient Δ vs PSA.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Supplementary Table 61 (S61_pooled_FOLH1_programmes: 2a pooled feature models)
 - Supplementary Table 62 (S62_pooled_genewise: 2b pooled gene-wise summary)
@@ -36,7 +36,7 @@ Five extensions prompted by a comparison with the CLWS pipeline. The clinical gr
 - Supplementary Table 65 (S65_RUVIII: key features after RUV-III on control replicates)
 - All via `comp_29_supp_tables_v4`
 - Methods: Composition and heterogeneity sensitivity analyses (pooling across strata, site × PSA change, alternative normalisations and RUV-III)
-- The camera gene-set results (part 3), the normalisation-induction table, the RUV-III k-selection and transcriptome tables, the pooled top-200 genes and the gene-wise site × response table are not reported in the manuscript tables (intermediate/supporting)
+- The camera gene-set results (part 3), the normalisation-induction table, the RUV-III k-selection and transcriptome tables, the pooled top-200 genes and the gene-wise site × response table are not reported in the study tables (intermediate/supporting)
 
 **Pipeline step:** `./run_pipeline.sh --only 32_clws_extensions`. Approximate runtime: hours: several permutation loops (500 lmer refits per feature and scope; 100–200 limma/camera refits per stratum), parallelised over PRINCE_MAX_WORKERS.
 

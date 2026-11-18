@@ -21,13 +21,13 @@ knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "results_le
 
 This is a legacy script from the earlier all-site analysis (primary tumours plus metastatic biopsies from bone, lymph node and soft tissue). It is included for transparency and is not part of the bone-only pipeline. It ran SpatialDecon with the generic safeTME immune and stromal reference on all QC-passed, non-control AOIs at every timepoint. The aims were to check the segmentation masks (CD45⁺ immune-dominant, tumour segments tumour-dominant) and to describe CD45⁺ immune composition by response group and timepoint. No per-probe negative-control matrix was available, so each AOI's negative-probe geometric mean was used as a uniform background. Counts were Q3-normalised. Tumour AOIs with ESTIMATE purity above 0.9 served as anchors, from which SpatialDecon estimated tumour profiles.
 
-No output of this script is used in the current analysis. The manuscript's deconvolution uses tissue-matched references (PCCAT; GSE143791 plus PCCAT tumour profiles) in comp_03b, comp_17 and comp_19. phase6b corrects how the proportions were computed here.
+No output of this script is used in the current analysis. The current deconvolution uses tissue-matched references (PCCAT; GSE143791 plus PCCAT tumour profiles) in comp_03b, comp_17 and comp_19. phase6b corrects how the proportions were computed here.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
-- Not used by the manuscript (legacy; superseded by the tissue-matched deconvolution of comp_03b/comp_17/comp_19)
+- Not used in the current analysis (legacy; superseded by the tissue-matched deconvolution of comp_03b/comp_17/comp_19)
 
-**Pipeline step:** `./run_pipeline.sh --legacy` (optional; not needed to reproduce the manuscript, whose frozen inputs are in `data/previous_analysis/`). Approximate runtime: a few minutes.
+**Pipeline step:** `./run_pipeline.sh --legacy` (optional; not needed to reproduce the current analysis, whose frozen inputs are in `data/previous_analysis/`). Approximate runtime: a few minutes.
 
 **Inputs**
 

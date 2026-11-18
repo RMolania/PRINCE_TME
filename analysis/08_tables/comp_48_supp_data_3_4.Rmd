@@ -19,11 +19,11 @@ knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
 
 ## Overview
 
-This script writes two Supplementary Data files that the manuscript lists but no earlier script had produced. Supplementary Data 3 holds the per-AOI deconvolution fractions in long format: SpatialDecon at cell-type and lineage level, and BayesPrism at cell-type level, each with its tissue-matched reference (PCCAT primary for archival tumours; GSE143791 plus PCCAT tumour profiles for bone). Supplementary Data 4 holds the per-AOI and per-patient scores of the pre-specified and post hoc genes and programmes.
+This script writes two Supplementary Data files that are part of the release but no earlier script had produced. Supplementary Data 3 holds the per-AOI deconvolution fractions in long format: SpatialDecon at cell-type and lineage level, and BayesPrism at cell-type level, each with its tissue-matched reference (PCCAT primary for archival tumours; GSE143791 plus PCCAT tumour profiles for bone). Supplementary Data 4 holds the per-AOI and per-patient scores of the pre-specified and post hoc genes and programmes.
 
 Gene and programme definitions are not copied by hand. They are parsed directly from the primary analysis script (comp_13b), so the exported scores use exactly the same definitions. Programme scores are the mean within-stratum z-score of log-CPM over LOQ-detected genes, with at least three genes required. Patient-level scores are computed on the patient pseudobulk used in the primary analysis. Control (technical-replicate) AOIs are excluded.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Supplementary Data 3 (per-AOI deconvolution fractions, SpatialDecon and BayesPrism)
 - Supplementary Data 4 (per-AOI and per-patient programme scores)

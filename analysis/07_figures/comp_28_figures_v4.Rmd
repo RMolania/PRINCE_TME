@@ -1,5 +1,5 @@
 ---
-title: "Manuscript v4 figures: panel code reused for the final main and Extended Data figures"
+title: "Figure set v4: panel code reused for the final main and Extended Data figures"
 subtitle: "PRINCE spatial transcriptomics: `comp_28_figures_v4`"
 author: "Ramyar Molania"
 output:
@@ -21,7 +21,7 @@ knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
 
 Builds the v4 figure set (main Figures 1–4 and Extended Data Figs 1–10 in v4 numbering) from the patient-level primary analysis and the sensitivity arms. Its panels are the building blocks of the final figures. `comp_41_figures_v5` evaluates this script, keeps its panel objects and reassembles them, with new panels, into the final Figures 1–6 and Extended Data Figs 1 and 5. Several v4 Extended Data figures are used unchanged (title-free render) as final Extended Data Figs 3, 4 and 6–9.
 
-Panel numbering therefore differs from the manuscript. The mapping used by the figure assembly is:
+Panel numbering therefore differs from the final figure numbering. The mapping used by the figure assembly is:
 
 - v4 Fig. 1 → final Fig. 1a (design, `p1a`), Fig. 1c (composition, `p1d`) and Extended Data Fig. 1e–g (`p1c`, `p1e`, `p1f`).
 - v4 Fig. 2 → final Fig. 2a (`p2a`), 2f (`p2c`), 2h (`p2b`), Fig. 3e,f (`p2e`, `p2f`) and Extended Data Fig. 5d (`p2d`).
@@ -33,7 +33,7 @@ Panel numbering therefore differs from the manuscript. The mapping used by the f
 
 All association panels are at patient level (summed-count pseudobulk on the LOQ gene universe), with AOI-level mixed-model results shown only as confirmation. Plot titles and subtitles are working labels; they are removed in the final render (`comp_44_run_notitle`), and their content is carried in the legends.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Fig. 1a,c; Fig. 2a,f,h; Fig. 3e,f; Fig. 4a–f; Fig. 5a–e; Fig. 6e (panels reused by `comp_41_figures_v5`)
 - Extended Data Fig. 1b–g and Extended Data Fig. 5a–d (panels reused by `comp_41_figures_v5`)
@@ -75,7 +75,7 @@ All association panels are at patient level (summed-count pseudobulk on the LOQ 
 ## Analysis
 
 ### v4 figure set
-The header lists the v4 figures and their content. Final manuscript numbering is given in the introduction above and at each section below.
+The header lists the v4 figures and their content. Final figure numbering is given in the introduction above and at each section below.
 
 Shared set-up: colour palettes for response group and compartment, a common ggplot theme, a save helper (PDF and PNG at 183 mm width), a helper that copies earlier figures into the v4 folder, Kaplan–Meier and Fisher-z confidence-interval helpers, and loading of the clinical table, AOI object, LOQ universes and the patient-pseudobulk results (`comp_13b`). `have_r6` lets the script run before the AOI-level arm exists. π₁ (1 − propTrueNull) is computed per stratum from the pseudobulk PSA-change P values.
 

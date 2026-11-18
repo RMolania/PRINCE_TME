@@ -21,7 +21,7 @@ knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
 
 This is one step in the cumulative construction of the Supplementary Tables workbook (`comp_15` → `comp_25` → `comp_29` → `comp_42` → `comp_47`). It loads the v4 workbook and appends ten sheets from the clinical-outcome analysis (R17, `comp_40_burden_outcome`; S86–S95) and two from the categorical AOI-level analysis (R18, `comp_43_aoi_dream_categorical`; S96–S97). Each sheet has its caption in row 1 and the table from row 3. The workbook is saved as `Manuscript_v5/Supplementary_Tables_v5.xlsx`, and the Supplementary Data files are copied forward from `Manuscript_v4`. `comp_47_supp_tables_audit` then adds the last sheets to the same workbook, which is released as `Supplementary_Tables_v6.xlsx`.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Supplementary Tables 86–95 (tumour burden, ctDNA categories, PET × tissue stratification, genotype–phenotype and prognostic factors)
 - Supplementary Tables 96–97 (categorical non-responder vs responder AOI-level models)

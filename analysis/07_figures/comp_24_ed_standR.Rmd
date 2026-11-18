@@ -23,7 +23,7 @@ Draws the two-panel figure comparing the standR workflow with the patient-level 
 
 The figure is saved as `ExtendedDataFig5` in `results/Manuscript_v3/` (its v3 numbering). The final Extended Data Fig. 10 is the title-free render of this script made by `comp_44_run_notitle`.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Extended Data Fig. 10a,b (notitle render of this script by `comp_44_run_notitle`)
 

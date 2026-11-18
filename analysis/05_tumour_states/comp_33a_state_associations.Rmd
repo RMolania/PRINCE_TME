@@ -25,7 +25,7 @@ It asks whether lower-PSMA, lower-AR tumours carry other lineage states: (1a) be
 
 Two flags guard interpretation. `poorly_measured` marks signatures with < 40% of genes above LOQ in a stratum. `circular` marks tests where the signature contains the predictor (for example *FOLH1* in AR+/PSMA+ luminal sets). Associations are also repeated without batch 3, which contains all intermediate patients.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Supplementary Table 69 (S69_PCCAT_states_vs_response: section 2), via `comp_29_supp_tables_v4`
 - Supplementary Table 70 (S70_PCCAT_states_vs_FOLH1_AR: section 1a), via `comp_29_supp_tables_v4`

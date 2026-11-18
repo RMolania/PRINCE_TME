@@ -25,7 +25,7 @@ It (A) reads back the earlier AOI-level gene counts; (B) refits the non-responde
 
 Patient-level purity and tumour fraction are library-size-weighted means over the patient's AOIs, matching the summed-count pseudobulk. Intermediate patients are excluded from the categorical contrast.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Extended Data Fig. 8a (genes at FDR < 0.05, earlier AOI-level models versus patient pseudobulk under covariate sets), via comp_28/comp_41
 - Extended Data Fig. 9a–c (ESTIMATE purity versus tumour fraction, purity by response, earlier named genes under covariate sets), via comp_28/comp_41

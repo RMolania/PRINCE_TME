@@ -25,7 +25,7 @@ Neuroendocrine sets are MSigDB NOURUZI_NEPC_ASCL1_TARGETS, the top 50 PCCAT L2 n
 
 Scores are computed on patient pseudobulk restricted to LOQ-detected genes, with singscore as primary and mean z-score as secondary. Tests are Spearman correlation with PSA change, non-responder versus responder (Wilcoxon; linear model with batch; with batch + ESTIMATE purity), Cox regression for rPFS, Spearman correlation with PSMA-PET volume change and SUVmean, worst leave-one-out P and Spearman correlation excluding batch 3.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Fig. 3e (on-treatment PSMA⁺ Hallmark androgen score versus PSMA-PET tumour-volume change), via comp_28/comp_41
 - Extended Data Fig. 5d (AR programme associations with PSA change), via comp_28/comp_41

@@ -27,7 +27,7 @@ Chooses the deconvolution method objectively, using four criteria whose correct 
 
 Control AOIs are used here only as technical replicates for this quality assessment, never in response analyses. Lineages are collapsed from reference cell types (tumour, immune, stroma or marrow) before criteria 1 and 2.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Extended Data Fig. 2a–d (between-batch variance in control tissue, compartment ordering, marker concordance, cross-method agreement), via comp_21
 - Supplementary Tables 27–29 (via comp_25)

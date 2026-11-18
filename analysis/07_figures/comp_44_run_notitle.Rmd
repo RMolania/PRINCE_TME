@@ -21,9 +21,9 @@ knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
 
 Utility for the journal figure style, in which panel titles and subtitles are carried by the legends rather than the figure. It runs any figure script with three changes. Every line-initial `fig_dir <- ...` assignment is redirected to a chosen output folder. `labs()` and `ggtitle()` are masked so that titles and subtitles are dropped, and each dropped text is recorded in `dropped_titles_<script>.tsv` so its content can be moved into the legends. `ggsave()` is masked to blank `plot.title` and `plot.subtitle` on every patchwork panel. For `comp_41_figures_v5`, which rebuilds v4 panels by evaluating `comp_28_figures_v4`, the inner scratch folder is redirected to `<out_dir>/v4`. This is why several final Extended Data figures are taken from `Manuscript_v5/v4/`. The analysis code itself is not changed.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
-- Produces the title-free files used for Figs 1–6 and Extended Data Figs 1 and 3–9 (via `comp_41_figures_v5`), Extended Data Fig. 2 (via `comp_21_figures_v3`) and Extended Data Fig. 10 (via `comp_24_ed_standR`), as copied by `tools/assemble_figures.sh`
+- Produces the title-free files used for Figs 1–6 and Extended Data Figs 1 and 3–9 (via `comp_41_figures_v5`), Extended Data Fig. 2 (via `comp_21_figures_v3`) and Extended Data Fig. 10 (via `comp_24_ed_standR`), as copied by `tools/assemble_figures_and_tables.sh`
 
 **Pipeline step:** not run on its own; used by other scripts (see Overview). Approximate runtime: as for the wrapped script.
 

@@ -21,4 +21,4 @@ data/previous_analysis/*
 !data/previous_analysis/Phase5_Purity/
 
 # Supplementary Tables and Data: contain per-patient clinical data and per-AOI values; not tracked until cleared for release
-manuscript/supplementary/
+figures_and_tables/supplementary/

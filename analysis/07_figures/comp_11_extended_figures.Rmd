@@ -19,7 +19,7 @@ knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
 
 ## Overview
 
-This script draws the first set of ten Extended Data figures from the outputs of comp_01 to comp_08, and builds the first Supplementary Tables workbook. Four of the figures were kept, renumbered as Supplementary Figures, in the final manuscript:
+This script draws the first set of ten Extended Data figures from the outputs of comp_01 to comp_08, and builds the first Supplementary Tables workbook. Four of the figures were kept, renumbered as Supplementary Figures, in the final figure and table set:
 - its ExtendedDataFig1 (absolute versus relative batch metric, and RUV-4 k selection) becomes Supplementary Fig. 5;
 - ExtendedDataFig7 (primary-tumour IFN-γ genes, ligand–receptor co-expression, within-ROI coupling) becomes Supplementary Fig. 4;
 - ExtendedDataFig8 (clinical, imaging and ctDNA predictors) becomes Supplementary Fig. 2;
@@ -29,14 +29,14 @@ The remaining Extended Data figures here (deconvolution, cell-type associations,
 
 The workbook holds sheets S1–S14 (patients, AOI availability, normalisation, deconvolution, programme associations, AOI-level DE, longitudinal change, the treatment-induced programme, ligand–receptor results, clinical associations and patient-level outcome models). Later scripts load and extend it (comp_15 → comp_25 → comp_29 → comp_42 → comp_47), and these sheets keep their numbers as Supplementary Tables 1–14 in the released workbook. The S1 caption's patient count (33) is fixed text from before the bone-only restriction; the table itself has one row per bone-cohort patient.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Supplementary Fig. 2 (from ExtendedDataFig8 of this script)
 - Supplementary Fig. 3 (from ExtendedDataFig10)
 - Supplementary Fig. 4 (from ExtendedDataFig7)
 - Supplementary Fig. 5 (from ExtendedDataFig1)
 - Supplementary Tables 1–14 (sheets S1–S14 of the workbook extended by comp_15 → 25 → 29 → 42 → 47)
-- Intermediate: ExtendedDataFig2–6 and 9 of this script are not used in the final manuscript
+- Intermediate: ExtendedDataFig2–6 and 9 of this script are not used in the final figure and table set
 
 **Pipeline step:** `./run_pipeline.sh --only 11_extended_figures`. Approximate runtime: minutes.
 

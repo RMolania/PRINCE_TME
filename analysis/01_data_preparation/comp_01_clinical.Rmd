@@ -23,7 +23,7 @@ This script builds the single patient table that all later analyses join to. Out
 
 The script also tabulates AOI availability per patient × timepoint × compartment and the numbers of patients with matched timepoints. It then runs clinical-only associations: Spearman correlation with continuous maximal PSA change, non-responder versus responder comparisons (Wilcoxon or Fisher test; intermediate patients excluded), and Cox models for rPFS and PSA-PFS (hazard ratio per s.d., or altered versus not; likelihood-ratio P). Right-skewed quantities are log-transformed, and BH-FDR is applied per outcome.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Supplementary Table 1 (patient table), Supplementary Table 2 (AOI availability) and Supplementary Table 13 (clinical and ctDNA feature associations), written to the workbook by comp_11
 - Supplementary Fig. 2a (univariable Cox hazard ratios, drawn by comp_11)

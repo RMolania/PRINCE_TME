@@ -23,7 +23,7 @@ This script asks whether pre-treatment PSMA target density sets the size of the 
 
 The primary model is an ANCOVA, `post ~ pre + FOLH1`, which avoids the regression-to-the-mean problem of analysing raw change scores. It is calibrated by 5,000 permutations of *FOLH1* across patients, with BH correction across compartment × programme. Sensitivity analyses add batch, add the change in tumour fraction, library size and signal depth, and report the worst leave-one-out P. Two further analyses are done. A within-ROI analysis relates interferon and p53 scores in PanCK⁺PSMA⁻ and CD45⁺ AOIs to the *FOLH1* of the co-located PSMA⁺ AOI, splitting *FOLH1* into its patient mean and within-patient deviation. A bootstrap mediation analysis asks how much of the *FOLH1*–PSA association is carried by IFN-α induction.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Fig. 4h (pre-treatment tumour *FOLH1* versus baseline-adjusted on-treatment IFN-α and HLA class I; drawn by comp_41 from `A_paired_values.csv`)
 - Supplementary Table 103 (assembled by comp_47)

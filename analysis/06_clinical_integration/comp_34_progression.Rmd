@@ -21,7 +21,7 @@ knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
 
 Progression biopsies exist only for four patients who first responded, so they describe acquired rather than primary resistance and are not used for inference. The script normalises all tumour AOIs (PSMA⁺ and PanCK⁺PSMA⁻) of these four patients together across every timepoint (TMM). It then summarises, per patient and timepoint, mean log₂ CPM and the fraction of AOIs above the per-AOI negative-probe LOQ for PSMA (*FOLH1*), AR-output (*KLK3*, *NKX3-1*, *TMPRSS2*), *AR*, neuroendocrine (*CHGA*, *CHGB*, *INSM1*, *ASCL1*, *SYP*) and proliferation (*MKI67*, *TOP2A*) genes. The median AOI signal depth (% genes above LOQ) is reported alongside, because low-depth AOIs cannot separate loss of phenotype from loss of tumour signal.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Fig. 6e (tumour AOIs of the four initial responders with progression biopsies; drawn by `comp_28_figures_v4` and placed in Fig. 6 by `comp_41_figures_v5`)
 - Supplementary Table 74 (`progression_patient_timepoint_markers.csv`)

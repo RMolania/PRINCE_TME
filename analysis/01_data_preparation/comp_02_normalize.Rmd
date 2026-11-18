@@ -23,9 +23,9 @@ Each of the nine compartment × timepoint strata (CD45⁺, PSMA⁺, PanCK⁺PSMA
 
 Batch is partly aliased with response group in this cohort, so the script uses RUV-4 rather than RUV-III. The negative controls are 2,000 singscore stable genes. The design matrix X protects both response group and standardised continuous PSA change, so the biological signal is not removed as unwanted variation. The number of factors k (1–8) is chosen on an absolute criterion: the gene-wise between-batch sum of squares, relative to k = 0. The relative top-PC R² was not used because it had earlier made PSMA⁺ correction look like a failure. The smallest k is chosen that reduces absolute batch variance to ≤ 60% while retaining ≥ 70% of the response sum of squares in informative positive-control markers (those with baseline F ≥ 2). Looser fallbacks are flagged MARGINAL.
 
-Control tissue-microarray AOIs are technical replicates. They are projected onto each stratum's unwanted factors only as a diagnostic of batch removal and are never analysed for biology. These RUV-4-normalised data feed the earlier AOI-level models. The manuscript's primary analysis is patient-level pseudobulk on the LOQ gene universe and is run in later scripts.
+Control tissue-microarray AOIs are technical replicates. They are projected onto each stratum's unwanted factors only as a diagnostic of batch removal and are never analysed for biology. These RUV-4-normalised data feed the earlier AOI-level models. The study's primary analysis is patient-level pseudobulk on the LOQ gene universe and is run in later scripts.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Supplementary Table 3 (per-stratum normalisation summary, written by comp_11)
 - Supplementary Fig. 5 (absolute versus relative batch metric and k selection in the nine strata; drawn by comp_11)

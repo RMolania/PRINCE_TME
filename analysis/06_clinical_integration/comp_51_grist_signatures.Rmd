@@ -23,7 +23,7 @@ This script tests whether the published transcriptome signatures from the STAMPE
 
 The two PTEN-loss classifiers have no published direction. They are scored exploratorily by signing each gene by its Spearman correlation with *PTEN* mRNA within the stratum, which uses no outcome information, and are checked against ctDNA *PTEN* status. Weighted, centroid and proprietary classifiers are listed as not scored. In each patient-pseudobulk stratum, each scored signature is tested for coherence, association with PSA change (Spearman, and lm with batch), rPFS (Cox, per s.d.), correlation with *FOLH1*, and differences by ctDNA *PTEN*, *TP53* and *AR* alteration. BH correction is applied across signatures within stratum.
 
-**Manuscript items supported**
+**Figures, tables and results supported**
 
 - Supplementary Table 102 (assembled by comp_47)
 - Results: STAMPEDE signatures not associated with PSA change in any pre-treatment stratum
