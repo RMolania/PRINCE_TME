@@ -39,7 +39,7 @@ Rather than redefining the sets, the script reads the source of `comp_05_signatu
 
 **Outputs**
 
-- `results/Manuscript/Supplementary_Data_5_gene_sets.csv`
+- `results/Figures_v1/Supplementary_Data_5_gene_sets.csv`
 
 **Depends on**: `comp_05_signatures`
 
@@ -48,7 +48,7 @@ Rather than redefining the sets, the script reads the source of `comp_05_signatu
 Extracts the gene-set block from `comp_05_signatures` (from the line creating `sig_env` to the closing parenthesis of `single_genes`), evaluates it, flattens the nested `sets` list into collection/set/gene rows, appends the single genes as their own collection, and writes the table. Re-using the source guarantees that Supplementary Data 5 matches the sets that were actually scored.
 
 ```{r comp-12-export-genesets-01}
-## PRINCE manuscript -- Supplementary Data 5: gene-set definitions used in C5/C6
+## PRINCE figure set v1 -- Supplementary Data 5: gene-set definitions used in C5/C6
 ## Re-extracts the exact `sets` list built in comp_05_signatures.R (lines defining
 ## `sets` and `single_genes`) and writes one long table: collection, set, gene.
 source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
@@ -61,6 +61,6 @@ eval(parse(text = src[start:end]))
 long <- bind_rows(lapply(names(sets), function(cl) bind_rows(lapply(names(sets[[cl]]), function(s)
   data.frame(collection = cl, set = s, gene = sets[[cl]][[s]])))),
   data.frame(collection = "gene", set = single_genes, gene = single_genes))
-write.csv(long, file.path(COMP_DIR, "Manuscript", "Supplementary_Data_5_gene_sets.csv"), row.names = FALSE)
+write.csv(long, file.path(COMP_DIR, "Figures_v1", "Supplementary_Data_5_gene_sets.csv"), row.names = FALSE)
 cat(nrow(long), "rows;", length(unique(paste(long$collection, long$set))), "sets\n")
 ```

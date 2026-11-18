@@ -69,8 +69,8 @@ The workbook holds sheets S1–S14 (patients, AOI availability, normalisation, d
 
 **Outputs**
 
-- `results/Manuscript/ExtendedDataFig1..10.{pdf,png}`
-- `results/Manuscript/Supplementary_Tables.xlsx`
+- `results/Figures_v1/ExtendedDataFig1..10.{pdf,png}`
+- `results/Figures_v1/Supplementary_Tables.xlsx`
 
 **Depends on**: `comp_01_clinical`, `comp_02_normalize`, `comp_03b_deconv`, `comp_04_de`, `comp_05_signatures`, `comp_06_longitudinal`, `comp_07_crosstalk`, `comp_08_outcome_models`
 
@@ -79,11 +79,11 @@ The workbook holds sheets S1–S14 (patients, AOI availability, normalisation, d
 Script header: the contents of the ten Extended Data figures and the Supplementary Tables workbook in this first figure set.
 
 ### Set-up
-Sources the shared set-up, loads packages and creates `results/Manuscript/`. Defines colours, labels (timepoints shown as primary, pre-treatment bone and on-treatment bone), a 7-pt theme, the figure-saving helper, a helper that splits stratum codes into compartment and timepoint, and Kaplan–Meier step data. Reads the patient table and QC-filtered object, and records whether the comp_04 results exist; the DE figures and tables are written only if they do.
+Sources the shared set-up, loads packages and creates `results/Figures_v1/`. Defines colours, labels (timepoints shown as primary, pre-treatment bone and on-treatment bone), a 7-pt theme, the figure-saving helper, a helper that splits stratum codes into compartment and timepoint, and Kaplan–Meier step data. Reads the patient table and QC-filtered object, and records whether the comp_04 results exist; the DE figures and tables are written only if they do.
 
 ```{r comp-11-extended-figures-01}
 ## ============================================================================
-## PRINCE manuscript -- Extended Data Figures 1-10 + Supplementary Tables
+## PRINCE figure set v1 -- Extended Data Figures 1-10 + Supplementary Tables
 ##   ED1  normalization (relative vs absolute batch metric; k selection, 9 strata)
 ##   ED2  deconvolution references and validation
 ##   ED3  deconvolved cell types vs response
@@ -94,7 +94,7 @@ Sources the shared set-up, loads packages and creates `results/Manuscript/`. Def
 ##   ED8  clinical and ctDNA predictors
 ##   ED9  outcome prediction (LOPO elastic net)
 ##   ED10 longitudinal programme changes and primary-metastasis concordance
-## Supplementary Tables S1-S12 -> Manuscript/Supplementary_Tables.xlsx
+## Supplementary Tables S1-S12 -> Figures_v1/Supplementary_Tables.xlsx
 ## ============================================================================
 
 source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
@@ -104,7 +104,7 @@ suppressMessages({
 })
 setwd(PRINCE_DIR)
 check_ram_or_stop(20)
-fig_dir <- file.path(COMP_DIR, "Manuscript"); dir.create(fig_dir, showWarnings = FALSE)
+fig_dir <- file.path(COMP_DIR, "Figures_v1"); dir.create(fig_dir, showWarnings = FALSE)
 
 resp_cols <- c(Responder = "#3B6FB6", Intermediate = "#E3A33B", Non_Responder = "#C0392B")
 resp_lab <- c(Responder = "Responder", Intermediate = "Intermediate", Non_Responder = "Non-responder")
@@ -535,7 +535,7 @@ save_fig(e10a / e10b + plot_layout(heights = c(1.4, 1)) + plot_annotation(tag_le
 ```
 
 ### Supplementary Tables workbook
-Writes sheets S1–S14, each with a caption in row 1 and the table from row 3, to `results/Manuscript/Supplementary_Tables.xlsx`. The DE sheets (S7–S9) are written only if comp_04 has run. Later table scripts load this workbook and append further sheets; S1–S14 keep their numbers in the released Supplementary Tables.
+Writes sheets S1–S14, each with a caption in row 1 and the table from row 3, to `results/Figures_v1/Supplementary_Tables.xlsx`. The DE sheets (S7–S9) are written only if comp_04 has run. Later table scripts load this workbook and append further sheets; S1–S14 keep their numbers in the released Supplementary Tables.
 
 ```{r comp-11-extended-figures-11}
 ## =====================================================================================

@@ -49,7 +49,7 @@ For each pseudobulk stratum that contains *FOLH1*, compute patient mean log sign
 ```{r comp-46-depth-adjusted-pseudobulk-01}
 ## ============================================================================
 ## PRINCE -- R20: patient pseudobulk FOLH1 vs PSA change adjusted for AOI signal depth.
-## Audit finding: the manuscript's signal-depth sentence had no script/output behind it; this makes it reproducible.
+## Audit finding: the reported signal-depth result had no script/output behind it; this makes it reproducible.
 ## Per segment x timepoint stratum (C13_pseudobulk_LOQ objects):
 ##   depth = patient mean of log(% genes above LOQ) over the AOIs that formed the pseudobulk
 ##   rho(FOLH1, depth), rho(depth, PSA change) at patient level;

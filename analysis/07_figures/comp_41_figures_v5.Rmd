@@ -21,16 +21,16 @@ knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
 
 This script draws the six main figures, rearranged around patient outcome, and the Extended Data figures. It first rebuilds every v4 panel by evaluating `comp_28_figures_v4` with its output redirected to a scratch folder (`results/tmp_v4_rebuild`, or `<out_dir>/v4` under the title-free render). The v4 objects, helper functions, colour scales and data (`pt`, `save_fig`, `km_df`, `resp_cols` and others) are therefore available in the session. It then adds the new outcome-framed panels from the R16, R17, R24, R11 and R14 outputs and composes Figures 1–6, Extended Data Fig. 1 and a trimmed Extended Data Fig. 3.
 
-For the final figures the script is run through `comp_44_run_notitle`, which removes panel titles and subtitles, so that `results/Manuscript_v5/` holds the title-free versions. Per `tools/assemble_figures_and_tables.sh`, the final figures come from three places. Figures 1–6 are `Manuscript_v5/Figure1..6`. Extended Data Fig. 1 is `Manuscript_v5/ExtendedDataFig1`, and Extended Data Fig. 5 is `Manuscript_v5/ExtendedDataFig3`. Extended Data Figs 3, 4, 6, 7, 8 and 9 are the rebuilt v4 Extended Data Figs 4, 9, 8, 10, 5 and 6 in `Manuscript_v5/v4/`.
+For the final figures the script is run through `comp_44_run_notitle`, which removes panel titles and subtitles, so that `results/Figures_v5/` holds the title-free versions. Per `tools/assemble_figures_and_tables.sh`, the final figures come from three places. Figures 1–6 are `Figures_v5/Figure1..6`. Extended Data Fig. 1 is `Figures_v5/ExtendedDataFig1`, and Extended Data Fig. 5 is `Figures_v5/ExtendedDataFig3`. Extended Data Figs 3, 4, 6, 7, 8 and 9 are the rebuilt v4 Extended Data Figs 4, 9, 8, 10, 5 and 6 in `Figures_v5/v4/`.
 
 **Figures, tables and results supported**
 
 - Fig. 1a–c, Fig. 2a–h, Fig. 3a–f, Fig. 4a–h, Fig. 5a–e, Fig. 6a–e
-- Extended Data Fig. 1a–g (`Manuscript_v5/ExtendedDataFig1`)
-- Extended Data Fig. 5a–d (`Manuscript_v5/ExtendedDataFig3`)
-- Extended Data Figs 3, 4, 6, 7, 8 and 9 (v4 Extended Data Figs 4, 9, 8, 10, 5 and 6 rebuilt from `comp_28_figures_v4` code into `Manuscript_v5/v4/`)
+- Extended Data Fig. 1a–g (`Figures_v5/ExtendedDataFig1`)
+- Extended Data Fig. 5a–d (`Figures_v5/ExtendedDataFig3`)
+- Extended Data Figs 3, 4, 6, 7, 8 and 9 (v4 Extended Data Figs 4, 9, 8, 10, 5 and 6 rebuilt from `comp_28_figures_v4` code into `Figures_v5/v4/`)
 
-**Pipeline step:** `./run_pipeline.sh --only 41_figures_v5` (rendered through `comp_44_run_notitle`, output `results/Manuscript_v5`). Approximate runtime: about 30 s.
+**Pipeline step:** `./run_pipeline.sh --only 41_figures_v5` (rendered through `comp_44_run_notitle`, output `results/Figures_v5`). Approximate runtime: about 30 s.
 
 **Inputs**
 
@@ -47,14 +47,14 @@ For the final figures the script is run through `comp_44_run_notitle`, which rem
 - `results/R1_loq/loq_gene_universes.qs`
 - `data/phase2_se_qc_filtered.qs`
 - `data/phase2_se_with_qc_metrics.qs`
-- `results/Manuscript_v4/*.{pdf,png}`
+- `results/Figures_v4/*.{pdf,png}`
 
 **Outputs**
 
-- `results/Manuscript_v5/Figure1..6.{pdf,png}`
-- `results/Manuscript_v5/ExtendedDataFig1.{pdf,png}`
-- `results/Manuscript_v5/ExtendedDataFig3.{pdf,png}`
-- `results/Manuscript_v5/ExtendedDataFig{2,4..10}.{pdf,png} and SupplementaryFig1..6 (copied from Manuscript_v4)`
+- `results/Figures_v5/Figure1..6.{pdf,png}`
+- `results/Figures_v5/ExtendedDataFig1.{pdf,png}`
+- `results/Figures_v5/ExtendedDataFig3.{pdf,png}`
+- `results/Figures_v5/ExtendedDataFig{2,4..10}.{pdf,png} and SupplementaryFig1..6 (copied from Figures_v4)`
 - `results/tmp_v4_rebuild/ (rebuilt v4 figures)`
 
 **Depends on**: `comp_28_figures_v4`, `comp_00a_qc`, `comp_00b_bone_cohort`, `comp_16_loq_filter`, `comp_33c_state_review`, `comp_36_radiobiology`, `comp_38_prediction`, `comp_40_burden_outcome`, `comp_52_dose_interferon`
@@ -67,7 +67,7 @@ Read the `comp_28_figures_v4` source, point its `fig_dir` at a scratch folder an
 
 ```{r comp-41-figures-v5-01}
 ## ============================================================================
-## PRINCE manuscript v5 -- six main figures, rearranged around patient outcome (after Kwan et al., Nat Med 2025)
+## PRINCE figure set v5 -- six main figures, rearranged around patient outcome (after Kwan et al., Nat Med 2025)
 ##   Fig 1  cohort and per-patient clinical-genomic-tissue landscape
 ##   Fig 2  PSMA target expression: strata, waterfall, PET x tissue stratification, concordance, prediction, burden adjustment
 ##   Fig 3  burden, imaging and genomics: correlation matrix, ctDNA% categories, prognostic forest, alterations -> tissue, AR/FOLH1 on treatment
@@ -76,19 +76,19 @@ Read the `comp_28_figures_v4` source, point its `fig_dir` at a scratch folder an
 ##   Fig 6  resistance: DNA-repair swimmer, neuroendocrine detection, progression biopsies, radiobiology
 ##   ED1    sample flow + background + detection + scale of signal (v4 ED1 + v4 Fig 1d-f); ED3 trimmed; other ED/SF copied from v4
 ## v4 panels are rebuilt by evaluating comp_28_figures_v4.R with its output redirected to a scratch folder.
-## Output: results/Manuscript_v5/
+## Output: results/Figures_v5/
 ## ============================================================================
 
 src <- readLines(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_28_figures_v4.R"))
 scratch <- file.path(COMP_DIR, "tmp_v4_rebuild")
 dir.create(scratch, showWarnings = FALSE, recursive = TRUE)
-i <- grep('^fig_dir <- file.path\\(COMP_DIR, "Manuscript_v4"\\)', src); stopifnot(length(i) == 1)
+i <- grep('^fig_dir <- file.path\\(COMP_DIR, "Figures_v4"\\)', src); stopifnot(length(i) == 1)
 src[i] <- sprintf('fig_dir <- "%s"', scratch)
 eval(parse(text = src), envir = globalenv())
 suppressMessages({ library(ggnewscale); library(pROC) })
-fig_dir <- file.path(COMP_DIR, "Manuscript_v5"); dir.create(fig_dir, showWarnings = FALSE)
+fig_dir <- file.path(COMP_DIR, "Figures_v5"); dir.create(fig_dir, showWarnings = FALSE)
 theme_update(plot.title = element_text(size = 7, face = "bold", margin = margin(l = 7, b = 2)))
-v4_dir <- file.path(COMP_DIR, "Manuscript_v4"); R17 <- file.path(COMP_DIR, "R17_kwan")
+v4_dir <- file.path(COMP_DIR, "Figures_v4"); R17 <- file.path(COMP_DIR, "R17_kwan")
 pf <- qs::qread(file.path(R17, "patient_features.qs"))
 pf$response_group_neat <- factor(pf$response_group_neat, names(resp_cols))
 ord <- pf$subject_id[order(pmin(pf$max_psa_change, 150))]
@@ -392,7 +392,7 @@ save_fig(fig6, "Figure6", 265)
 ### Extended Data figures
 - Extended Data Fig. 1: sample-flow diagram (patients and AOIs per timepoint before and after AOI QC, plus paired and matched counts per compartment computed from the data), followed by v4 panels on LOQ, signal depth, gene universes, detection and the scale of response-associated signal.
 - A trimmed v4 Extended Data Fig. 3 (tissue vs PET, added R² over SUVmean, *ATM*/*SPOP*/MMR percentiles, AR signatures), which becomes Extended Data Fig. 5.
-- The remaining Extended Data and Supplementary figures are copied unchanged from `Manuscript_v4`.
+- The remaining Extended Data and Supplementary figures are copied unchanged from `Figures_v4`.
 
 ```{r comp-41-figures-v5-08}
 ## =====================================================================================

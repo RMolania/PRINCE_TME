@@ -19,7 +19,7 @@ knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
 
 ## Overview
 
-Several Extended Data panels were first rendered by the version-1 and version-2 figure scripts (`comp_11_extended_figures`, `comp_14_revised_figures`). This step copies them into `results/Manuscript_v3/` under the numbering of the v3 figure set, together with the exported gene-set table (Supplementary Data 5). Later figure scripts and the supplementary-table builders read these files from `Manuscript_v3/`. No computation is done here.
+Several Extended Data panels were first rendered by the version-1 and version-2 figure scripts (`comp_11_extended_figures`, `comp_14_revised_figures`). This step copies them into `results/Figures_v3/` under the numbering of the v3 figure set, together with the exported gene-set table (Supplementary Data 5). Later figure scripts and the supplementary-table builders read these files from `Figures_v3/`. No computation is done here.
 
 **Figures, tables and results supported**
 
@@ -30,14 +30,14 @@ Several Extended Data panels were first rendered by the version-1 and version-2 
 
 **Inputs**
 
-- `results/Manuscript/ExtendedDataFig{1,7,8,10}.{pdf,png}`
-- `results/Manuscript_v2/ExtendedDataFig9.{pdf,png}`
-- `results/Manuscript/Supplementary_Data_5_gene_sets.csv`
+- `results/Figures_v1/ExtendedDataFig{1,7,8,10}.{pdf,png}`
+- `results/Figures_v2/ExtendedDataFig9.{pdf,png}`
+- `results/Figures_v1/Supplementary_Data_5_gene_sets.csv`
 
 **Outputs**
 
-- `results/Manuscript_v3/ExtendedDataFig{1,6,7,8,10}.{pdf,png}`
-- `results/Manuscript_v3/Supplementary_Data_5_gene_sets.csv`
+- `results/Figures_v3/ExtendedDataFig{1,6,7,8,10}.{pdf,png}`
+- `results/Figures_v3/Supplementary_Data_5_gene_sets.csv`
 
 **Depends on**: `comp_11_extended_figures`, `comp_14_revised_figures`, `comp_12_export_genesets`, `comp_21_figures_v3`
 
@@ -50,7 +50,7 @@ Copy each figure in both PDF and PNG format to its v3 number: version-1 Extended
 ```{r comp-21b-assemble-v3-01}
 ## ============================================================================
 ## PRINCE -- assemble the v3 Extended Data / Supplementary figure set
-## Copies figure files rendered by earlier figure scripts into Manuscript_v3/
+## Copies figure files rendered by earlier figure scripts into Figures_v3/
 ## under the numbering used by the v3 figure set, which later figure scripts and
 ## the supplementary-table builders read from.
 ## ============================================================================
@@ -58,14 +58,14 @@ Copy each figure in both PDF and PNG format to its v3 number: version-1 Extended
 source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
 
 cp <- function(from, to) stopifnot(file.copy(file.path(COMP_DIR, from), file.path(COMP_DIR, to), overwrite = TRUE))
-dir.create(file.path(COMP_DIR, "Manuscript_v3"), showWarnings = FALSE)
+dir.create(file.path(COMP_DIR, "Figures_v3"), showWarnings = FALSE)
 for (e in c("pdf", "png")) {
-  cp(paste0("Manuscript/ExtendedDataFig1.", e),     paste0("Manuscript_v3/ExtendedDataFig1.", e))
-  cp(paste0("Manuscript_v2/ExtendedDataFig9.", e),  paste0("Manuscript_v3/ExtendedDataFig6.", e))
-  cp(paste0("Manuscript/ExtendedDataFig8.", e),     paste0("Manuscript_v3/ExtendedDataFig7.", e))
-  cp(paste0("Manuscript/ExtendedDataFig7.", e),     paste0("Manuscript_v3/ExtendedDataFig8.", e))
-  cp(paste0("Manuscript/ExtendedDataFig10.", e),    paste0("Manuscript_v3/ExtendedDataFig10.", e))
+  cp(paste0("Figures_v1/ExtendedDataFig1.", e),     paste0("Figures_v3/ExtendedDataFig1.", e))
+  cp(paste0("Figures_v2/ExtendedDataFig9.", e),  paste0("Figures_v3/ExtendedDataFig6.", e))
+  cp(paste0("Figures_v1/ExtendedDataFig8.", e),     paste0("Figures_v3/ExtendedDataFig7.", e))
+  cp(paste0("Figures_v1/ExtendedDataFig7.", e),     paste0("Figures_v3/ExtendedDataFig8.", e))
+  cp(paste0("Figures_v1/ExtendedDataFig10.", e),    paste0("Figures_v3/ExtendedDataFig10.", e))
 }
-cp("Manuscript/Supplementary_Data_5_gene_sets.csv", "Manuscript_v3/Supplementary_Data_5_gene_sets.csv")
+cp("Figures_v1/Supplementary_Data_5_gene_sets.csv", "Figures_v3/Supplementary_Data_5_gene_sets.csv")
 cat("v3 figure set assembled\n")
 ```

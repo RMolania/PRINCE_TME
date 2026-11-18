@@ -38,8 +38,8 @@ All association panels are at patient level (summed-count pseudobulk on the LOQ 
 - Fig. 1a,c; Fig. 2a,f,h; Fig. 3e,f; Fig. 4a–f; Fig. 5a–e; Fig. 6e (panels reused by `comp_41_figures_v5`)
 - Extended Data Fig. 1b–g and Extended Data Fig. 5a–d (panels reused by `comp_41_figures_v5`)
 - Extended Data Fig. 3 (= v4 ExtendedDataFig4), Extended Data Fig. 4 (= v4 ExtendedDataFig9), Extended Data Fig. 6 (= v4 ExtendedDataFig8), Extended Data Fig. 7 (= v4 ExtendedDataFig10), Extended Data Fig. 8 (= v4 ExtendedDataFig5), Extended Data Fig. 9 (= v4 ExtendedDataFig6)
-- p53 core-target induction table (Manuscript_v4/p53_core_target_paired_induction_LOQ.csv), copied forward by `comp_42_supp_tables_v5`
-- The v1/v3 figures copied into Manuscript_v4 as SupplementaryFig1–5, ExtendedDataFig2 and ExtendedDataFig7 are intermediate; the final Supplementary Figures and Extended Data Figs 2 and 10 come from other scripts
+- p53 core-target induction table (Figures_v4/p53_core_target_paired_induction_LOQ.csv), copied forward by `comp_42_supp_tables_v5`
+- The v1/v3 figures copied into Figures_v4 as SupplementaryFig1–5, ExtendedDataFig2 and ExtendedDataFig7 are intermediate; the final Supplementary Figures and Extended Data Figs 2 and 10 come from other scripts
 
 **Pipeline step:** `./run_pipeline.sh --only 28_figures_v4`. Approximate runtime: minutes.
 
@@ -61,14 +61,14 @@ All association panels are at patient level (summed-count pseudobulk on the LOQ 
 - `results/R12_progression/progression_patient_timepoint_markers.csv`
 - `results/R22_tme_on_treatment/{A_tme_programme_gene_change,D_deconvolved_change}.csv`
 - `data/reference/msigdb_gene_sets.rds`
-- `results/Manuscript/ and results/Manuscript_v3/ figure files (copied only)`
+- `results/Figures_v1/ and results/Figures_v3/ figure files (copied only)`
 
 **Outputs**
 
-- `results/Manuscript_v4/Figure1..4.{pdf,png}`
-- `results/Manuscript_v4/ExtendedDataFig1,3,4,5,6,8,9,10.{pdf,png}`
-- `results/Manuscript_v4/p53_core_target_paired_induction_LOQ.csv`
-- `results/Manuscript_v4/ExtendedDataFig2, ExtendedDataFig7, SupplementaryFig1–5 (copies of earlier figures)`
+- `results/Figures_v4/Figure1..4.{pdf,png}`
+- `results/Figures_v4/ExtendedDataFig1,3,4,5,6,8,9,10.{pdf,png}`
+- `results/Figures_v4/p53_core_target_paired_induction_LOQ.csv`
+- `results/Figures_v4/ExtendedDataFig2, ExtendedDataFig7, SupplementaryFig1–5 (copies of earlier figures)`
 
 **Depends on**: `comp_00b_bone_cohort`, `comp_01_clinical`, `comp_03b_deconv`, `comp_13b_pseudobulk_loq`, `comp_13c_pi1_roi_heterogeneity`, `comp_16_loq_filter`, `comp_18_nepc_purity_reconcile`, `comp_20_external_ne_signatures`, `comp_11_extended_figures`, `comp_21_figures_v3`, `comp_21b_assemble_v3`, `comp_24_ed_standR`, `comp_26_aoi_level`, `comp_27_owen_bone`, `comp_30_tissue_pet_ctdna`, `comp_31_composition_sensitivity`, `comp_34_progression`, `comp_50_tme_on_treatment`
 
@@ -81,7 +81,7 @@ Shared set-up: colour palettes for response group and compartment, a common ggpl
 
 ```{r comp-28-figures-v4-01}
 ## ============================================================================
-## PRINCE manuscript v4 -- figures
+## PRINCE figure set v4 -- figures
 ##   Fig 1  design, background (LOQ), composition, scale of detectable signal
 ##   Fig 2  target axis: FOLH1 and AR activity (patient pseudobulk + AOI-level mixed models)
 ##   Fig 3  on-treatment p53 and interferon pharmacodynamics
@@ -93,7 +93,7 @@ Shared set-up: colour palettes for response group and compartment, a common ggpl
 ##   ED10 Owen markers vs response (gene level)
 ##   Supplementary Figs S1-S4: v3 ED1 (RUV), ED6 (RUV AOI vs pseudobulk), ED8 (crosstalk), ED10 (AOI longitudinal)
 ## Inputs: R1_loq, R2_deconv_compare, R3_nepc_purity, R6_aoi_level, R7_owen_bone, C13_pseudobulk_LOQ(_exclLow)
-## Output: results/Manuscript_v4/
+## Output: results/Figures_v4/
 ## ============================================================================
 
 source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
@@ -103,8 +103,8 @@ suppressMessages({
 })
 setwd(PRINCE_DIR)
 check_ram_or_stop(20)
-fig_dir <- file.path(COMP_DIR, "Manuscript_v4"); dir.create(fig_dir, showWarnings = FALSE)
-v3_dir <- file.path(COMP_DIR, "Manuscript_v3"); v1_dir <- file.path(COMP_DIR, "Manuscript")
+fig_dir <- file.path(COMP_DIR, "Figures_v4"); dir.create(fig_dir, showWarnings = FALSE)
+v3_dir <- file.path(COMP_DIR, "Figures_v3"); v1_dir <- file.path(COMP_DIR, "Figures_v1")
 C13 <- "C13_pseudobulk_LOQ"; R6 <- file.path(COMP_DIR, "R6_aoi_level"); R7 <- file.path(COMP_DIR, "R7_owen_bone")
 
 resp_cols <- c(Responder = "#3B6FB6", Intermediate = "#E3A33B", Non_Responder = "#C0392B")

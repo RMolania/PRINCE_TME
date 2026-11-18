@@ -47,13 +47,13 @@ Only `ExtendedDataFig2` (SpatialDecon versus BayesPrism) is carried into the fin
 
 **Outputs**
 
-- `results/Manuscript_v3/Figure1-4.{pdf,png}`
-- `results/Manuscript_v3/ExtendedDataFig2.{pdf,png}`
-- `results/Manuscript_v3/ExtendedDataFig3.{pdf,png}`
-- `results/Manuscript_v3/ExtendedDataFig4.{pdf,png}`
-- `results/Manuscript_v3/ExtendedDataFig9.{pdf,png}`
-- `results/Manuscript_v3/p53_core_target_paired_induction_LOQ.csv`
-- `results/Manuscript_v3/pi1_LOQ.csv`
+- `results/Figures_v3/Figure1-4.{pdf,png}`
+- `results/Figures_v3/ExtendedDataFig2.{pdf,png}`
+- `results/Figures_v3/ExtendedDataFig3.{pdf,png}`
+- `results/Figures_v3/ExtendedDataFig4.{pdf,png}`
+- `results/Figures_v3/ExtendedDataFig9.{pdf,png}`
+- `results/Figures_v3/p53_core_target_paired_induction_LOQ.csv`
+- `results/Figures_v3/pi1_LOQ.csv`
 
 **Depends on**: `comp_13b_pseudobulk_loq`, `comp_16_loq_filter`, `comp_17_bayesprism`, `comp_18_nepc_purity_reconcile`, `comp_19_deconv_compare`, `comp_20_external_ne_signatures`, `comp_03b_deconv`, `comp_01_clinical`
 
@@ -66,7 +66,7 @@ Plotting theme, colours and helpers as in the earlier figure scripts; loads the 
 
 ```{r comp-21-figures-v3-01}
 ## ============================================================================
-## PRINCE manuscript v3 -- figures from the negative-probe-filtered, patient-level analysis
+## PRINCE figure set v3 -- figures from the negative-probe-filtered, patient-level analysis
 ##   Fig 1  design, background (LOQ) QC, composition, scale of detectable signal
 ##   Fig 2  target axis: FOLH1 and AR activity
 ##   Fig 3  on-treatment p53 and interferon pharmacodynamics
@@ -76,7 +76,7 @@ Plotting theme, colours and helpers as in the earlier figure scripts; loads the 
 ##   ED4    purity and the deck's genes under covariate sets
 ##   ED9    low-signal-AOI exclusion sensitivity
 ## Inputs: R1_loq, R2_deconv_compare (+ decision.txt), R3_nepc_purity, C13_pseudobulk_LOQ(_exclLow)
-## Output: results/Manuscript_v3/
+## Output: results/Figures_v3/
 ## ============================================================================
 
 source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
@@ -86,7 +86,7 @@ suppressMessages({
 })
 setwd(PRINCE_DIR)
 check_ram_or_stop(20)
-fig_dir <- file.path(COMP_DIR, "Manuscript_v3"); dir.create(fig_dir, showWarnings = FALSE)
+fig_dir <- file.path(COMP_DIR, "Figures_v3"); dir.create(fig_dir, showWarnings = FALSE)
 C13 <- "C13_pseudobulk_LOQ"
 
 resp_cols <- c(Responder = "#3B6FB6", Intermediate = "#E3A33B", Non_Responder = "#C0392B")

@@ -59,7 +59,7 @@
 28_figures_v4	07_figures	comp_28_figures_v4	run	figure set v4
 29_supp_tables_v4	08_tables	comp_29_supp_tables_v4	run	supplementary tables v4
 39_supp_fig6	07_figures	comp_39_supp_fig6	run	Supplementary Fig. 1 (AOI-level models)
-41_figures_v5	07_figures	comp_41_figures_v5	notitle:results/Manuscript_v5	final main figures (run through comp_44, titles removed)
+41_figures_v5	07_figures	comp_41_figures_v5	notitle:results/Figures_v5	final main figures (run through comp_44, titles removed)
 42_supp_tables_v5	08_tables	comp_42_supp_tables_v5	run	supplementary tables v5
 47_supp_tables_audit	08_tables	comp_47_supp_tables_audit	run	final supplementary tables
 48_supp_data_3_4	08_tables	comp_48_supp_data_3_4	run	Supplementary Data 3-4

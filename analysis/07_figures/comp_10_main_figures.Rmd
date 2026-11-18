@@ -25,7 +25,7 @@ These figures were superseded by later figure sets (comp_14, comp_21, comp_28, c
 
 **Figures, tables and results supported**
 
-- Intermediate: first-draft main Figures 1–4 in `results/Manuscript/`; not used in the final figure and table set, whose main figures are produced by comp_41_figures_v5 (via comp_28_figures_v4)
+- Intermediate: first-draft main Figures 1–4 in `results/Figures_v1/`; not used in the final figure and table set, whose main figures are produced by comp_41_figures_v5 (via comp_28_figures_v4)
 
 **Pipeline step:** `./run_pipeline.sh --only 10_main_figures`. Approximate runtime: minutes.
 
@@ -44,10 +44,10 @@ These figures were superseded by later figure sets (comp_14, comp_21, comp_28, c
 
 **Outputs**
 
-- `results/Manuscript/Figure1.{pdf,png}`
-- `results/Manuscript/Figure2.{pdf,png}`
-- `results/Manuscript/Figure3.{pdf,png}`
-- `results/Manuscript/Figure4.{pdf,png}`
+- `results/Figures_v1/Figure1.{pdf,png}`
+- `results/Figures_v1/Figure2.{pdf,png}`
+- `results/Figures_v1/Figure3.{pdf,png}`
+- `results/Figures_v1/Figure4.{pdf,png}`
 
 **Depends on**: `comp_01_clinical`, `comp_02_normalize`, `comp_03b_deconv`, `comp_05_signatures`, `comp_06_longitudinal`
 
@@ -55,15 +55,15 @@ These figures were superseded by later figure sets (comp_14, comp_21, comp_28, c
 
 Script header: figure format and the rule that every displayed comparison is patient-level.
 
-Sources the shared set-up, loads plotting and modelling packages and creates `results/Manuscript/`.
+Sources the shared set-up, loads plotting and modelling packages and creates `results/Figures_v1/`.
 
 ```{r comp-10-main-figures-01}
 ## ============================================================================
-## PRINCE manuscript -- main Figures 1-4 (Nature Medicine style)
+## PRINCE figure set v1 -- main Figures 1-4 (Nature Medicine style)
 ## 183 mm double-column width, 7 pt Helvetica-like text, lower-case bold panel
 ## letters. Every displayed comparison uses patient-level summaries (mean over
 ## ROIs/AOIs) or the mixed-model statistics from C3-C8; nothing is AOI-level.
-## Outputs: results/Manuscript/Figure{1..4}.{pdf,png}
+## Outputs: results/Figures_v1/Figure{1..4}.{pdf,png}
 ## ============================================================================
 
 source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
@@ -74,7 +74,7 @@ suppressMessages({
 })
 setwd(PRINCE_DIR)
 check_ram_or_stop(20)
-fig_dir <- file.path(COMP_DIR, "Manuscript"); dir.create(fig_dir, showWarnings = FALSE)
+fig_dir <- file.path(COMP_DIR, "Figures_v1"); dir.create(fig_dir, showWarnings = FALSE)
 
 ```
 

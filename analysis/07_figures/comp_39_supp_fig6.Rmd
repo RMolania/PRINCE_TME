@@ -19,11 +19,11 @@ knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
 
 ## Overview
 
-Figure script that assembles the robustness and patient-selection analyses added after the v4 figure set into one six-panel figure. Panels: (a) pooled response effects from the Bayesian hierarchical model; (b) shrunken stratum-specific *FOLH1* effects; (c) *FOLH1* patient-permutation P from AOI-level mixed models with between- and within-patient purity terms; (d) cross-validated ROC curves for PSA50 failure; (e) decision curve; (f) the pre-specified radiobiology panel. The file is written as `Manuscript_v4/SupplementaryFig6` and becomes Supplementary Fig. 1 of the study. No statistics are computed here; every value is read from the R13–R16 outputs.
+Figure script that assembles the robustness and patient-selection analyses added after the v4 figure set into one six-panel figure. Panels: (a) pooled response effects from the Bayesian hierarchical model; (b) shrunken stratum-specific *FOLH1* effects; (c) *FOLH1* patient-permutation P from AOI-level mixed models with between- and within-patient purity terms; (d) cross-validated ROC curves for PSA50 failure; (e) decision curve; (f) the pre-specified radiobiology panel. The file is written as `Figures_v4/SupplementaryFig6` and becomes Supplementary Fig. 1 of the study. No statistics are computed here; every value is read from the R13–R16 outputs.
 
 **Figures, tables and results supported**
 
-- Supplementary Fig. 1a–f (released as `Manuscript_v4/SupplementaryFig6`, copied to `figures_and_tables/figures/` by `tools/assemble_figures_and_tables.sh`)
+- Supplementary Fig. 1a–f (released as `Figures_v4/SupplementaryFig6`, copied to `figures_and_tables/figures/` by `tools/assemble_figures_and_tables.sh`)
 
 **Pipeline step:** `./run_pipeline.sh --only 39_supp_fig6`. Approximate runtime: seconds.
 
@@ -41,8 +41,8 @@ Figure script that assembles the robustness and patient-selection analyses added
 
 **Outputs**
 
-- `results/Manuscript_v4/SupplementaryFig6.pdf`
-- `results/Manuscript_v4/SupplementaryFig6.png`
+- `results/Figures_v4/SupplementaryFig6.pdf`
+- `results/Figures_v4/SupplementaryFig6.png`
 
 **Depends on**: `comp_35_aoi_dream_purity`, `comp_36_radiobiology`, `comp_37_bayes_hierarchical`, `comp_38_prediction`
 
@@ -57,19 +57,19 @@ Shared theme, compartment colours and stratum labels, then panels a–c:
 
 ```{r comp-39-supp-fig6-01}
 ## ============================================================================
-## PRINCE manuscript v4 -- Supplementary Fig. 6: robustness and translational analyses added after v4
+## PRINCE figure set v4 -- Supplementary Fig. 6: robustness and translational analyses added after v4
 ##  a. Bayesian hierarchical pooling across strata (R15): pooled PSA effect per feature
 ##  b. FOLH1 shrunken stratum effects (R15, all nine strata)
 ##  c. AOI-level mixed models with within/between-patient purity terms (R13): FOLH1 patient-permutation P
 ##  d. Patient-selection models (R16): cross-validated ROC for PSA50 failure
 ##  e. Decision curve (R16)
 ##  f. Pre-specified radiobiology panel (R14): association with PSA change
-## Inputs: results/R13..R16; output: Manuscript_v4/SupplementaryFig6.{pdf,png}
+## Inputs: results/R13..R16; output: Figures_v4/SupplementaryFig6.{pdf,png}
 ## ============================================================================
 
 source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
 suppressMessages({ library(dplyr); library(tidyr); library(ggplot2); library(patchwork); library(scales); library(ragg); library(qs); library(pROC) })
-fig_dir <- file.path(COMP_DIR, "Manuscript_v4")
+fig_dir <- file.path(COMP_DIR, "Figures_v4")
 seg_cols <- c("CD45+" = "#7B9E3E", "PSMA+" = "#B5338A", "PanCK+PSMA-" = "#2C8C99")
 seg_lab <- c("CD45+" = "CD45+", "PSMA+" = "PSMA+", "PanCK+PSMA-" = "PanCK+PSMA−")
 code <- c("CD45+" = "CD45", "PSMA+" = "PSMA", "PanCK+PSMA-" = "PanCKPSMA"); seg_from_code <- setNames(names(code), code)

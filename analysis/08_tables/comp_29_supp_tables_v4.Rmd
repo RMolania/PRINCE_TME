@@ -34,8 +34,8 @@ It also writes the gene-level Supplementary Data (patient-pseudobulk and AOI-lev
 
 **Inputs**
 
-- `results/Manuscript_v3/Supplementary_Tables_v3.xlsx`
-- `results/Manuscript_v3/Supplementary_Data_5_gene_sets.csv`
+- `results/Figures_v3/Supplementary_Tables_v3.xlsx`
+- `results/Figures_v3/Supplementary_Data_5_gene_sets.csv`
 - `results/R6_aoi_level/*`
 - `results/R7_owen_bone/*`
 - `results/R8_tissue_pet_ctdna/*`
@@ -52,11 +52,11 @@ It also writes the gene-level Supplementary Data (patient-pseudobulk and AOI-lev
 
 **Outputs**
 
-- `results/Manuscript_v4/Supplementary_Tables_v4.xlsx`
-- `results/Manuscript_v4/Supplementary_Data_1a_pseudobulk_genes.csv`
-- `results/Manuscript_v4/Supplementary_Data_1b_AOI_level_genes.csv`
-- `results/Manuscript_v4/Supplementary_Data_2_primary_vs_bone_genes.csv`
-- `results/Manuscript_v4/Supplementary_Data_5_gene_sets.csv`
+- `results/Figures_v4/Supplementary_Tables_v4.xlsx`
+- `results/Figures_v4/Supplementary_Data_1a_pseudobulk_genes.csv`
+- `results/Figures_v4/Supplementary_Data_1b_AOI_level_genes.csv`
+- `results/Figures_v4/Supplementary_Data_2_primary_vs_bone_genes.csv`
+- `results/Figures_v4/Supplementary_Data_5_gene_sets.csv`
 
 **Depends on**: `comp_25_supp_tables_v3`, `comp_21b_assemble_v3`, `comp_13b_pseudobulk_loq`, `comp_13c_pi1_roi_heterogeneity`, `comp_26_aoi_level`, `comp_27_owen_bone`, `comp_30_tissue_pet_ctdna`, `comp_31_composition_sensitivity`, `comp_32_clws_extensions`, `comp_33_pccat_states`, `comp_33a_state_associations`, `comp_33b_state_validation`, `comp_33c_state_review`, `comp_34_progression`, `comp_35_aoi_dream_purity`, `comp_36_radiobiology`, `comp_37_bayes_hierarchical`, `comp_38_prediction`
 
@@ -65,11 +65,11 @@ It also writes the gene-level Supplementary Data (patient-pseudobulk and AOI-lev
 Load the v3 workbook and append sheets S38–S85, each with its caption in row 1: AOI-level arm (S38–S42), primary to bone and Owen et al. (S43–S49), tissue–PET–ctDNA (S50–S54), composition (S55–S59), ROI summaries (S60), pooling, normalisation and RUV-III (S61–S65), PCCAT tumour-state signatures, together with their validation, association and critical-review analyses (S66–S73), progression biopsies (S74), AOI-level purity-split models (S75–S77, with the separately run Cycle1 files appended), radiobiology (S78–S79), Bayesian pooling (S80–S82) and patient-selection models (S83–S85). Save the v4 workbook. Then write Supplementary Data 1a/1b (pseudobulk and AOI-level gene results) and 2 (primary-to-bone gene results), and read the v3 gene-set table.
 
 ```{r comp-29-supp-tables-v4-01}
-## PRINCE manuscript v4 -- Supplementary Tables: v3 workbook + AOI-level arm (R6) and
+## PRINCE figure set v4 -- Supplementary Tables: v3 workbook + AOI-level arm (R6) and
 ## primary-to-bone / Owen et al. comparison (R7); gene-set definitions extended (Supplementary Data 5).
 source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
 suppressMessages({ library(openxlsx); library(dplyr) })
-wb <- loadWorkbook(file.path(COMP_DIR, "Manuscript_v3", "Supplementary_Tables_v3.xlsx"))
+wb <- loadWorkbook(file.path(COMP_DIR, "Figures_v3", "Supplementary_Tables_v3.xlsx"))
 add <- function(name, df, desc) { if (is.character(df)) df <- read.csv(df); addWorksheet(wb, name)
   writeData(wb, name, desc, startRow = 1); writeData(wb, name, df, startRow = 3) }
 p <- function(...) file.path(COMP_DIR, ...)
@@ -124,13 +124,13 @@ add("S82_bayes_on_treatment", p("R15_bayes_hierarchical", "B_on_treatment_change
 add("S83_selection_models", p("R16_prediction", "A_model_performance.csv"), "Table S83. Patient-selection models for PSA50 failure, PSA change and rPFS: optimism-corrected, leave-pair-out and repeated stratified CV AUC, LOO R2 and C-index.")
 add("S84_decision_curve", p("R16_prediction", "B_decision_curve.csv"), "Table S84. Decision-curve net benefit of flagging likely non-responders (out-of-fold probabilities).")
 add("S85_sample_size", p("R16_prediction", "C_sample_size_riley.csv"), "Table S85. Minimum sample size for a selection model (Riley et al. 2020 criteria).")
-saveWorkbook(wb, file.path(COMP_DIR, "Manuscript_v4", "Supplementary_Tables_v4.xlsx"), overwrite = TRUE)
+saveWorkbook(wb, file.path(COMP_DIR, "Figures_v4", "Supplementary_Tables_v4.xlsx"), overwrite = TRUE)
 ## Supplementary Data 1-2 (gene-level) and 5 (gene sets)
 aoi_g <- qs::qread(p("R6_aoi_level", "A_aoi_transcriptome_wide_genes.qs"))
-write.csv(aoi_g, p("Manuscript_v4", "Supplementary_Data_1b_AOI_level_genes.csv"), row.names = FALSE)
-write.csv(qs::qread(p("R7_owen_bone", "A_primary_vs_bone_all_genes.qs")), p("Manuscript_v4", "Supplementary_Data_2_primary_vs_bone_genes.csv"), row.names = FALSE)
-file.copy(p("C13_pseudobulk_LOQ", "transcriptome_wide_limma_all_strata.csv"), p("Manuscript_v4", "Supplementary_Data_1a_pseudobulk_genes.csv"), overwrite = TRUE)
-gs <- read.csv(p("Manuscript_v3", "Supplementary_Data_5_gene_sets.csv"))
+write.csv(aoi_g, p("Figures_v4", "Supplementary_Data_1b_AOI_level_genes.csv"), row.names = FALSE)
+write.csv(qs::qread(p("R7_owen_bone", "A_primary_vs_bone_all_genes.qs")), p("Figures_v4", "Supplementary_Data_2_primary_vs_bone_genes.csv"), row.names = FALSE)
+file.copy(p("C13_pseudobulk_LOQ", "transcriptome_wide_limma_all_strata.csv"), p("Figures_v4", "Supplementary_Data_1a_pseudobulk_genes.csv"), overwrite = TRUE)
+gs <- read.csv(p("Figures_v3", "Supplementary_Data_5_gene_sets.csv"))
 ```
 
 Append the programmes used for the Owen et al. comparison to the gene-set table, under the collection label `Owen_et_al_comparison`, and write the v4 Supplementary Data 5.
@@ -144,6 +144,6 @@ owen <- list(IFN_I_core = c("IRF9", "STAT1", "STAT2", "IRF7", "STING1", "TMEM173
   cDC2_tolerogenic = c("ITGAM", "SIRPA", "CLEC4A", "GRN", "MNDA", "CD1C", "FCER1A", "CLEC10A"),
   DC_priming = c("CCL19", "CCL21", "IL33", "LAMP3", "FSCN1", "CCR7", "CD40", "CD80", "CD86"))
 add_gs <- bind_rows(lapply(names(owen), function(n) data.frame(collection = "Owen_et_al_comparison", set = n, gene = owen[[n]])))
-write.csv(bind_rows(gs, add_gs), p("Manuscript_v4", "Supplementary_Data_5_gene_sets.csv"), row.names = FALSE)
+write.csv(bind_rows(gs, add_gs), p("Figures_v4", "Supplementary_Data_5_gene_sets.csv"), row.names = FALSE)
 cat("Supplementary_Tables_v4.xlsx and Supplementary Data written\n")
 ```

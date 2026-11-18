@@ -3,14 +3,14 @@
 # Assemble the final figure set and supplementary files from results/,
 # then build the combined PDF of figures with their legends.
 #
-# Figure scripts were developed in successive versions (results folders Manuscript, Manuscript_v2 ... _v5), and the final
+# Figure scripts were developed in successive versions (results folders Figures_v1 ... Figures_v5), and the final
 # numbering re-uses panels from several of them. Five scripts are re-rendered without plot titles
 # (comp_44_run_notitle); the final figures are then copied under their final numbers.
 # Run by run_pipeline.sh after the last analysis step; can also be run on its own.
 # =============================================================================
 set -eu
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; export PRINCE_ROOT="$ROOT"; cd "$ROOT"
-R=results; N=$R/notitle; M=$R/Manuscript_v5; F=figures_and_tables/figures; S=figures_and_tables/supplementary
+R=results; N=$R/notitle; M=$R/Figures_v5; F=figures_and_tables/figures; S=figures_and_tables/supplementary
 mkdir -p "$N" "$F" "$S"
 
 # title-free renders of the earlier figure scripts whose panels appear in the final figure set

@@ -21,7 +21,7 @@ knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
 
 Draws the two-panel figure comparing the standR workflow with the patient-level primary analysis. Panel a shows, per stratum, the number of genes at FDR < 0.05 for non-responders versus responders under standR with AOIs independent, standR with patient blocking and patient pseudobulk (counts + 0.5 on a log scale; pseudobulk counts are not shown for on-treatment strata). Panel b shows, for the pre-treatment bone strata, the observed standR counts against the distribution from 50 patient-shuffled label sets (cross, null median; bar, to the 90th percentile; permutation P).
 
-The figure is saved as `ExtendedDataFig5` in `results/Manuscript_v3/` (its v3 numbering). The final Extended Data Fig. 10 is the title-free render of this script made by `comp_44_run_notitle`.
+The figure is saved as `ExtendedDataFig5` in `results/Figures_v3/` (its v3 numbering). The final Extended Data Fig. 10 is the title-free render of this script made by `comp_44_run_notitle`.
 
 **Figures, tables and results supported**
 
@@ -36,8 +36,8 @@ The figure is saved as `ExtendedDataFig5` in `results/Manuscript_v3/` (its v3 nu
 
 **Outputs**
 
-- `results/Manuscript_v3/ExtendedDataFig5.pdf`
-- `results/Manuscript_v3/ExtendedDataFig5.png`
+- `results/Figures_v3/ExtendedDataFig5.pdf`
+- `results/Figures_v3/ExtendedDataFig5.png`
 
 **Depends on**: `comp_22_standR_arm`, `comp_23_standR_permutation`
 
@@ -46,13 +46,13 @@ The figure is saved as `ExtendedDataFig5` in `results/Manuscript_v3/` (its v3 nu
 Read the standR summary and permutation tables, relabel strata (Primary, pre-treatment bone, on-treatment bone; CD45+, PSMA+, PanCK+PSMA−), build panel a (dodged bars of significant-gene counts for the three approaches) and panel b (observed count against the permutation median-to-90th-percentile range, annotated with the permutation P), and save the stacked figure as PDF and PNG at 183 mm width.
 
 ```{r comp-24-ed-standR-01}
-## PRINCE manuscript v3 -- Extended Data Fig. 5: the standR workflow and its calibration
+## PRINCE figure set v3 -- Extended Data Fig. 5: the standR workflow and its calibration
 ##  a  genes at FDR < 0.05 (NR vs R) per stratum: standR AOI-independent, standR patient-blocked,
 ##     patient-level pseudobulk (primary)
 ##  b  standR counts with real labels vs the same chain run on patient-shuffled labels (50x)
 source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
 suppressMessages({ library(dplyr); library(tidyr); library(ggplot2); library(patchwork); library(ragg) })
-fig_dir <- file.path(COMP_DIR, "Manuscript_v3")
+fig_dir <- file.path(COMP_DIR, "Figures_v3")
 seg_lab <- c(CD45 = "CD45+", PSMA = "PSMA+", PanCKPSMA = "PanCK+PSMA−")
 theme_set(theme_classic(base_size = 7, base_family = "Helvetica") + theme(strip.background = element_blank(),
   strip.text = element_text(face = "bold"), plot.title = element_text(size = 6.5), plot.tag = element_text(size = 9, face = "bold"),

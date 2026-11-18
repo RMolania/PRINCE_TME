@@ -33,20 +33,20 @@ It also adds the robustness tables built by the later scripts: the feature-free 
 - Supplementary Table 102 (STAMPEDE transcriptome signatures)
 - Supplementary Table 103 (pre-treatment *FOLH1* versus on-treatment response)
 - Supplementary Table 104 (morphometric PSMA⁺ tumour share)
-- Final workbook: `results/Manuscript_v5/Supplementary_Tables_v5.xlsx`, released as Supplementary_Tables_v6.xlsx
+- Final workbook: `results/Figures_v5/Supplementary_Tables_v5.xlsx`, released as Supplementary_Tables_v6.xlsx
 
 **Pipeline step:** `./run_pipeline.sh --only 47_supp_tables_audit`. Approximate runtime: under a minute.
 
 **Inputs**
 
-- `results/Manuscript_v5/Supplementary_Tables_v5.xlsx`
+- `results/Figures_v5/Supplementary_Tables_v5.xlsx`
 - `results/C13_pseudobulk_LOQ/transcriptome_wide_limma_all_strata.csv`
 - `results/C13_pseudobulk_LOQ/feature_tests_pseudobulk.csv`
 - `results/C13_pseudobulk_LOQ/transcriptome_wide_summary.csv`
 - `results/C13_pseudobulk_LOQ/paired_induction_apriori_sets.csv`
 - `results/C13_pseudobulk_LOQ/FOLH1_primary_met_concordance.csv`
 - `results/C13_pseudobulk_LOQ/PSA50_prediction_cv_permutation.csv`
-- `results/Manuscript_v5/p53_core_target_paired_induction_LOQ.csv`
+- `results/Figures_v5/p53_core_target_paired_induction_LOQ.csv`
 - `results/R19_purity_feature_free/*.csv`
 - `results/R20_depth_adjusted/FOLH1_depth_adjusted_pseudobulk.csv`
 - `results/R21_technical/*.csv`
@@ -57,7 +57,7 @@ It also adds the robustness tables built by the later scripts: the feature-free 
 
 **Outputs**
 
-- `results/Manuscript_v5/Supplementary_Tables_v5.xlsx (updated in place)`
+- `results/Figures_v5/Supplementary_Tables_v5.xlsx (updated in place)`
 
 **Depends on**: `comp_42`, `comp_13b`, `comp_28`, `comp_41`, `comp_45`, `comp_46`, `comp_49`, `comp_50`, `comp_51`, `comp_52`, `comp_53`
 
@@ -71,7 +71,7 @@ The script loads the existing workbook and defines `put()`, which deletes a shee
 
 ```{r comp-47-supp-tables-audit-01}
 ## ============================================================================
-## PRINCE manuscript v5 -- Supplementary Tables after the internal audit (2026-10-27).
+## PRINCE figure set v5 -- Supplementary Tables after the internal audit (2026-10-27).
 ##  * S15-S21 previously held pre-LOQ (C13_pseudobulk) results while the text reports the LOQ-universe
 ##    analysis; they are replaced by the C13_pseudobulk_LOQ equivalents (pi1 recomputed from the LOQ limma).
 ##  * S98: R19 purity adjustment with a feature-free SpatialDecon tumour fraction.
@@ -79,7 +79,7 @@ The script loads the existing workbook and defines `put()`, which deletes a shee
 ## ============================================================================
 source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
 suppressMessages({ library(openxlsx); library(dplyr); library(limma) })
-f <- file.path(COMP_DIR, "Manuscript_v5", "Supplementary_Tables_v5.xlsx")
+f <- file.path(COMP_DIR, "Figures_v5", "Supplementary_Tables_v5.xlsx")
 wb <- loadWorkbook(f)
 p <- function(...) file.path(COMP_DIR, ...)
 put <- function(name, df, desc) {
@@ -95,7 +95,7 @@ put("S16_pb_transcriptome", read.csv(p("C13_pseudobulk_LOQ", "transcriptome_wide
 put("S17_pi1", pi1, "Table S17. Estimated fraction of response-associated genes (pi1 = 1 - pi0; limma propTrueNull, lfdr) per stratum, LOQ gene universe.")
 put("S18_paired_programmes", read.csv(p("C13_pseudobulk_LOQ", "paired_induction_apriori_sets.csv")),
     "Table S18. Paired pre-treatment -> on-treatment change in pre-specified programmes, LOQ gene universe.")
-put("S19_p53_targets", read.csv(p("Manuscript_v5", "p53_core_target_paired_induction_LOQ.csv")),
+put("S19_p53_targets", read.csv(p("Figures_v5", "p53_core_target_paired_induction_LOQ.csv")),
     "Table S19. Paired induction of canonical p53 target genes, LOQ gene universe (SESN1 and TP53I3 below LOQ in every paired universe).")
 put("S20_FOLH1", read.csv(p("C13_pseudobulk_LOQ", "FOLH1_primary_met_concordance.csv")),
     "Table S20. FOLH1 primary-metastasis concordance (patient pseudobulk, LOQ gene universe).")

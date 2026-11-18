@@ -19,7 +19,7 @@ knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
 
 ## Overview
 
-Utility for the journal figure style, in which panel titles and subtitles are carried by the legends rather than the figure. It runs any figure script with three changes. Every line-initial `fig_dir <- ...` assignment is redirected to a chosen output folder. `labs()` and `ggtitle()` are masked so that titles and subtitles are dropped, and each dropped text is recorded in `dropped_titles_<script>.tsv` so its content can be moved into the legends. `ggsave()` is masked to blank `plot.title` and `plot.subtitle` on every patchwork panel. For `comp_41_figures_v5`, which rebuilds v4 panels by evaluating `comp_28_figures_v4`, the inner scratch folder is redirected to `<out_dir>/v4`. This is why several final Extended Data figures are taken from `Manuscript_v5/v4/`. The analysis code itself is not changed.
+Utility for the journal figure style, in which panel titles and subtitles are carried by the legends rather than the figure. It runs any figure script with three changes. Every line-initial `fig_dir <- ...` assignment is redirected to a chosen output folder. `labs()` and `ggtitle()` are masked so that titles and subtitles are dropped, and each dropped text is recorded in `dropped_titles_<script>.tsv` so its content can be moved into the legends. `ggsave()` is masked to blank `plot.title` and `plot.subtitle` on every patchwork panel. For `comp_41_figures_v5`, which rebuilds v4 panels by evaluating `comp_28_figures_v4`, the inner scratch folder is redirected to `<out_dir>/v4`. This is why several final Extended Data figures are taken from `Figures_v5/v4/`. The analysis code itself is not changed.
 
 **Figures, tables and results supported**
 
@@ -47,7 +47,7 @@ Define masking versions of `labs`, `ggtitle` and `ggsave` in the global environm
 
 ```{r comp-44-run-notitle-01}
 ## ============================================================================
-## PRINCE manuscript v5 -- re-render a figure script without panel titles/subtitles.
+## PRINCE figure set v5 -- re-render a figure script without panel titles/subtitles.
 ## Usage: Rscript comp_44_run_notitle.R <script.R> <out_dir>
 ##   * every `fig_dir <- ...` assignment at line start is redirected to <out_dir>
 ##   * labs()/ggtitle() drop title and subtitle (recorded to <out_dir>/dropped_titles_<script>.tsv

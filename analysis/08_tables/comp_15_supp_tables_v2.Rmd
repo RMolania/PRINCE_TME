@@ -33,14 +33,14 @@ Sheets S15–S21 are later replaced with their LOQ-universe equivalents by comp_
 
 **Inputs**
 
-- `results/Manuscript/Supplementary_Tables.xlsx`
+- `results/Figures_v1/Supplementary_Tables.xlsx`
 - `results/C13_pseudobulk/*.csv`
-- `results/Manuscript_v2/p53_core_target_paired_induction.csv`
-- `results/Manuscript_v2/ruv_vs_pseudobulk_feature_comparison.csv`
+- `results/Figures_v2/p53_core_target_paired_induction.csv`
+- `results/Figures_v2/ruv_vs_pseudobulk_feature_comparison.csv`
 
 **Outputs**
 
-- `results/Manuscript_v2/Supplementary_Tables_v2.xlsx`
+- `results/Figures_v2/Supplementary_Tables_v2.xlsx`
 
 **Depends on**: `comp_11_extended_figures`, `comp_13_pseudobulk_primary`, `comp_13c_pi1_roi_heterogeneity`, `comp_14_revised_figures`
 
@@ -49,11 +49,11 @@ Sheets S15–S21 are later replaced with their LOQ-universe equivalents by comp_
 Loads the version 1 workbook, defines a helper that adds one sheet (caption in row 1, table from row 3), adds S15–S22 from the comp_13, comp_13c and comp_14 outputs, and saves the version 2 workbook.
 
 ```{r comp-15-supp-tables-v2-01}
-## PRINCE manuscript v2 -- Supplementary Tables: v1 workbook + pseudobulk primary
-## results (S15-S21). Writes Manuscript_v2/Supplementary_Tables_v2.xlsx.
+## PRINCE figure set v2 -- Supplementary Tables: v1 workbook + pseudobulk primary
+## results (S15-S21). Writes Figures_v2/Supplementary_Tables_v2.xlsx.
 source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
 suppressMessages(library(openxlsx))
-wb <- loadWorkbook(file.path(COMP_DIR, "Manuscript", "Supplementary_Tables.xlsx"))
+wb <- loadWorkbook(file.path(COMP_DIR, "Figures_v1", "Supplementary_Tables.xlsx"))
 add <- function(name, file, desc) {
   df <- read.csv(file); addWorksheet(wb, name)
   writeData(wb, name, desc, startRow = 1); writeData(wb, name, df, startRow = 3)
@@ -64,10 +64,10 @@ add("S15_pb_feature_tests", p("C13_pseudobulk", "feature_tests_pseudobulk.csv"),
 add("S16_pb_transcriptome", p("C13_pseudobulk", "transcriptome_wide_summary.csv"), "Table S16. PRIMARY: transcriptome-wide pseudobulk limma summary per stratum.")
 add("S17_pi1", p("C13_pseudobulk", "pi1_nonnull_fraction.csv"), "Table S17. Estimated fraction of response-associated genes (1 - pi0) per stratum.")
 add("S18_paired_programmes", p("C13_pseudobulk", "paired_induction_apriori_sets.csv"), "Table S18. Paired Screening->Cycle1 change in pre-specified programmes.")
-add("S19_p53_targets", p("Manuscript_v2", "p53_core_target_paired_induction.csv"), "Table S19. Paired induction of canonical p53 target genes.")
+add("S19_p53_targets", p("Figures_v2", "p53_core_target_paired_induction.csv"), "Table S19. Paired induction of canonical p53 target genes.")
 add("S20_FOLH1", p("C13_pseudobulk", "FOLH1_primary_met_concordance.csv"), "Table S20. FOLH1 primary-metastasis concordance (patient pseudobulk).")
 add("S21_prediction", p("C13_pseudobulk", "PSA50_prediction_cv_permutation.csv"), "Table S21. PSA50 prediction: repeated stratified CV AUC and permutation P.")
-add("S22_RUV_vs_PB", p("Manuscript_v2", "ruv_vs_pseudobulk_feature_comparison.csv"), "Table S22. Agreement of AOI-level RUV mixed models with pseudobulk.")
-saveWorkbook(wb, file.path(COMP_DIR, "Manuscript_v2", "Supplementary_Tables_v2.xlsx"), overwrite = TRUE)
+add("S22_RUV_vs_PB", p("Figures_v2", "ruv_vs_pseudobulk_feature_comparison.csv"), "Table S22. Agreement of AOI-level RUV mixed models with pseudobulk.")
+saveWorkbook(wb, file.path(COMP_DIR, "Figures_v2", "Supplementary_Tables_v2.xlsx"), overwrite = TRUE)
 cat("Supplementary_Tables_v2.xlsx written\n")
 ```
