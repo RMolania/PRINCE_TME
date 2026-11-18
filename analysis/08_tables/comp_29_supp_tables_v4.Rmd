@@ -1,0 +1,149 @@
+---
+title: "Supplementary Tables, v4 additions (S38–S85) and Supplementary Data 1, 2 and 5"
+subtitle: "PRINCE spatial transcriptomics: `comp_29_supp_tables_v4`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+Extends the cumulative Supplementary Tables workbook (v3 from `comp_25_supp_tables_v3`) with one captioned sheet per analysis of the v4 round: the AOI-level arm (R6), primary-to-bone and Owen et al. comparison (R7), tissue–PET–ctDNA integration (R8), composition sensitivity (R9), ROI-level heterogeneity, the pooling, normalisation and RUV-III extensions (R10), the PCCAT tumour-state analyses (R11), progression biopsies (R12), AOI-level purity-split models (R13), the radiobiology panel (R14), Bayesian hierarchical pooling (R15) and patient-selection models (R16). For R13 the on-treatment strata were run separately, so their `_cycle1` files are appended when present.
+
+It also writes the gene-level Supplementary Data (patient-pseudobulk and AOI-level gene results; primary-to-bone gene results) and extends the gene-set table (Supplementary Data 5) with the programmes used for the Owen et al. comparison. Although it is numbered before them, this script reads the outputs of `comp_30`–`comp_38`, so it must be run after those analyses.
+
+**Manuscript items supported**
+
+- Supplementary Tables 38–85 (sheets S38_AOI_tw_summary to S85_sample_size), carried unchanged into the final workbook
+- Supplementary Data 1 (gene-level results: patient pseudobulk and AOI level), copied forward by `comp_42_supp_tables_v5`
+- Supplementary Data 2 (primary-to-bone gene-level results), copied forward by `comp_42_supp_tables_v5`
+- Supplementary Data 5 (gene-set definitions, including the Owen et al. programmes)
+
+**Pipeline step:** `./run_pipeline.sh --only 29_supp_tables_v4`. Approximate runtime: seconds.
+
+**Inputs**
+
+- `results/Manuscript_v3/Supplementary_Tables_v3.xlsx`
+- `results/Manuscript_v3/Supplementary_Data_5_gene_sets.csv`
+- `results/R6_aoi_level/*`
+- `results/R7_owen_bone/*`
+- `results/R8_tissue_pet_ctdna/*`
+- `results/R9_composition/*`
+- `results/C13_pseudobulk_LOQ/ROI_summary_heterogeneity_FOLH1_AR.csv`
+- `results/C13_pseudobulk_LOQ/transcriptome_wide_limma_all_strata.csv`
+- `results/R10_clws_extensions/*`
+- `results/R11_pccat_states/{A_PCCAT_state_signatures_top20.csv,state_validation/,state_association/,state_review/}`
+- `results/R12_progression/progression_patient_timepoint_markers.csv`
+- `results/R13_aoi_dream_purity/*`
+- `results/R14_radiobiology/*`
+- `results/R15_bayes_hierarchical/*`
+- `results/R16_prediction/*`
+
+**Outputs**
+
+- `results/Manuscript_v4/Supplementary_Tables_v4.xlsx`
+- `results/Manuscript_v4/Supplementary_Data_1a_pseudobulk_genes.csv`
+- `results/Manuscript_v4/Supplementary_Data_1b_AOI_level_genes.csv`
+- `results/Manuscript_v4/Supplementary_Data_2_primary_vs_bone_genes.csv`
+- `results/Manuscript_v4/Supplementary_Data_5_gene_sets.csv`
+
+**Depends on**: `comp_25_supp_tables_v3`, `comp_21b_assemble_v3`, `comp_13b_pseudobulk_loq`, `comp_13c_pi1_roi_heterogeneity`, `comp_26_aoi_level`, `comp_27_owen_bone`, `comp_30_tissue_pet_ctdna`, `comp_31_composition_sensitivity`, `comp_32_clws_extensions`, `comp_33_pccat_states`, `comp_33a_state_associations`, `comp_33b_state_validation`, `comp_33c_state_review`, `comp_34_progression`, `comp_35_aoi_dream_purity`, `comp_36_radiobiology`, `comp_37_bayes_hierarchical`, `comp_38_prediction`
+
+## Analysis
+
+Load the v3 workbook and append sheets S38–S85, each with its caption in row 1: AOI-level arm (S38–S42), primary to bone and Owen et al. (S43–S49), tissue–PET–ctDNA (S50–S54), composition (S55–S59), ROI summaries (S60), pooling, normalisation and RUV-III (S61–S65), PCCAT tumour-state signatures, together with their validation, association and critical-review analyses (S66–S73), progression biopsies (S74), AOI-level purity-split models (S75–S77, with the separately run Cycle1 files appended), radiobiology (S78–S79), Bayesian pooling (S80–S82) and patient-selection models (S83–S85). Save the v4 workbook. Then write Supplementary Data 1a/1b (pseudobulk and AOI-level gene results) and 2 (primary-to-bone gene results), and read the v3 gene-set table.
+
+```{r comp-29-supp-tables-v4-01}
+## PRINCE manuscript v4 -- Supplementary Tables: v3 workbook + AOI-level arm (R6) and
+## primary-to-bone / Owen et al. comparison (R7); gene-set definitions extended (Supplementary Data 5).
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({ library(openxlsx); library(dplyr) })
+wb <- loadWorkbook(file.path(COMP_DIR, "Manuscript_v3", "Supplementary_Tables_v3.xlsx"))
+add <- function(name, df, desc) { if (is.character(df)) df <- read.csv(df); addWorksheet(wb, name)
+  writeData(wb, name, desc, startRow = 1); writeData(wb, name, df, startRow = 3) }
+p <- function(...) file.path(COMP_DIR, ...)
+add("S38_AOI_tw_summary", p("R6_aoi_level", "A_aoi_transcriptome_wide_summary.csv"), "Table S38. AOI-level limma-voom with patient blocking (duplicateCorrelation): genes at FDR < 0.05/0.1 and pi1 per stratum, PSA change and NR vs R.")
+add("S39_AOI_perm", p("R6_aoi_level", "A_aoi_permutation_calibration.csv"), "Table S39. AOI-level gene counts vs 200 patient-level permutations of the outcome.")
+add("S40_AOI_vs_pb", p("R6_aoi_level", "A_aoi_vs_pseudobulk_concordance.csv"), "Table S40. Concordance of AOI-level and patient pseudobulk gene statistics.")
+add("S41_AOI_feature_LMM", p("R6_aoi_level", "B_aoi_feature_lmm.csv"), "Table S41. AOI-level linear mixed models for pre-specified features (feature ~ PSA + batch + (1|patient)), Satterthwaite and patient-permutation P, with pseudobulk comparison.")
+add("S42_AOI_on_treatment", p("R6_aoi_level", "C_aoi_on_treatment_change.csv"), "Table S42. AOI-level on-treatment change (feature ~ timepoint + (1|patient)) and change x PSA interaction.")
+add("S43_bone_programmes", p("R7_owen_bone", "A_primary_vs_bone_programmes.csv"), "Table S43. Primary tumour -> bone metastasis programme change (paired pseudobulk), with expression-matched null and quality-adjusted estimates; all AOIs and low-signal AOIs excluded.")
+add("S44_bone_Owen_genes", p("R7_owen_bone", "A_primary_vs_bone_owen_genes.csv"), "Table S44. Owen et al. marker genes, primary vs bone (paired pseudobulk; raw, expression-matched and quality-adjusted).")
+add("S45_bone_quality", p("R7_owen_bone", "B_primary_vs_bone_global_quality.csv"), "Table S45. Primary vs bone: global expression shift, AOI signal quality and housekeeping genes.")
+add("S46_bone_AOI_genes", p("R7_owen_bone", "C_aoi_primary_vs_bone_owen_genes.csv"), "Table S46. Owen et al. marker genes, primary vs bone at AOI level (patient-blocked limma-voom).")
+add("S47_bone_AOI_progs", p("R7_owen_bone", "C_aoi_primary_vs_bone_programmes.csv"), "Table S47. Programmes, primary vs bone at AOI level (lmer with patient random effect).")
+add("S48_CD276_IFN_HLA", p("R7_owen_bone", "D_CD276_vs_IFN_HLA.csv"), "Table S48. CD276 (B7-H3) vs IFN-I / HLA-I programmes in tumour compartments: within-patient AOI-level and patient-level associations.")
+add("S49_Owen_vs_response", p("R7_owen_bone", "E_owen_markers_vs_response.csv"), "Table S49. Owen et al. markers and programmes vs PSA response per stratum (patient pseudobulk; Spearman, batch-adjusted, excluding batch_3, leave-one-out).")
+add("S50_tissue_PET_ctDNA", p("R8_tissue_pet_ctdna", "A_tissue_vs_PET_ctDNA.csv"), "Table S50. Tissue FOLH1 / AR activity vs PSMA-PET, FDG-PET and baseline ctDNA fraction (Spearman).")
+add("S51_FOLH1_beyond_PET", p("R8_tissue_pet_ctdna", "B_FOLH1_beyond_PET.csv"), "Table S51. Added value of tissue FOLH1 over PSMA-PET SUVmean for PSA change (nested linear models).")
+add("S52_tissue_by_TSG", p("R8_tissue_pet_ctdna", "C_tissue_by_TSG_status.csv"), "Table S52. Tissue features by ctDNA TP53/PTEN/RB1 status.")
+add("S53_tissue_RECIP_ctDNA", p("R8_tissue_pet_ctdna", "D_on_treatment_tissue_vs_RECIP_ctDNA.csv"), "Table S53. On-treatment tissue features vs 12-week RECIP and week-12 ctDNA detection.")
+add("S54_ATM_SPOP_MMRd", p("R8_tissue_pet_ctdna", "E_ATM_SPOP_MMRd_programme_percentiles.csv"), "Table S54. Tissue programme percentiles in ATM-, SPOP- and MMRd-altered patients.")
+add("S55_composition_vs_response", p("R9_composition", "A_composition_vs_response.csv"), "Table S55. Library-size-weighted deconvolved composition (tumour, immune, bone/marrow) vs response.")
+add("S56_features_adj_composition", p("R9_composition", "B_features_adjusted_for_composition.csv"), "Table S56. Key features vs PSA change adjusted for tumour, immune and bone/marrow fractions.")
+add("S57_composition_change", p("R9_composition", "C_composition_change_on_treatment.csv"), "Table S57. Change in deconvolved composition between paired pre- and on-treatment biopsies.")
+add("S58_induction_adj_composition", p("R9_composition", "C_induction_adjusted_for_composition.csv"), "Table S58. On-treatment induction adjusted for change in tumour and immune fractions.")
+add("S59_tw_adj_composition", p("R9_composition", "D_transcriptome_wide_with_composition.csv"), "Table S59. Transcriptome-wide PSA association with composition covariates.")
+add("S60_ROI_summaries", p("C13_pseudobulk_LOQ", "ROI_summary_heterogeneity_FOLH1_AR.csv"), "Table S60. ROI-level summaries (mean, min, max, SD, fraction low) of FOLH1 and AR activity vs PSA change.")
+add("S61_pooled_FOLH1_programmes", p("R10_clws_extensions", "2a_pooled_feature_models.csv"), "Table S61. Patient-level models pooling compartments and timepoints (patient-permutation P).")
+add("S62_pooled_genewise", p("R10_clws_extensions", "2b_pooled_genewise_summary.csv"), "Table S62. Pooled transcriptome-wide models per timepoint, permutation calibration and FOLH1 rank.")
+add("S63_site_x_response", p("R10_clws_extensions", "5_site_x_response_programmes.csv"), "Table S63. Primary-to-bone programme change vs response (site x PSA interaction).")
+add("S64_normalisation", p("R10_clws_extensions", "1_normalisation_features.csv"), "Table S64. Key features under five normalisation methods.")
+add("S65_RUVIII", p("R10_clws_extensions", "4_ruv3_features.csv"), "Table S65. Key features after RUV-III anchored on control-tissue technical replicates.")
+add("S66_PCCAT_state_signatures", p("R11_pccat_states", "A_PCCAT_state_signatures_top20.csv"), "Table S66. PCCAT-derived tumour-state signatures (top 20 genes; CRPC/mCRPC/NEPC epithelial cells).")
+add("S67_PCCAT_signature_validity", p("R11_pccat_states", "state_validation", "B1_leave_donor_out_AUC.csv"), "Table S67. Leave-donor-out specificity of PCCAT state signatures.")
+add("S68_PCCAT_detection_quality", p("R11_pccat_states", "state_validation", "B2_measurement_quality_by_stratum.csv"), "Table S68. Detection above LOQ, coherence and contamination of state signatures in PRINCE.")
+add("S69_PCCAT_states_vs_response", p("R11_pccat_states", "state_association", "2_state_vs_response.csv"), "Table S69. Tumour-state scores vs PSA response, response group and rPFS.")
+add("S70_PCCAT_states_vs_FOLH1_AR", p("R11_pccat_states", "state_association", "1a_between_patient_state_vs_FOLH1_AR.csv"), "Table S70. Tumour-state scores vs FOLH1 and AR activity between patients.")
+add("S71_NE_positive_AOIs", p("R11_pccat_states", "state_validation", "B3_NE_positive_AOIs.csv"), "Table S71. AOIs with CHGA, CHGB and SYP above LOQ.")
+add("S72_NE_detection_patients", p("R11_pccat_states", "state_review", "C2_NE_detection_patient_level_tests.csv"), "Table S72. Patient-level neuroendocrine marker detection vs response and FOLH1.")
+add("S73_power", p("R11_pccat_states", "state_review", "C1_power.csv"), "Table S73. Power with five non-responders.")
+add("S74_progression_biopsies", p("R12_progression", "progression_patient_timepoint_markers.csv"), "Table S74. Progression biopsies: PSMA, AR-output, neuroendocrine and proliferation markers per patient and timepoint (descriptive).")
+## R13 (AOI-level purity-split models; Cycle1 strata were run separately), R14-R16
+r13 <- function(f) bind_rows(read.csv(p("R13_aoi_dream_purity", paste0(f, ".csv"))),
+  if (file.exists(p("R13_aoi_dream_purity", paste0(f, "_cycle1.csv")))) read.csv(p("R13_aoi_dream_purity", paste0(f, "_cycle1.csv"))))
+add("S75_AOI_purity_agreement", r13("A_purity_agreement"), "Table S75. SpatialDecon tumour fraction vs ESTIMATE purity (AOI, within-patient and patient level) and purity / signal depth vs PSA change.")
+add("S76_AOI_purity_features", r13("B_feature_models"), "Table S76. AOI-level mixed models with between/within-patient purity terms: M0 PSA + batch; M1 + SpatialDecon; M2 + ESTIMATE; M3 + SpatialDecon + signal depth; Kenward-Roger and 500 patient-permutation P.")
+add("S77_AOI_purity_dream", r13("C_genomewide_dream"), "Table S77. Transcriptome-wide dream models under M0-M3: genes at FDR < 0.05, FOLH1 rank, concordance with pseudobulk, patient-permutation calibration (M3).")
+add("S78_radiobiology_coherence", p("R14_radiobiology", "A_set_coherence.csv"), "Table S78. Radiobiology panel: genes detected and mean pairwise Spearman correlation per set and stratum.")
+add("S79_radiobiology_tests", p("R14_radiobiology", "B_radiobiology_vs_response.csv"), "Table S79. Radiobiology panel vs PSA change (with and without tumour fraction), NR vs R and rPFS; BH-FDR within baseline and on-treatment families.")
+add("S80_bayes_pooled", p("R15_bayes_hierarchical", "A_pooled_effect_mu.csv"), "Table S80. Bayesian hierarchical model: pooled PSA effect (mu) per feature, strata set and prior on between-stratum s.d.")
+add("S81_bayes_strata", p("R15_bayes_hierarchical", "A_stratum_shrunken_beta.csv"), "Table S81. Bayesian hierarchical model: shrunken stratum-specific effects.")
+add("S82_bayes_on_treatment", p("R15_bayes_hierarchical", "B_on_treatment_change_pooled.csv"), "Table S82. Bayesian hierarchical model of on-treatment change vs PSA change pooled over compartments.")
+add("S83_selection_models", p("R16_prediction", "A_model_performance.csv"), "Table S83. Patient-selection models for PSA50 failure, PSA change and rPFS: optimism-corrected, leave-pair-out and repeated stratified CV AUC, LOO R2 and C-index.")
+add("S84_decision_curve", p("R16_prediction", "B_decision_curve.csv"), "Table S84. Decision-curve net benefit of flagging likely non-responders (out-of-fold probabilities).")
+add("S85_sample_size", p("R16_prediction", "C_sample_size_riley.csv"), "Table S85. Minimum sample size for a selection model (Riley et al. 2020 criteria).")
+saveWorkbook(wb, file.path(COMP_DIR, "Manuscript_v4", "Supplementary_Tables_v4.xlsx"), overwrite = TRUE)
+## Supplementary Data 1-2 (gene-level) and 5 (gene sets)
+aoi_g <- qs::qread(p("R6_aoi_level", "A_aoi_transcriptome_wide_genes.qs"))
+write.csv(aoi_g, p("Manuscript_v4", "Supplementary_Data_1b_AOI_level_genes.csv"), row.names = FALSE)
+write.csv(qs::qread(p("R7_owen_bone", "A_primary_vs_bone_all_genes.qs")), p("Manuscript_v4", "Supplementary_Data_2_primary_vs_bone_genes.csv"), row.names = FALSE)
+file.copy(p("C13_pseudobulk_LOQ", "transcriptome_wide_limma_all_strata.csv"), p("Manuscript_v4", "Supplementary_Data_1a_pseudobulk_genes.csv"), overwrite = TRUE)
+gs <- read.csv(p("Manuscript_v3", "Supplementary_Data_5_gene_sets.csv"))
+```
+
+Append the programmes used for the Owen et al. comparison to the gene-set table, under the collection label `Owen_et_al_comparison`, and write the v4 Supplementary Data 5.
+
+```{r comp-29-supp-tables-v4-02}
+owen <- list(IFN_I_core = c("IRF9", "STAT1", "STAT2", "IRF7", "STING1", "TMEM173", "OAS1", "ISG15", "MX1", "IFIT1", "IFI6"),
+  HLA_I = c("HLA-A", "HLA-B", "HLA-C", "B2M", "TAP1", "TAP2", "TAPBP"),
+  HLA_II = c("HLA-DRA", "HLA-DRB1", "HLA-DPA1", "HLA-DPB1", "HLA-DQA1", "HLA-DQB1", "HLA-DMA", "HLA-DMB", "CD74"),
+  Checkpoints = c("CD274", "PDCD1", "CTLA4", "LAG3", "TNFRSF9", "HAVCR2", "TIGIT"), CD8_cytotoxic = c("CD8A", "CD8B", "GZMB", "GZMA", "PRF1", "NKG7"),
+  Treg = c("FOXP3", "IL2RA", "CTLA4", "IKZF2"), M2_macrophage = c("CD163", "MRC1", "MSR1", "F13A1", "STAB1", "CD209", "LYVE1", "FOLR2"),
+  cDC2_tolerogenic = c("ITGAM", "SIRPA", "CLEC4A", "GRN", "MNDA", "CD1C", "FCER1A", "CLEC10A"),
+  DC_priming = c("CCL19", "CCL21", "IL33", "LAMP3", "FSCN1", "CCR7", "CD40", "CD80", "CD86"))
+add_gs <- bind_rows(lapply(names(owen), function(n) data.frame(collection = "Owen_et_al_comparison", set = n, gene = owen[[n]])))
+write.csv(bind_rows(gs, add_gs), p("Manuscript_v4", "Supplementary_Data_5_gene_sets.csv"), row.names = FALSE)
+cat("Supplementary_Tables_v4.xlsx and Supplementary Data written\n")
+```

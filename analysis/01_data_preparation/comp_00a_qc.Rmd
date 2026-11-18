@@ -1,0 +1,351 @@
+---
+title: "Segment-aware AOI and gene quality control (all biopsy sites)"
+subtitle: "PRINCE spatial transcriptomics: `comp_00a_qc`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data/raw"))
+```
+
+## Overview
+
+This script applies AOI-level and gene-level quality control to the full GeoMx Whole Transcriptome Atlas object. It runs before the bone-only restriction, so it covers every biopsy site and the control tissue microarray. The main SummarizedExperiment does not contain the negative-control (NegProbe) probe counts. These are recovered from a separate count file by rebuilding its column names from each AOI's `segment_display_name` (sample | ROI | segment) with `make.names()`. Before the mapping is used, it is checked by correlating raw counts for randomly chosen shared genes in randomly chosen AOIs. AOIs whose names are duplicated (the same tissue rescanned in another DSP experiment) are flagged as ambiguous.
+
+Each AOI's background is the geometric mean of its negative probes. At this QC stage the limit of quantification is set to 2 × that geometric mean. The manuscript's primary gene universes use a different LOQ (geometric mean × geometric s.d.², with a floor of 2), computed in a later step. An AOI fails QC if sequencing saturation is below 50% or fewer than 5% of genes exceed its LOQ. AOIs without a negative-probe mapping cannot be assessed and are not carried forward. A gene is kept if it exceeds LOQ in at least 10% of QC-passing AOIs in at least one segment. QC failures are cross-tabulated by segment, timepoint and response group, to check that exclusions do not concentrate in one outcome group.
+
+The script sets its own paths rather than sourcing `comp_00_guard.R`. It reads from `data/raw/` and writes the QC'd objects to `data/interim/`, from where `comp_00b_bone_cohort` takes them.
+
+**Manuscript items supported**
+
+- Methods: Spatial transcriptomic profiling (AOI quality control that precedes the site restriction and the 550 analysed AOIs)
+- Intermediate results used by comp_00b_bone_cohort and, through its bone-only objects, by every downstream analysis
+
+**Pipeline step:** `./run_pipeline.sh --only 00a_qc`. Approximate runtime: minutes.
+
+**Inputs**
+
+- `data/raw/PRINCE_GeoMx_SE_RawCount_SampleAnnot_Filtered.qs`
+- `data/raw/Prince_countdata_with_ncg.cvs`
+
+**Outputs**
+
+- `data/interim/phase2_se_with_qc_metrics.qs`
+- `data/interim/phase2_se_qc_filtered.qs`
+- `data/interim/phase2_qc_metrics_table.rds`
+- `results/Phase2_QC/qc_<metric>_by_segment_tissue.pdf`
+
+**Depends on**: none
+
+## Analysis
+
+Script header: scope of the quality-control step, and why the negative-control probe mapping has to be rebuilt and validated here.
+
+Loads packages, sets the working directory to `data/raw/`, creates `data/interim/` and `results/Phase2_QC/`, and reads the raw GeoMx object (count assay `all_count` and AOI annotation).
+
+```{r comp-00a-qc-01}
+## ============================================================================
+## PRINCE Trial GeoMx DSP -- Phase 2: Segment-Aware Quality Control
+##
+## Builds on phase1_design_audit.R / phase1_design_audit_tables.rds.
+##
+## Does NOT depend on the missing Prince_Utils.R / Prince_aoi_annot.csv files.
+## Negative-control-probe data (needed for LOQ) is not present in the main SE
+## (it was intentionally stripped -- see Prince_Archival_CD45.Rmd's own "Adding
+## nanostring ncg probes" chunk, which itself depends on the missing
+## Prince_aoi_annot.csv to do this merge). This script RECONSTRUCTS the same
+## AOI-name mapping independently from colData$segment_display_name (which
+## encodes "<sample_name> | <roi_name> | <segment_name>", the same string the
+## original Hugo count-matrix column names were derived from via make.names()).
+## The reconstruction is validated below (exact/near-exact raw-count
+## concordance for genes shared between both sources) before being trusted.
+## ============================================================================
+
+suppressMessages({
+  library(qs)
+  library(SummarizedExperiment)
+  library(dplyr)
+  library(tidyr)
+  library(ggplot2)
+})
+
+PRINCE_ROOT <- normalizePath(Sys.getenv("PRINCE_ROOT", "."))
+setwd(file.path(PRINCE_ROOT, "data", "raw"))                 # raw inputs; outputs go to data/interim
+dir.create(file.path(PRINCE_ROOT, "data", "interim"), showWarnings = FALSE)
+dir.create(file.path(PRINCE_ROOT, "results", "Phase2_QC"), showWarnings = FALSE, recursive = TRUE)
+
+se <- qs::qread("PRINCE_GeoMx_SE_RawCount_SampleAnnot_Filtered.qs")
+cd <- as.data.frame(colData(se))
+current_count_data <- assay(se, "all_count")
+
+```
+
+### Step 0: negative-control probe mapping
+Reads the header of the count file that contains the negative probes (the first 12 columns are probe annotation). Each AOI's expected column name is rebuilt from `segment_display_name` and matched. Unmatched AOIs, which have no background estimate, and ambiguous AOIs (duplicated names from rescanned tissue) are listed. As a check, raw counts of 50 random shared endogenous genes are correlated between the two sources in 15 random matched AOIs (seed 1). Correlations near 1 confirm that the reconstructed mapping is correct.
+
+```{r comp-00a-qc-02}
+## ---------------------------------------------------------------------------
+## Step 0: Reconstruct + validate the negative-control-probe (NCG) mapping
+## ---------------------------------------------------------------------------
+cat("\n================ NCG MAPPING RECONSTRUCTION & VALIDATION ================\n")
+
+hdr <- readLines("Prince_countdata_with_ncg.cvs", n = 1)
+hdr_cols <- gsub('^"|"$', "", strsplit(hdr, ",")[[1]])
+aoi_cols_csv <- hdr_cols[-(1:12)]
+
+cand <- make.names(cd$segment_display_name)
+match_idx <- match(cand, aoi_cols_csv)
+matched <- which(!is.na(match_idx))
+unmatched <- which(is.na(match_idx))
+
+cat("AOIs matched to a Hugo NCG count column:", length(matched), "/", nrow(cd),
+    sprintf("(%.1f%%)\n", 100 * length(matched) / nrow(cd)))
+cat("Unmatched AOIs (no NCG data available -- excluded from LOQ):\n")
+print(cd[unmatched, c("subject_id", "roi_name", "segment_name", "timepoint",
+                       "segment_display_name")])
+
+## Flag AOIs whose candidate name collides with another AOI's candidate name
+## (same display string but different physical DSP scan -- the Hugo csv only
+## has ONE count column for that name, so both SE AOIs would be assigned the
+## same NCG values; NCG-derived QC for these is therefore lower-confidence).
+dup_names <- cand[duplicated(cand) | duplicated(cand, fromLast = TRUE)]
+ambiguous_idx <- which(cand %in% dup_names)
+cat("\nAOIs with an ambiguous (duplicated) NCG-mapping name (same tissue",
+    "rescanned in a different DSP experiment; NCG value cannot be",
+    "distinguished between the two scans):\n")
+print(cd[ambiguous_idx, c("subject_id", "roi_name", "segment_name",
+                          "dsp_experiment", "plate_barcode_aoi_id",
+                          "segment_display_name")])
+
+count_data_with_ncg <- read.csv("Prince_countdata_with_ncg.cvs", row.names = 1,
+                                 check.names = FALSE)
+gene_annot <- count_data_with_ncg[, 1:12]
+gene_annot$TargetName[gene_annot$CodeClass == "Negative"] <-
+  gene_annot$ProbeDisplayName[gene_annot$CodeClass == "Negative"]
+count_only <- count_data_with_ncg[, 13:ncol(count_data_with_ncg)]
+rownames(count_only) <- gene_annot$TargetName
+
+shared_genes <- intersect(rownames(se),
+                           gene_annot$TargetName[gene_annot$CodeClass != "Negative"])
+cat("\nEndogenous genes shared between SE and Hugo NCG file:", length(shared_genes),
+    "of", nrow(se), "\n")
+
+set.seed(1)
+val_aoi <- sample(matched, min(15, length(matched)))
+val_genes <- sample(shared_genes, min(50, length(shared_genes)))
+val_cor <- sapply(val_aoi, function(i) {
+  se_col <- rownames(cd)[i]
+  csv_col <- aoi_cols_csv[match_idx[i]]
+  cor(current_count_data[val_genes, se_col], count_only[val_genes, csv_col])
+})
+cat("Validation: correlation of shared-gene raw counts (SE vs Hugo NCG file),",
+    length(val_aoi), "random matched AOIs:\n")
+print(summary(val_cor))
+cat("(Near-1 correlation across a random sample confirms the reconstructed",
+    "AOI-name mapping is correct; observed sub-1 discrepancies elsewhere are",
+    "isolated 0-vs-1-count rounding artefacts, not wrong-AOI matches.)\n")
+
+```
+
+### Step 1: background and LOQ
+For each matched AOI, takes the geometric mean of the negative-probe counts (floored at 1) and sets LOQ = 2 × geometric mean, the GeoMx default multiplier. Each AOI's mapping status is recorded as `ok`, `ambiguous` or `unmatched`.
+
+```{r comp-00a-qc-03}
+## ---------------------------------------------------------------------------
+## Step 1: Negative-probe geometric mean & LOQ per matched AOI
+## ---------------------------------------------------------------------------
+neg_rows <- gene_annot$CodeClass == "Negative"
+neg_mat <- as.matrix(count_only[neg_rows, , drop = FALSE])
+
+neg_geomean <- rep(NA_real_, nrow(cd))
+names(neg_geomean) <- rownames(cd)
+for (i in matched) {
+  csv_col <- aoi_cols_csv[match_idx[i]]
+  vals <- pmax(neg_mat[, csv_col], 1)
+  neg_geomean[i] <- exp(mean(log(vals)))
+}
+
+LOQ_K <- 2  # standard NanoString GeoMx default multiplier
+cd$neg_probe_geomean <- neg_geomean
+cd$LOQ <- LOQ_K * neg_geomean
+cd$ncg_mapping_status <- ifelse(seq_len(nrow(cd)) %in% unmatched, "unmatched",
+                          ifelse(seq_len(nrow(cd)) %in% ambiguous_idx, "ambiguous",
+                                 "ok"))
+cat("\nLOQ = ", LOQ_K, " x geometric mean of negative probes (per AOI).\n")
+cat("ncg_mapping_status counts:\n")
+print(table(cd$ncg_mapping_status))
+
+```
+
+### Step 2: QC-metric distributions
+Summarises raw, aligned and deduplicated reads, sequencing saturation, library size, background and LOQ by segment and by tissue group (archival primary, control TMA, on-study metastatic biopsy). Log-scale box plots are saved. This checks whether metastatic biopsies have systematically poorer libraries.
+
+```{r comp-00a-qc-04}
+## ---------------------------------------------------------------------------
+## Step 2: AOI-level QC metrics -- distributions by segment and by tissue type
+## ---------------------------------------------------------------------------
+cat("\n================ AOI-LEVEL QC: DISTRIBUTIONS BY SEGMENT ================\n")
+
+# tissue-type grouping, per master plan framing:
+# Archival = primary prostate; ControlTissue* = TMA control;
+# Screening/Cycle1/DiseaseProgression = on-study metastatic (bone-enriched) biopsy
+cd$tissue_group <- dplyr::case_when(
+  cd$timepoint == "Archival" ~ "Archival (primary)",
+  cd$timepoint %in% c("ControlTissue", "ControlTissue(SecondTMA)") ~ "Control (TMA)",
+  cd$timepoint %in% c("Screening", "Cycle1", "DiseaseProgression") ~ "On-study met. biopsy",
+  TRUE ~ "Other"
+)
+
+qc_metrics <- c("raw_reads", "aligned_reads", "deduplicated_reads",
+                 "sequencing_saturation", "library_size", "neg_probe_geomean", "LOQ")
+
+for (m in qc_metrics) {
+  cat("\n---", m, "by segment_name ---\n")
+  print(cd %>% group_by(segment_name) %>%
+          summarise(n = n(), median = median(.data[[m]], na.rm = TRUE),
+                    q25 = quantile(.data[[m]], 0.25, na.rm = TRUE),
+                    q75 = quantile(.data[[m]], 0.75, na.rm = TRUE),
+                    min = min(.data[[m]], na.rm = TRUE),
+                    max = max(.data[[m]], na.rm = TRUE)) %>% as.data.frame())
+  cat("--- ", m, " by tissue_group (bone-tissue attrition check) ---\n")
+  print(cd %>% group_by(tissue_group) %>%
+          summarise(n = n(), median = median(.data[[m]], na.rm = TRUE),
+                    q25 = quantile(.data[[m]], 0.25, na.rm = TRUE),
+                    q75 = quantile(.data[[m]], 0.75, na.rm = TRUE),
+                    min = min(.data[[m]], na.rm = TRUE),
+                    max = max(.data[[m]], na.rm = TRUE)) %>% as.data.frame())
+}
+
+# save diagnostic boxplots
+for (m in qc_metrics) {
+  p <- ggplot(cd, aes(x = segment_name, y = .data[[m]], fill = tissue_group)) +
+    geom_boxplot(outlier.size = 0.5) +
+    scale_y_log10() +
+    theme_bw() +
+    labs(title = paste("Phase 2 QC:", m, "by segment & tissue group"), y = m) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  ggsave(file.path(file.path(PRINCE_ROOT, "results", "Phase2_QC"), paste0("qc_", m, "_by_segment_tissue.pdf")),
+         p, width = 8, height = 5)
+}
+
+```
+
+### Step 3: AOI failure flags
+Computes the percentage of genes above each AOI's LOQ. An AOI fails if sequencing saturation is below 50% or fewer than 5% of genes exceed LOQ. AOIs with no negative-probe mapping (and adequate saturation) are labelled undetermined. QC status is cross-tabulated by segment, timepoint and response group as a bias check.
+
+```{r comp-00a-qc-05}
+## ---------------------------------------------------------------------------
+## Step 3: AOI-level QC failure flags (justified thresholds)
+## ---------------------------------------------------------------------------
+cat("\n================ AOI-LEVEL QC FAILURE CRITERIA ================\n")
+cat("1) sequencing_saturation < 50%  (standard NanoString GeoMx minimum;",
+    "below this, sequencing depth is inadequate to have captured the library",
+    "complexity, i.e. more unique reads would likely still be found).\n")
+cat("2) pct_genes_above_LOQ < 5%     (standard GeoMx minimum-signal criterion;",
+    "an AOI with almost no gene above background did not yield usable",
+    "expression data). Only computable for AOIs with an NCG mapping (n =",
+    length(matched), "/", nrow(cd), ").\n")
+
+pct_above_loq <- rep(NA_real_, nrow(cd))
+for (i in matched) {
+  pct_above_loq[i] <- mean(current_count_data[, i] > cd$LOQ[i]) * 100
+}
+cd$pct_genes_above_LOQ <- pct_above_loq
+
+cat("\npct_genes_above_LOQ distribution (matched AOIs only):\n")
+print(summary(cd$pct_genes_above_LOQ))
+
+cd$qc_fail_saturation <- cd$sequencing_saturation < 50
+cd$qc_fail_signal <- !is.na(cd$pct_genes_above_LOQ) & cd$pct_genes_above_LOQ < 5
+cd$qc_fail_any <- cd$qc_fail_saturation | cd$qc_fail_signal
+cd$qc_status <- ifelse(cd$ncg_mapping_status == "unmatched" & !cd$qc_fail_saturation,
+                        "undetermined (no NCG mapping)",
+                        ifelse(cd$qc_fail_any, "FAIL", "PASS"))
+
+cat("\nOverall QC status:\n")
+print(table(cd$qc_status))
+
+cat("\n--- QC failures cross-tabbed by segment (bias check) ---\n")
+print(table(cd$segment_name, cd$qc_status))
+cat("\n--- QC failures cross-tabbed by timepoint (bias check) ---\n")
+print(table(cd$timepoint, cd$qc_status))
+cat("\n--- QC failures cross-tabbed by response_group_neat (bias check -- DO NOT",
+    "silently drop if failures concentrate in one response group) ---\n")
+print(table(cd$response_group_neat, cd$qc_status))
+
+```
+
+### Step 4: gene-level detection
+Among QC-passing AOIs, computes per segment the fraction of AOIs in which each gene exceeds the AOI's LOQ. Genes are retained if this detection rate is at least 10% in at least one segment.
+
+```{r comp-00a-qc-06}
+## ---------------------------------------------------------------------------
+## Step 4: Gene-level QC -- detection rate above LOQ, filter per segment
+## ---------------------------------------------------------------------------
+cat("\n================ GENE-LEVEL QC ================\n")
+cat("Detection rate = fraction of (NCG-mapped, QC-passing) AOIs within a",
+    "segment where a gene's count exceeds that AOI's LOQ.\n")
+cat("Filter: retain a gene if detection rate >= 10% in at least one segment",
+    "(same threshold convention as the starter Rmd's filter_geomx(gene_rate=0.1),",
+    "kept for continuity; alternative thresholds of 5%/20% were not used but",
+    "could be swept as a sensitivity check later).\n")
+
+keep_aoi_for_gene_qc <- which(cd$qc_status == "PASS")
+segments <- unique(cd$segment_name)
+detection_by_segment <- matrix(NA_real_, nrow = nrow(se), ncol = length(segments),
+                                dimnames = list(rownames(se), segments))
+for (s in segments) {
+  idx <- intersect(keep_aoi_for_gene_qc, which(cd$segment_name == s))
+  if (length(idx) == 0) next
+  loq_vec <- cd$LOQ[idx]
+  above <- sweep(current_count_data[, idx, drop = FALSE], 2, loq_vec, `>`)
+  detection_by_segment[, s] <- rowMeans(above)
+}
+
+cat("\nGenes retained per segment (detection rate >= 10% within that segment):\n")
+print(colSums(detection_by_segment >= 0.10, na.rm = TRUE))
+
+gene_keep <- rowSums(detection_by_segment >= 0.10, na.rm = TRUE) > 0
+cat("\nTotal genes retained (>=10% detection in at least one segment):",
+    sum(gene_keep), "of", nrow(se), "\n")
+
+```
+
+### Step 5: save
+Attaches the background, LOQ, mapping status, signal and QC-status columns to the AOI annotation. Saves the full object with nothing dropped, the filtered object (QC-passing AOIs only, retained genes) and the QC metrics table. Undetermined AOIs are therefore excluded from the filtered object.
+
+```{r comp-00a-qc-07}
+## ---------------------------------------------------------------------------
+## Step 5: Apply filters, save QC'd object + full QC metrics table
+## ---------------------------------------------------------------------------
+colData(se)$neg_probe_geomean <- cd$neg_probe_geomean
+colData(se)$LOQ <- cd$LOQ
+colData(se)$ncg_mapping_status <- cd$ncg_mapping_status
+colData(se)$pct_genes_above_LOQ <- cd$pct_genes_above_LOQ
+colData(se)$qc_status <- cd$qc_status
+colData(se)$tissue_group <- cd$tissue_group
+
+se_qc <- se[gene_keep, keep_aoi_for_gene_qc]
+cat("\n================ FINAL OBJECT DIMENSIONS ================\n")
+cat("Before QC:", nrow(se), "genes x", ncol(se), "AOIs\n")
+cat("After QC: ", nrow(se_qc), "genes x", ncol(se_qc), "AOIs\n")
+cat("AOIs removed:", ncol(se) - ncol(se_qc), " | Genes removed:", nrow(se) - nrow(se_qc), "\n")
+
+qs::qsave(se, file.path(PRINCE_ROOT, "data", "interim", "phase2_se_with_qc_metrics.qs"))     # full object, QC metrics attached, nothing dropped
+qs::qsave(se_qc, file.path(PRINCE_ROOT, "data", "interim", "phase2_se_qc_filtered.qs"))       # QC-filtered object for Phase 3
+saveRDS(cd, file.path(PRINCE_ROOT, "data", "interim", "phase2_qc_metrics_table.rds"))
+
+cat("\nSaved: phase2_se_with_qc_metrics.qs (all AOIs/genes + QC columns),",
+    "phase2_se_qc_filtered.qs (QC-passed subset), phase2_qc_metrics_table.rds\n")
+cat("Diagnostic plots saved under Results/Phase2_QC/\n")
+cat("Phase 2 script complete.\n")
+```

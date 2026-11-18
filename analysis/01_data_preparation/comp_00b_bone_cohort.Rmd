@@ -1,0 +1,126 @@
+---
+title: "Definition of the bone-only analysis cohort"
+subtitle: "PRINCE spatial transcriptomics: `comp_00b_bone_cohort`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+Metastasis analyses are restricted to bone so that pre- and on-treatment comparisons stay within a single tissue microenvironment. The script reads the laboratory tissue annotation and reshapes it to one row per patient × timepoint. It then removes every sample whose region summary documents a lymph-node or other soft-tissue lesion, together with the PMC-015 archival block, which came from an obturator lymph node rather than the prostate.
+
+Bone-only copies of the three input objects (raw counts, the QC-annotated object and the QC-filtered object) are written to `data/`, where every downstream script reads them. Per the manuscript, this removed ten metastasis biopsies and one archival block (107 AOIs), and one patient whose only profiled tissue was a lymph node, leaving 32 patients.
+
+**Manuscript items supported**
+
+- Methods: Patients, samples and outcomes (restriction to bone metastases and exclusion of lymph-node and soft-tissue samples)
+- Intermediate results used by every downstream script (bone-only input objects)
+
+**Pipeline step:** `./run_pipeline.sh --only 00b_bone_cohort`. Approximate runtime: under a minute.
+
+**Inputs**
+
+- `data/metadata/PRINCE_DSP Tissue Annotation_02122024_CLWSv2.xlsx`
+- `data/raw/PRINCE_GeoMx_SE_RawCount_SampleAnnot_Filtered.qs`
+- `data/interim/phase2_se_with_qc_metrics.qs`
+- `data/interim/phase2_se_qc_filtered.qs`
+
+**Outputs**
+
+- `results/C0_bone_cohort/documented_tissue_site.csv`
+- `results/C0_bone_cohort/dropped_nonbone_samples.csv`
+- `results/C0_bone_cohort/aoi_counts.csv`
+- `data/PRINCE_GeoMx_SE_RawCount_SampleAnnot_Filtered.qs`
+- `data/phase2_se_with_qc_metrics.qs`
+- `data/phase2_se_qc_filtered.qs`
+
+**Depends on**: `comp_00a_qc`
+
+## Analysis
+
+Script header: why the metastatic analyses are restricted to bone, and which inputs and outputs are involved.
+
+Sources the shared set-up and loads packages.
+
+```{r comp-00b-bone-cohort-01}
+## ============================================================================
+## PRINCE -- C0b: define the bone-only analysis cohort
+## Metastasis analyses use bone biopsies only. Every sample documented as a
+## lymph-node or soft-tissue lesion is removed, as is the PMC-015 Archival block
+## (an obturator lymph node rather than prostate).
+## Inputs : data/metadata/PRINCE_DSP Tissue Annotation_02122024_CLWSv2.xlsx (lab tissue annotation)
+##          data/raw/PRINCE_GeoMx_SE_RawCount_SampleAnnot_Filtered.qs (all sites)
+##          data/interim/phase2_se_{with_qc_metrics,qc_filtered}.qs (all sites, from comp_00a_qc)
+## Outputs: results/C0_bone_cohort/{documented_tissue_site,dropped_nonbone_samples,aoi_counts}.csv
+##          data/{PRINCE_GeoMx_SE_RawCount_SampleAnnot_Filtered,phase2_se_with_qc_metrics,phase2_se_qc_filtered}.qs
+##          (bone-only versions read by every downstream analysis)
+## ============================================================================
+
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({ library(qs); library(SummarizedExperiment); library(readxl) })
+
+```
+
+### Documented tissue site
+Reads the laboratory tissue annotation and builds one record per patient × timepoint (Archival, Screening, Cycle1, DiseaseProgression), with block, region and region summary. Timepoints without a documented region are skipped.
+
+```{r comp-00b-bone-cohort-02}
+## ---- documented tissue site per sample (lab annotation) ---------------------------------------------
+ann <- read_excel(file.path(PRINCE_DIR, "metadata", "PRINCE_DSP Tissue Annotation_02122024_CLWSv2.xlsx"), sheet = 1)
+ann <- as.data.frame(ann, check.names = FALSE)
+tp_cols <- list(Archival = c("ARCHIVAL-A", "REGION-A", "REGION-A_summary"),
+                Screening = c("SCREENING-SCR", "REGION-SCR", "REGION-SCR_summary"),
+                Cycle1 = c("CYCLE 1-C1", "REGION-C1", "REGION-C1_summary"),
+                DiseaseProgression = c("PD", "REGION-PD", "REGION-PD_summary"))
+site <- do.call(rbind, lapply(seq_len(nrow(ann)), function(i) do.call(rbind, lapply(names(tp_cols), function(tp) {
+  cc <- tp_cols[[tp]]; reg <- ann[i, cc[2]]
+  if (is.na(reg) || reg == "NA") return(NULL)
+  data.frame(subject_id = sub("^PRI-", "", ann$ID[i]), timepoint = tp, block = ann[i, cc[1]],
+             region = reg, region_summary = ann[i, cc[3]])
+}))))
+
+```
+
+### Samples to exclude
+Marks which annotated samples are present in the GeoMx data. The exclusion key is every patient × timepoint whose region summary contains LYMPH or OTHER, plus `PMC-015 Archival`. Writes the site table and the exclusion list.
+
+```{r comp-00b-bone-cohort-03}
+## ---- samples to drop: documented lymph-node or other soft-tissue lesions + PMC-015 Archival --------
+se_raw <- qread(file.path(PRINCE_DIR, "raw", "PRINCE_GeoMx_SE_RawCount_SampleAnnot_Filtered.qs"))
+site$in_geomx_data <- paste(site$subject_id, site$timepoint) %in% paste(se_raw$subject_id, se_raw$timepoint)
+nb <- site[grepl("LYMPH|OTHER", site$region_summary), c("subject_id", "timepoint")]
+drop_key <- c(paste(nb$subject_id, nb$timepoint), "PMC-015 Archival")
+write.csv(site, out_path("C0_bone_cohort", "documented_tissue_site.csv"), row.names = FALSE)
+write.csv(data.frame(key = drop_key), out_path("C0_bone_cohort", "dropped_nonbone_samples.csv"), row.names = FALSE)
+cat("Samples excluded (documented non-bone metastasis or lymph-node archival block):\n"); print(drop_key)
+
+```
+
+### Bone-only input objects
+For each of the three input objects, drops AOIs whose patient × timepoint is in the exclusion key, saves the bone-only version to `data/` and records AOI counts before and after.
+
+```{r comp-00b-bone-cohort-04}
+## ---- write bone-only versions of the three input objects ----------------------------------------------
+cnt <- list()
+for (f in c("PRINCE_GeoMx_SE_RawCount_SampleAnnot_Filtered.qs", "phase2_se_with_qc_metrics.qs", "phase2_se_qc_filtered.qs")) {
+  src <- if (startsWith(f, "phase2")) file.path(PRINCE_DIR, "interim", f) else file.path(PRINCE_DIR, "raw", f)
+  se <- qread(src); key <- paste(se$subject_id, se$timepoint)
+  drop <- key %in% drop_key
+  cat(f, ": dropping", sum(drop), "of", ncol(se), "AOIs\n")
+  qsave(se[, !drop], file.path(PRINCE_DIR, f))
+  cnt[[f]] <- data.frame(object = f, aois_all = ncol(se), aois_dropped = sum(drop), aois_kept = sum(!drop))
+}
+write.csv(do.call(rbind, cnt), out_path("C0_bone_cohort", "aoi_counts.csv"), row.names = FALSE)
+```

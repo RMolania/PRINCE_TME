@@ -1,0 +1,216 @@
+---
+title: "Purity adjustment with a feature-free SpatialDecon tumour fraction"
+subtitle: "PRINCE spatial transcriptomics: `comp_45_purity_feature_free`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+An internal methods review found that the SpatialDecon tumour fraction used as a covariate in the purity-split AOI models (`comp_35`, M1 and M3; `comp_43`, M1) was estimated from marker genes that include *FOLH1* and AR-target genes such as *KLK3*. The tested features were therefore partly adjusted for themselves. This script removes that circularity.
+
+SpatialDecon is re-run with the same references, Q3 normalisation, negative-probe background and marker-selection rule as `comp_03b_deconv`, after every gene of every tested feature has been removed from the reference profiles before marker selection. The resulting feature-free tumour fraction is compared with the original. The pre-specified feature models are then refitted for both outcomes. For continuous PSA change (the `comp_35` design), the models are M1f (feature-free purity split) and M3f (M1f + signal-depth split). For non-responder vs responder (the `comp_43` design), they are M1f and M2e (ESTIMATE purity split). Fits use lmerTest with Kenward–Roger degrees of freedom and 500 patient-level permutations with the same seeds, with BH correction across strata × features within each outcome × model. Transcriptome-wide dream models with M1f are refitted without permutation.
+
+**Manuscript items supported**
+
+- Supplementary Table 98 (AOI-level models with a feature-free deconvolved tumour fraction; assembled by `comp_47_supp_tables_audit`)
+- Results: *FOLH1* section (nominal results persisting less consistently with the feature-free tumour fraction; minimum permutation FDR across features and strata)
+- Methods: AOI-level analyses (feature-free tumour fraction)
+
+**Pipeline step:** `./run_pipeline.sh --only 45_purity_feature_free`. Approximate runtime: about 20 min with parallel workers.
+
+**Inputs**
+
+- `data/phase2_se_qc_filtered.qs`
+- `data/reference/msigdb_gene_sets.rds`
+- `results/C1_clinical/patient_table.qs`
+- `results/R1_loq/loq_gene_universes.qs`
+- `results/C3_deconvolution/deconvolution_proportions.qs`
+- `results/C3_deconvolution/reference_profiles.qs`
+
+**Outputs**
+
+- `results/R19_purity_feature_free/markers_removed.csv`
+- `results/R19_purity_feature_free/tumour_fraction_original_vs_feature_free.csv`
+- `results/R19_purity_feature_free/tumour_fraction_agreement_summary.csv`
+- `results/R19_purity_feature_free/feature_models_feature_free_purity.csv`
+- `results/R19_purity_feature_free/genomewide_dream_feature_free_purity.csv`
+
+**Depends on**: `comp_00b_bone_cohort`, `comp_01_clinical`, `comp_03b_deconv`, `comp_16_loq_filter`, `comp_35_aoi_dream_purity`, `comp_43_aoi_dream_categorical`
+
+## Analysis
+
+Header: the circularity found in the earlier purity covariate, and the three steps that remove it.
+
+Set-up. Define the tested features as in `comp_35` and `comp_43` (*FOLH1*, Hallmark AR, HLA class I, Hallmark IFN-α, p53 core, NE 13-gene set) and collect all their genes into `feature_genes`.
+
+```{r comp-45-purity-feature-free-01}
+## ============================================================================
+## PRINCE -- R19: purity adjustment without circularity.
+## Audit finding: the SpatialDecon tumour-fraction covariate used in R13 (M1, M3) and R18 (M1) was
+## estimated from a marker set that contains FOLH1 and AR-target genes (e.g. KLK3), so the tested
+## features were partly adjusted for themselves.
+##  1. Re-run SpatialDecon (same references, background and marker selection as comp_03b) after
+##     removing every gene of every tested feature (FOLH1 + all programme genes) from the marker set
+##     -> feature-free tumour fraction (tf_free); agreement with the original fraction.
+##  2. Refit pre-specified feature models with tf_free:
+##       PSA change (R13 design): M1f = psa + batch + deconF_b + deconF_w; M3f = M1f + depth_b + depth_w
+##       NR vs R   (R18 design):  M1f = NR + batch + deconF_b + deconF_w; M2e = NR + batch + est_b + est_w (ESTIMATE)
+##     lmerTest Kenward-Roger + 500 patient-level permutations (same seeds as R13/R18), and BH across
+##     strata x features within each outcome x model family.
+##  3. Genome-wide dream with M1f for both outcomes (FDR counts, FOLH1 rank; no permutations).
+## Outputs: results/R19_purity_feature_free/
+## ============================================================================
+
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({ library(qs); library(SummarizedExperiment); library(dplyr); library(tidyr); library(edgeR); library(limma)
+  library(variancePartition); library(BiocParallel); library(lme4); library(lmerTest); library(parallel); library(SpatialDecon) })
+setwd(PRINCE_DIR)
+check_ram_or_stop(20)
+set.seed(2026)
+out_path <- function(...) file.path(COMP_DIR, ...)
+out_dir <- out_path("R19_purity_feature_free"); dir.create(out_dir, showWarnings = FALSE)
+BP <- SnowParam(MAX_WORKERS, progressbar = FALSE)
+
+se <- qs::qread("phase2_se_qc_filtered.qs"); cd <- as.data.frame(colData(se))
+pt <- qs::qread(out_path("C1_clinical", "patient_table.qs"))
+loq <- qs::qread(file.path(COMP_DIR, "R1_loq", "loq_gene_universes.qs")); uni <- loq$universes
+dec <- qs::qread(out_path("C3_deconvolution", "deconvolution_proportions.qs"))
+tf_orig <- c(dec$lineage_primary[, "Epithelial_tumour"], dec$lineage_bone[, "Epithelial_tumour"]); tf_orig <- tf_orig[!duplicated(names(tf_orig))]
+refs <- qs::qread(out_path("C3_deconvolution", "reference_profiles.qs"))
+msig <- readRDS(file.path(PMCC_DIR, "msigdb_gene_sets.rds"))
+progs <- list(AR_Hallmark = msig$H$HALLMARK_ANDROGEN_RESPONSE, HLA_I = c("HLA-A", "HLA-B", "HLA-C", "B2M", "TAP1", "TAP2", "TAPBP"),
+  Hallmark_IFNa = msig$H$HALLMARK_INTERFERON_ALPHA_RESPONSE, P53_core = c("CDKN1A", "MDM2", "DDB2", "PHLDA3", "GDF15", "TNFRSF10B", "SESN1", "ZMAT3", "RRM2B", "TP53I3"),
+  NE_Beltran13 = c("ASCL1", "SOX2", "NKX2-1", "FOXA2", "INSM1", "CHGA", "CHGB", "SYP", "NCAM1", "EZH2", "AURKA", "MYCN", "PCSK1"))
+feature_genes <- unique(c("FOLH1", unlist(progs)))
+
+```
+
+### 1. Feature-free SpatialDecon
+`top_markers` repeats the marker rule of `comp_03b`: for each cell type, the 40 genes with the largest log₂ margin over the next-highest type, with expression ≥0.5. Counts are Q3-normalised and the background is the scaled negative-probe geometric mean. For the primary (PCCAT) and bone references, markers are reselected after the feature genes are removed. The number of markers and the feature genes in the original set are logged, and SpatialDecon is re-run. The feature-free tumour fraction sums the epithelial tumour types (luminal, basal, club, hillock, luminal progenitor, NE) for primary AOIs and the `Tumour*` types for bone. Its Spearman agreement with the original fraction is summarised per compartment and timepoint.
+
+```{r comp-45-purity-feature-free-02}
+## ---- 1. feature-free SpatialDecon (as comp_03b) -----------------------------------
+top_markers <- function(prof, n = 40, min_expr = 0.5) {
+  lp <- log2(prof + 1)
+  unique(unlist(lapply(colnames(lp), function(t) {
+    second <- apply(lp[, colnames(lp) != t, drop = FALSE], 1, max)
+    spec <- lp[, t] - second
+    spec[prof[, t] < min_expr] <- -Inf
+    names(sort(spec, decreasing = TRUE))[1:n]
+  })))
+}
+raw <- assay(se, "all_count")
+q3 <- apply(raw, 2, function(x) quantile(x[x > 0], 0.75))
+normq3 <- sweep(raw, 2, q3, "/") * mean(q3)
+bg <- matrix(rep(cd$neg_probe_geomean / q3 * mean(q3), each = nrow(raw)), nrow = nrow(raw), dimnames = dimnames(raw))
+marker_log <- list()
+run_decon_free <- function(prof, aois, tag) {
+  all_m <- intersect(top_markers(prof), rownames(raw))
+  prof_f <- prof[!rownames(prof) %in% feature_genes, ]          # re-select markers without feature genes
+  genes <- intersect(top_markers(prof_f), rownames(raw))
+  marker_log[[tag]] <<- data.frame(reference = tag, n_markers_original = length(all_m), feature_genes_in_original = paste(intersect(all_m, feature_genes), collapse = ","),
+                                   n_markers_free = length(genes), feature_genes_in_free = length(intersect(genes, feature_genes)))
+  res <- spatialdecon(norm = normq3[genes, aois], bg = bg[genes, aois], X = prof_f[genes, ], raw = raw[genes, aois], align_genes = TRUE)
+  prop <- t(res$prop_of_all); prop[is.na(prop)] <- 0; prop
+}
+a_aoi <- colnames(se)[cd$timepoint == "Archival"]
+b_aoi <- colnames(se)[cd$timepoint %in% c("Screening", "Cycle1", "DiseaseProgression")]
+p_pri <- run_decon_free(refs$primary, a_aoi, "primary")
+p_bone <- run_decon_free(refs$bone, b_aoi, "bone")
+tum_pri <- c("Luminal", "Basal", "Club", "Hillock", "LPCs", "NE")
+tf_free <- c(rowSums(p_pri[, intersect(tum_pri, colnames(p_pri)), drop = FALSE]), rowSums(p_bone[, grep("^Tumour", colnames(p_bone)), drop = FALSE]))
+write.csv(bind_rows(marker_log), file.path(out_dir, "markers_removed.csv"), row.names = FALSE)
+common <- intersect(names(tf_free), names(tf_orig))
+agree <- data.frame(aoi = common, tf_orig = tf_orig[common], tf_free = tf_free[common]) %>%
+  left_join(data.frame(aoi = rownames(cd), segment = cd$segment_name, timepoint = cd$timepoint), by = "aoi")
+write.csv(agree, file.path(out_dir, "tumour_fraction_original_vs_feature_free.csv"), row.names = FALSE)
+ag_sum <- agree %>% filter(timepoint %in% c("Archival", "Screening", "Cycle1")) %>% group_by(segment, timepoint) %>%
+  summarise(n = n(), rho = cor(tf_orig, tf_free, method = "spearman"), median_orig = median(tf_orig), median_free = median(tf_free), .groups = "drop")
+write.csv(ag_sum, file.path(out_dir, "tumour_fraction_agreement_summary.csv"), row.names = FALSE); print(as.data.frame(ag_sum))
+
+```
+
+### 2–3. Refitted models
+For each stratum and outcome:
+- Build AOI covariates: logit feature-free fraction, logit ESTIMATE purity and log signal depth, each split into patient mean and within-patient deviation.
+- Score the features on TMM log-CPM of the LOQ universe.
+- Fit each model with lmerTest (Kenward–Roger) and 500 patient-level permutations of PSA change or of the non-responder label (seeds 1–500, as in R13/R18). Strata with fewer than two non-responders are skipped for the categorical outcome.
+- Fit transcriptome-wide dream for M1f.
+
+BH-FDR of the permutation and Kenward–Roger P values is computed within each outcome × model family, and both tables are written after each stratum.
+
+```{r comp-45-purity-feature-free-03}
+## ---- 2/3. models --------------------------------------------------------------------
+artefact_re <- "^(USP17L|PRAMEF|NBPF|OR[0-9]+[A-Z]+[0-9]+)"
+counts_all <- raw[!grepl(artefact_re, rownames(raw)), ]
+code <- c("CD45+" = "CD45", "PSMA+" = "PSMA", "PanCK+PSMA-" = "PanCKPSMA"); tps <- c("Archival", "Screening", "Cycle1")
+logit <- function(p) { p <- pmin(pmax(p, 0.01), 0.99); log(p / (1 - p)) }
+split_bw <- function(x, g) { b <- ave(x, g); list(b = b, w = x - b) }
+fix_form <- function(f, m) if (length(unique(m$batch)) < 2) update(f, ~ . - batch) else f
+designs <- list(
+  psa = list(keep = function(d) d$response_group_neat != "Control", coef = "psa",
+             forms = list(M1f = ~ psa + batch + deconF_b + deconF_w + (1 | patient), M3f = ~ psa + batch + deconF_b + deconF_w + depth_b + depth_w + (1 | patient)),
+             gw = "M1f", seed0 = 0),
+  NR = list(keep = function(d) d$response_group_neat %in% c("Responder", "Non_Responder"), coef = "NR",
+            forms = list(M1f = ~ NR + batch + deconF_b + deconF_w + (1 | patient), M2e = ~ NR + batch + est_b + est_w + (1 | patient)),
+            gw = "M1f", seed0 = 0))
+feat <- list(); gw <- list()
+for (sg in names(code)) for (tp in tps) {
+  sid <- paste0(code[sg], "__", tp)
+  for (oc in names(designs)) {
+    D <- designs[[oc]]
+    idx <- which(cd$timepoint == tp & cd$segment_name == sg & D$keep(cd)); d <- cd[idx, ]
+    m <- data.frame(aoi = rownames(d), patient = d$subject_id, batch = factor(d$study_batch), deconF = logit(tf_free[rownames(d)]),
+                    est = logit(d$tumour.purity.estimate), depth = log(loq$aoi[rownames(d), "pct_above_LOQ_std"]),
+                    NR = as.integer(d$response_group_neat == "Non_Responder")) %>%
+      left_join(pt %>% select(patient = subject_id, psa_change_capped), by = "patient")
+    m$psa <- m$psa_change_capped / 50
+    for (v in c("deconF", "est", "depth")) { s <- split_bw(m[[v]], m$patient); m[[paste0(v, "_b")]] <- s$b; m[[paste0(v, "_w")]] <- s$w }
+    m$batch <- droplevels(m$batch); rownames(m) <- m$aoi
+    stopifnot(!anyNA(m$deconF), !anyNA(m$psa))
+    pts <- unique(m[, c("patient", D$coef)])
+    if (oc == "NR" && sum(pts$NR) < 2) next
+    g <- intersect(uni[[sid]]$g10, rownames(counts_all))
+    dge <- calcNormFactors(DGEList(counts_all[g, idx])); lc <- cpm(dge, log = TRUE, prior.count = 1); z <- t(scale(t(lc)))
+    F <- cbind(FOLH1 = if ("FOLH1" %in% rownames(lc)) lc["FOLH1", ] else rep(NA_real_, ncol(lc)),
+               sapply(progs, function(gs) { gg <- intersect(gs, rownames(z)); if (length(gg) >= 3) colMeans(z[gg, , drop = FALSE]) else rep(NA_real_, ncol(z)) }))
+    for (f in colnames(F)) { if (all(is.na(F[, f]))) next
+      for (mn in names(D$forms)) {
+        fm <- fix_form(D$forms[[mn]], m); dd <- cbind(m, y = F[, f]); ff <- update(fm, y ~ .)
+        ob <- tryCatch({ fit <- suppressMessages(suppressWarnings(lmerTest::lmer(ff, dd))); summary(fit, ddf = "Kenward-Roger")$coefficients[D$coef, c(1, 2, 5)] }, error = function(e) c(NA, NA, NA))
+        pb <- unlist(mclapply(1:500, function(b) { set.seed(b); px <- setNames(sample(pts[[D$coef]]), pts$patient); dp <- dd; dp[[D$coef]] <- px[dp$patient]
+          tryCatch(suppressMessages(suppressWarnings(fixef(lme4::lmer(ff, dp))[D$coef])), error = function(e) NA) }, mc.cores = MAX_WORKERS))
+        feat[[paste(oc, sid, f, mn)]] <- data.frame(outcome = oc, stratum = sid, feature = f, model = mn, n_aoi = nrow(m), n_pt = nrow(pts),
+          beta = ob[1], se = ob[2], p_KR = ob[3], p_perm = (1 + sum(abs(pb) >= abs(ob[1]), na.rm = TRUE)) / (1 + sum(!is.na(pb)))) } }
+    ## genome-wide (no permutations)
+    fm <- fix_form(D$forms[[D$gw]], m)
+    v <- voomWithDreamWeights(dge, fm, m, BPPARAM = BP)
+    tt <- variancePartition::topTable(variancePartition::eBayes(dream(v, fm, m, BPPARAM = BP)), coef = D$coef, number = Inf, sort.by = "none")
+    gw[[paste(oc, sid)]] <- data.frame(outcome = oc, stratum = sid, model = D$gw, n_genes = nrow(tt), fdr05 = sum(tt$adj.P.Val < 0.05), fdr10 = sum(tt$adj.P.Val < 0.1),
+      FOLH1_logFC = if ("FOLH1" %in% rownames(tt)) tt["FOLH1", "logFC"] else NA, FOLH1_P = if ("FOLH1" %in% rownames(tt)) tt["FOLH1", "P.Value"] else NA,
+      FOLH1_rank = if ("FOLH1" %in% rownames(tt)) rank(tt$P.Value)[rownames(tt) == "FOLH1"] else NA,
+      top10 = paste(head(rownames(tt)[order(tt$P.Value)], 10), collapse = ","))
+    message(oc, " ", sid, " done (", sum(tt$adj.P.Val < 0.05), " genes FDR<0.05)")
+  }
+  fe <- bind_rows(feat) %>% group_by(outcome, model) %>% mutate(fdr_perm = p.adjust(p_perm, "BH"), fdr_KR = p.adjust(p_KR, "BH")) %>% ungroup()
+  write.csv(fe, file.path(out_dir, "feature_models_feature_free_purity.csv"), row.names = FALSE)
+  write.csv(bind_rows(gw), file.path(out_dir, "genomewide_dream_feature_free_purity.csv"), row.names = FALSE)
+}
+options(width = 220); f2 <- function(x) as.data.frame(mutate(x, across(where(is.numeric), ~signif(.x, 2))))
+cat("\n==== FOLH1 ====\n"); print(f2(fe %>% filter(feature == "FOLH1") %>% select(outcome, stratum, model, beta, p_KR, p_perm, fdr_perm)), row.names = FALSE)
+cat("\n==== genome-wide ====\n"); print(f2(bind_rows(gw) %>% select(-top10)), row.names = FALSE)
+cat("R19 complete.\n")
+```

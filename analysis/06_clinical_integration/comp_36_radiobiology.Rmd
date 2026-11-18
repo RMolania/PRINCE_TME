@@ -1,0 +1,164 @@
+---
+title: "Pre-specified radiobiology panel: is the target present but the tumour radioresistant?"
+subtitle: "PRINCE spatial transcriptomics: `comp_36_radiobiology`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+Lu-PSMA-617 delivers β radiation, so poor response could reflect tumour-intrinsic radioresistance rather than lack of target. Twelve programmes were fixed before outcomes were examined: hypoxia (Buffa, Winter and Hallmark metagenes), the radiosensitivity index (RSI; rank-based ten-gene model), DNA repair (Hallmark, KEGG NHEJ and homologous recombination), antioxidant capacity (Hallmark ROS, NRF2 targets, KEGG glutathione metabolism), metallothioneins and Hallmark G2/M. Metallothioneins are flagged as a post hoc lead from the PCCAT tumour-state analyses. Each has a stated expected direction.
+
+Scores are mean within-stratum z-scores over genes in the LOQ pseudobulk (≥3 genes). The RSI is scored only where all ten genes are present. Each score is first checked for coherence (mean pairwise Spearman correlation of its genes), then related to PSA change with batch, with batch plus count-weighted SpatialDecon tumour fraction, to non-responder versus responder status, and to rPFS. One BH family covers the six pre-treatment strata (Archival and Screening); on-treatment strata are reported separately.
+
+**Manuscript items supported**
+
+- Fig. 6c (radiobiology panel vs PSA change in primary and pre-treatment bone strata; drawn by `comp_41_figures_v5`)
+- Supplementary Fig. 1f (all strata; drawn by `comp_39_supp_fig6`)
+- Supplementary Tables 78 and 79
+- Results: radiobiology paragraph (67 pre-treatment tests, no FDR < 0.1; coherence; metallothioneins)
+- Methods: Radiobiology panel
+
+**Pipeline step:** `./run_pipeline.sh --only 36_radiobiology`. Approximate runtime: seconds.
+
+**Inputs**
+
+- `data/phase2_se_qc_filtered.qs`
+- `data/reference/msigdb_gene_sets.rds`
+- `results/C1_clinical/patient_table.qs`
+- `results/C13_pseudobulk_LOQ/pseudobulk_strata.qs`
+- `results/C3_deconvolution/deconvolution_proportions.qs`
+
+**Outputs**
+
+- `results/R14_radiobiology/A_set_coherence.csv`
+- `results/R14_radiobiology/B_radiobiology_vs_response.csv`
+- `results/R14_radiobiology/C_summary_by_set.csv`
+- `results/R14_radiobiology/radiobiology_scores.qs`
+
+**Depends on**: `comp_00b_bone_cohort`, `comp_01_clinical`, `comp_03b_deconv`, `comp_13b_pseudobulk_loq`
+
+## Analysis
+
+Header: the 12-set panel, the scoring rule and the FDR family structure.
+
+Set-up and panel definition. Gene sets come from MSigDB (Hallmark, C2 CGP, KEGG), plus the eight metallothionein genes. The RSI uses the published Eschrich et al. weights on within-sample ranks of its ten genes, with higher values meaning more radioresistant. `prior_dir` records the hypothesised direction: higher with worse response for all sets except G2/M. Patient tumour fraction is the library-size-weighted mean of AOI SpatialDecon epithelial-tumour fractions, matching the summed-count pseudobulk. `coherence` returns the number of genes present and their mean pairwise Spearman correlation.
+
+```{r comp-36-radiobiology-01}
+## ============================================================================
+## PRINCE -- R14: pre-specified radiobiology panel (target present but radioresistant?).
+## Lu-PSMA delivers beta radiation, so beyond target expression (FOLH1) we test tumour-intrinsic
+## determinants of radiation response. Panel fixed before looking at outcomes (12 sets):
+##   hypoxia: Buffa 2010 metagene, Winter 2007 metagene, Hallmark hypoxia
+##   radiosensitivity index (RSI; Eschrich 2009, 10-gene rank model; higher = radioresistant)
+##   DNA repair: Hallmark DNA repair, KEGG NHEJ, KEGG homologous recombination
+##   antioxidant: Hallmark ROS pathway, NRF2 targets (Singh 2008), KEGG glutathione metabolism
+##   metallothioneins (MT1/MT2 family; post hoc lead from R11, flagged), Hallmark G2M (proliferation)
+## Patient pseudobulk (C13_pseudobulk_LOQ), mean-z scores within stratum.
+##  A. coherence: genes present, mean pairwise Spearman among set genes (is the score meaningful?)
+##  B. score ~ PSA change + batch; + tumour fraction (count-weighted SpatialDecon); NR vs R; rPFS Cox.
+##     One BH-FDR family = baseline strata (Archival, Screening) x 12 sets; Cycle1 reported apart.
+## Outputs: results/R14_radiobiology/
+## ============================================================================
+
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({ library(qs); library(SummarizedExperiment); library(dplyr); library(tidyr); library(survival) })
+setwd(PRINCE_DIR)
+check_ram_or_stop(20)
+out_dir <- file.path(COMP_DIR, "R14_radiobiology"); dir.create(out_dir, showWarnings = FALSE)
+cd <- as.data.frame(colData(qs::qread("phase2_se_qc_filtered.qs")))
+pt <- qs::qread(out_path("C1_clinical", "patient_table.qs"))
+pbs <- qs::qread(out_path("C13_pseudobulk_LOQ", "pseudobulk_strata.qs"))
+dec <- qs::qread(out_path("C3_deconvolution", "deconvolution_proportions.qs"))
+msig <- readRDS(file.path(PMCC_DIR, "msigdb_gene_sets.rds"))
+code <- c("CD45+" = "CD45", "PSMA+" = "PSMA", "PanCK+PSMA-" = "PanCKPSMA")
+
+panel <- list(
+  Hypoxia_Buffa = msig$C2_CGP$BUFFA_HYPOXIA_METAGENE, Hypoxia_Winter = msig$C2_CGP$WINTER_HYPOXIA_METAGENE,
+  Hypoxia_Hallmark = msig$H$HALLMARK_HYPOXIA, RSI = NULL,
+  DNA_repair_Hallmark = msig$H$HALLMARK_DNA_REPAIR, NHEJ_KEGG = msig$C2_CP_KEGG$KEGG_NON_HOMOLOGOUS_END_JOINING,
+  HR_KEGG = msig$C2_CP_KEGG$KEGG_HOMOLOGOUS_RECOMBINATION, ROS_Hallmark = msig$H$HALLMARK_REACTIVE_OXYGEN_SPECIES_PATHWAY,
+  NRF2_targets = msig$C2_CGP$SINGH_NFE2L2_TARGETS, Glutathione_KEGG = msig$C2_CP_KEGG$KEGG_GLUTATHIONE_METABOLISM,
+  Metallothionein = c("MT1A", "MT1E", "MT1F", "MT1G", "MT1H", "MT1M", "MT1X", "MT2A"), G2M_Hallmark = msig$H$HALLMARK_G2M_CHECKPOINT)
+## RSI (Eschrich et al. 2009): genes ranked 1..10 within sample, linear combination
+rsi_w <- c(AR = -0.0098009, JUN = 0.0128283, STAT1 = 0.0254552, PRKCB = -0.0017589, RELA = -0.0038171,
+           ABL1 = 0.1070213, SUMO1 = -0.0002509, PAK2 = -0.0092431, HDAC1 = -0.0204469, IRF1 = -0.0441683)
+prior_dir <- c(Hypoxia_Buffa = "worse", Hypoxia_Winter = "worse", Hypoxia_Hallmark = "worse", RSI = "worse",
+  DNA_repair_Hallmark = "worse", NHEJ_KEGG = "worse", HR_KEGG = "worse", ROS_Hallmark = "worse", NRF2_targets = "worse",
+  Glutathione_KEGG = "worse", Metallothionein = "worse", G2M_Hallmark = "better")
+
+lin <- bind_rows(data.frame(aoi = rownames(dec$lineage_primary), tumour = dec$lineage_primary[, "Epithelial_tumour"]),
+                 data.frame(aoi = rownames(dec$lineage_bone), tumour = dec$lineage_bone[, "Epithelial_tumour"]))
+lin <- lin[!duplicated(lin$aoi), ]; rownames(lin) <- lin$aoi
+keep_aoi <- cd$response_group_neat != "Control" & cd$timepoint %in% c("Archival", "Screening", "Cycle1")
+tumour_pt <- function(sg, tp) { idx <- which(keep_aoi & cd$segment_name == sg & cd$timepoint == tp); d <- cd[idx, ]
+  d$w <- d$library_size; d$tumour <- lin[rownames(d), "tumour"]
+  d %>% group_by(subject_id) %>% summarise(tumour = weighted.mean(tumour, w), .groups = "drop") }
+
+score_panel <- function(lc) { z <- t(scale(t(lc)))
+  S <- sapply(panel[names(panel) != "RSI"], function(g) { g <- intersect(g, rownames(z)); if (length(g) >= 3) colMeans(z[g, , drop = FALSE]) else rep(NA, ncol(z)) })
+  rsi <- if (all(names(rsi_w) %in% rownames(lc))) as.numeric(rsi_w %*% apply(lc[names(rsi_w), , drop = FALSE], 2, rank)) else rep(NA, ncol(lc))
+  S <- cbind(S, RSI = rsi); S[, names(panel), drop = FALSE] }
+coherence <- function(lc, g) { g <- intersect(g, rownames(lc)); if (length(g) < 3) return(c(length(g), NA))
+  r <- cor(t(lc[g, ]), method = "spearman"); c(length(g), mean(r[upper.tri(r)], na.rm = TRUE)) }
+
+```
+
+For each of the nine strata, score the panel on the patient pseudobulk and fit, per set: z-score ~ PSA change (per 50%) + batch; the same model + tumour fraction; Wilcoxon non-responder vs responder; and Cox rPFS ~ score + batch. Positive β means a higher score with worse PSA response. BH-FDR is applied within the baseline and on-treatment families, and each result is checked against its prior direction. A descriptive per-set summary counts, over the six baseline strata, how many have the expected direction or P < 0.05; strata share patients, so this is not a formal test. Coherence, test results, the summary and scores are written out.
+
+```{r comp-36-radiobiology-02}
+a_rows <- list(); b_rows <- list(); scores <- list()
+for (sg in names(code)) for (tp in c("Archival", "Screening", "Cycle1")) {
+  sid <- paste0(code[sg], "__", tp); p <- pbs[[sid]]
+  m <- p$meta %>% left_join(tumour_pt(sg, tp), by = "subject_id") %>% left_join(pt %>% select(subject_id, r_pfsevent_pt = r_pfsevent), by = "subject_id")
+  m$psa <- m$psa_change_capped / 50; m$batch <- factor(m$study_batch)
+  S <- score_panel(p$lcpm); scores[[sid]] <- data.frame(stratum = sid, subject_id = m$subject_id, S, check.names = FALSE)
+  for (f in names(panel)) {
+    co <- if (f == "RSI") c(sum(names(rsi_w) %in% rownames(p$lcpm)), NA) else coherence(p$lcpm, panel[[f]])
+    a_rows[[paste(sid, f)]] <- data.frame(stratum = sid, set = f, n_genes = co[1], coherence = co[2])
+    dd <- m; dd$y <- as.numeric(scale(S[, f])); if (all(is.na(dd$y))) next
+    c0 <- summary(lm(y ~ psa + batch, dd))$coefficients; c1 <- summary(lm(y ~ psa + batch + tumour, dd))$coefficients
+    nr <- dd$response_group_neat
+    w <- suppressWarnings(wilcox.test(dd$y[nr == "Non_Responder"], dd$y[nr == "Responder"], exact = FALSE))
+    cx <- tryCatch(summary(coxph(Surv(r_pfstime, r_pfsevent) ~ y + batch, dd))$coefficients["y", c(2, 5)], error = function(e) c(NA, NA))
+    b_rows[[paste(sid, f)]] <- data.frame(stratum = sid, timepoint = tp, set = f, expected = prior_dir[f], n = nrow(dd),
+      beta_psa = c0["psa", 1], p_psa = c0["psa", 4], beta_psa_adj_tumour = c1["psa", 1], p_psa_adj_tumour = c1["psa", 4],
+      diff_NR_minus_R = mean(dd$y[nr == "Non_Responder"]) - mean(dd$y[nr == "Responder"]), p_NR_vs_R = w$p.value,
+      HR_rPFS_per_SD = cx[1], p_rPFS = cx[2]) }
+}
+a_tab <- bind_rows(a_rows); b_tab <- bind_rows(b_rows)
+## positive beta_psa = higher score with worse PSA response ("worse" hypothesis predicts beta > 0)
+b_tab <- b_tab %>% mutate(family = ifelse(timepoint == "Cycle1", "on_treatment", "baseline")) %>% group_by(family) %>%
+  mutate(fdr_psa = p.adjust(p_psa, "BH"), fdr_rPFS = p.adjust(p_rPFS, "BH")) %>% ungroup() %>%
+  mutate(direction_as_expected = ifelse(expected == "worse", beta_psa > 0, beta_psa < 0))
+## pooled sign test across baseline strata per set (strata share patients -> descriptive)
+c_tab <- b_tab %>% filter(family == "baseline") %>% group_by(set, expected) %>%
+  summarise(n_strata = n(), n_as_expected = sum(direction_as_expected), n_p05 = sum(p_psa < 0.05), min_fdr = min(fdr_psa),
+            median_beta = median(beta_psa), .groups = "drop") %>% arrange(min_fdr)
+
+write.csv(a_tab, file.path(out_dir, "A_set_coherence.csv"), row.names = FALSE)
+write.csv(b_tab, file.path(out_dir, "B_radiobiology_vs_response.csv"), row.names = FALSE)
+write.csv(c_tab, file.path(out_dir, "C_summary_by_set.csv"), row.names = FALSE)
+qs::qsave(bind_rows(scores), file.path(out_dir, "radiobiology_scores.qs"))
+options(width = 220); f2 <- function(x) as.data.frame(mutate(x, across(where(is.numeric), ~signif(.x, 2))))
+cat("\n==== A. coherence (mean pairwise rho), by set x stratum ====\n")
+print(f2(a_tab %>% select(-n_genes) %>% pivot_wider(names_from = stratum, values_from = coherence)), row.names = FALSE)
+cat("\n==== B. baseline P < 0.05 (PSA) or rPFS P < 0.05 ====\n")
+print(f2(b_tab %>% filter(p_psa < 0.05 | p_rPFS < 0.05) %>% select(stratum, set, expected, n, beta_psa, p_psa, fdr_psa, p_psa_adj_tumour, diff_NR_minus_R, p_NR_vs_R, HR_rPFS_per_SD, p_rPFS, fdr_rPFS)), row.names = FALSE)
+cat("\n==== C. per-set summary over 6 baseline strata ====\n"); print(f2(c_tab), row.names = FALSE)
+cat(sprintf("\nBaseline family: %d tests, min FDR (PSA) %.3f, min FDR (rPFS) %.3f\n", sum(b_tab$family == "baseline"),
+            min(b_tab$fdr_psa[b_tab$family == "baseline"], na.rm = TRUE), min(b_tab$fdr_rPFS[b_tab$family == "baseline"], na.rm = TRUE)))
+cat("R14 complete.\n")
+```

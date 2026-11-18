@@ -1,0 +1,227 @@
+---
+title: "Technical confounding of the key patient-level results"
+subtitle: "PRINCE spatial transcriptomics: `comp_49_technical_confounding`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+This script asks whether the main patient-level findings could be explained by technical properties of the AOIs that make up each pseudobulk. For each patient × stratum it summarises seven factors: log library size, mean log raw reads, sequencing saturation, log negative-probe background, signal depth (mean log % genes above LOQ), number of AOIs, and DSP slide-processing experiment. The slide-processing experiment is nested within study batch, which is identical to sequencing run.
+
+The analysis has five parts. (A) Each technical factor is related to PSA change (Spearman) and to non-responder versus responder status (Wilcoxon), with BH correction across all tests. (B) Key features (*FOLH1*, Hallmark androgen response, HLA class I, MHC-I, the IFN/STING programme, Hallmark IFN-α and p53 programmes) are refitted as `feature ~ PSA + batch`: with each factor added in turn, with the continuous factors added jointly, and with the slide-processing experiment in place of batch. (C) Paired pre- to on-treatment induction is re-estimated after regressing each patient's change on the change in technical factors; the intercept is the change expected at constant technical quality. (D) Principal components of each pseudobulk stratum are correlated with PSA change and with the technical factors. (E) The transcriptome-wide pseudobulk model is refitted with technical covariates, and π₁ and FDR counts are recorded.
+
+**Manuscript items supported**
+
+- Supplementary Table 100 (technical confounding; assembled by comp_47)
+- Results: transcriptome-wide signal and its instability to technical covariates (π₁ 0–15% in pre-treatment bone after adjustment; PC1 tracks signal depth)
+- Results: *FOLH1* association robust to technical factors and to replacing batch by slide-processing experiment
+- Methods: Technical confounding
+
+**Pipeline step:** `./run_pipeline.sh --only 49_technical_confounding`. Approximate runtime: a few minutes.
+
+**Inputs**
+
+- `data/phase2_se_qc_filtered.qs`
+- `results/R1_loq/loq_gene_universes.qs`
+- `results/C13_pseudobulk_LOQ/pseudobulk_strata.qs`
+- `data/reference/msigdb_gene_sets.rds`
+- `data/reference/ProstateCancer_GeneSignatures.R`
+- `.build/comp_13b_pseudobulk_loq.R`
+
+**Outputs**
+
+- `results/R21_technical/A_technical_vs_response.csv`
+- `results/R21_technical/B_features_adjusted_for_technical.csv`
+- `results/R21_technical/C_technical_change_on_treatment.csv`
+- `results/R21_technical/C_induction_adjusted_for_technical.csv`
+- `results/R21_technical/D_PCs_vs_response_and_technical.csv`
+- `results/R21_technical/E_transcriptome_wide_adjusted_for_technical.csv`
+
+**Depends on**: `comp_16`, `comp_13b`
+
+## Analysis
+
+### Are the key results driven by technical factors?
+
+The header lists the technical factors and analyses A–D. Analysis E, the transcriptome-wide refit, is in the last chunk.
+
+Loads the bone-only GeoMx object, the LOQ universes and the patient pseudobulk. Programme definitions are taken from comp_13b, with the p53 core and HLA class I sets added. AOI-level technical variables are derived, and `tech_of()` averages them over each patient's AOIs in a stratum; it also records the modal slide-processing experiment.
+
+For each pseudobulk stratum, the loop then runs three analyses:
+- (A) Spearman correlation of each factor with maximal PSA change, a Wilcoxon test of non-responders versus responders, and a Kruskal–Wallis test against batch.
+- (B) The coefficient of the PSA term (per 50%, capped at +100%) for each key feature, under the base model and each adjusted model.
+- (D) Correlations of the first five principal components with PSA change and with the technical factors.
+
+BH correction is applied across all A tests.
+
+```{r comp-49-technical-confounding-01}
+## ============================================================================
+## PRINCE -- R21: are the key results driven by technical factors?
+## Technical factors per patient x stratum (from the AOIs summed into each pseudobulk):
+##   log library size (pseudobulk total counts), mean log raw reads, mean sequencing saturation,
+##   mean log negative-probe background, signal depth (mean log % genes above LOQ), number of AOIs,
+##   DSP slide-processing experiment (nested within study batch; sequencing run == study batch).
+##  A. technical factors vs PSA change (Spearman) and non-responder vs responder (Wilcoxon), BH across all.
+##  B. key features (FOLH1, Hallmark androgen, MHC-I, HLA-I/IFN programmes, Hallmark p53/IFN-a):
+##     lm(feature ~ psa + batch) vs + each technical factor, + all continuous factors jointly,
+##     and with DSP experiment replacing batch.
+##  C. paired pre -> on-treatment induction: change in technical factors, and induction adjusted for
+##     change in library size, signal depth, background and saturation (intercept = change at constant technicals).
+##  D. principal components of each pseudobulk stratum vs PSA change and technical factors.
+## Outputs: results/R21_technical/
+## ============================================================================
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({ library(qs); library(SummarizedExperiment); library(dplyr); library(tidyr); library(edgeR) })
+setwd(PRINCE_DIR)
+out_dir <- file.path(COMP_DIR, "R21_technical"); dir.create(out_dir, showWarnings = FALSE)
+se <- qs::qread("phase2_se_qc_filtered.qs"); cd <- as.data.frame(colData(se))
+loq <- qs::qread(file.path(COMP_DIR, "R1_loq", "loq_gene_universes.qs")); uni <- loq$universes
+pbs <- qs::qread(out_path("C13_pseudobulk_LOQ", "pseudobulk_strata.qs"))
+msig <- readRDS(file.path(PMCC_DIR, "msigdb_gene_sets.rds"))
+sig_env <- new.env(); sys.source(file.path(PMCC_DIR, "ProstateCancer_GeneSignatures.R"), envir = sig_env)
+src <- readLines(file.path(CODE_DIR, "comp_13b_pseudobulk_loq.R")); eval(parse(text = src[grep("^apriori_genes <- ", src):grep("^posthoc_programmes <- ", src)]))
+programmes$P53_core <- c("CDKN1A", "MDM2", "DDB2", "PHLDA3", "GDF15", "TNFRSF10B", "SESN1", "ZMAT3", "RRM2B", "TP53I3")
+programmes$HLA_I <- c("HLA-A", "HLA-B", "HLA-C", "B2M", "TAP1", "TAP2", "TAPBP")
+key_feats <- c("FOLH1", "Hallmark_androgen", "HLA_I", "MHC_I", "IFN_I_STING_tumour", "Hallmark_IFNa", "Hallmark_P53", "P53_core")
+seg <- c(CD45 = "CD45+", PSMA = "PSMA+", PanCKPSMA = "PanCK+PSMA-")
+cd$depth <- log(loq$aoi[rownames(cd), "pct_above_LOQ_std"]); cd$lraw <- log(cd$raw_reads); cd$lbg <- log(cd$neg_probe_geomean)
+cd$sat <- cd$sequencing_saturation; cd$dsp <- factor(cd$dsp_experiment)
+artefact_re <- "^(USP17L|PRAMEF|NBPF|OR[0-9]+[A-Z]+[0-9]+)"
+raw <- assay(se, "all_count"); raw <- raw[!grepl(artefact_re, rownames(raw)), ]
+score <- function(lc, feats) {
+  z <- t(scale(t(lc)))
+  sapply(feats, function(f) if (f %in% rownames(lc)) lc[f, ] else { g <- intersect(programmes[[f]], rownames(z)); if (length(g) >= 3) colMeans(z[g, , drop = FALSE]) else rep(NA, ncol(z)) })
+}
+tech_of <- function(sid, pts) {
+  sg <- seg[sub("__.*", "", sid)]; tp <- sub(".*__", "", sid)
+  t <- cd %>% filter(segment_name == sg, timepoint == tp, response_group_neat != "Control") %>% group_by(subject_id) %>%
+    summarise(lraw = mean(lraw), sat = mean(sat), lbg = mean(lbg), depth = mean(depth), n_aoi = n(),
+              dsp = names(which.max(table(as.character(dsp)))), n_dsp = n_distinct(dsp), .groups = "drop")
+  t[match(pts, t$subject_id), ]
+}
+sp <- function(a, b) { ok <- complete.cases(a, b); t <- suppressWarnings(cor.test(a[ok], b[ok], method = "spearman", exact = FALSE)); c(unname(t$estimate), t$p.value) }
+coefp <- function(f, d, term = "psa") { s <- tryCatch(summary(lm(f, d))$coefficients, error = function(e) NULL); if (is.null(s) || !term %in% rownames(s)) c(NA, NA) else s[term, c(1, 4)] }
+
+A <- list(); Bres <- list(); D <- list()
+for (sid in names(pbs)) {
+  p <- pbs[[sid]]; m <- p$meta; tch <- tech_of(sid, m$subject_id); stopifnot(identical(tch$subject_id, m$subject_id))
+  d <- data.frame(m, tch[, -1], llib = log(colSums(p$counts)))
+  d$psa <- d$psa_change_capped / 50; d$batch <- factor(d$study_batch); d$NR <- ifelse(d$response_group_neat == "Non_Responder", 1, ifelse(d$response_group_neat == "Responder", 0, NA))
+  for (v in c("llib", "lraw", "sat", "lbg", "depth", "n_aoi")) {
+    r <- sp(d[[v]], d$max_psa_change)
+    w <- tryCatch(wilcox.test(d[[v]][d$NR %in% 1], d[[v]][d$NR %in% 0], exact = FALSE)$p.value, error = function(e) NA)
+    A[[paste(sid, v)]] <- data.frame(stratum = sid, factor = v, n = nrow(d), rho_psa = r[1], p_psa = r[2], p_NR_vs_R = w,
+                                     p_batch = tryCatch(kruskal.test(d[[v]], d$batch)$p.value, error = function(e) NA))
+  }
+  A[[paste(sid, "dsp")]] <- data.frame(stratum = sid, factor = "dsp_experiment", n = nrow(d), rho_psa = NA,
+    p_psa = tryCatch(kruskal.test(d$max_psa_change, factor(d$dsp))$p.value, error = function(e) NA), p_NR_vs_R = NA, p_batch = NA)
+  F <- score(p$lcpm, key_feats)
+  nb <- nlevels(droplevels(d$batch)) > 1; base <- if (nb) "y ~ psa + batch" else "y ~ psa"
+  for (f in key_feats) { d$y <- F[, f]; if (all(is.na(d$y))) next
+    res <- list(base = coefp(as.formula(base), d))
+    for (v in c("llib", "lraw", "sat", "lbg", "depth", "n_aoi")) res[[v]] <- coefp(as.formula(paste(base, "+", v)), d)
+    res$all_continuous <- coefp(as.formula(paste(base, "+ llib + sat + lbg + depth")), d)
+    res$dsp_for_batch <- if (nlevels(factor(d$dsp)) > 1) coefp(y ~ psa + factor(dsp), d) else res$base
+    Bres[[paste(sid, f)]] <- data.frame(stratum = sid, feature = f, n = sum(!is.na(d$y)), model = names(res),
+                                        beta = sapply(res, `[`, 1), p = sapply(res, `[`, 2))
+  }
+  pc <- prcomp(t(p$lcpm[apply(p$lcpm, 1, var) > 0, ]), scale. = TRUE)
+  for (k in 1:5) { s <- pc$x[, k]
+    D[[paste(sid, k)]] <- data.frame(stratum = sid, PC = k, var_expl = summary(pc)$importance[2, k],
+      rho_psa = sp(s, d$max_psa_change)[1], p_psa = sp(s, d$max_psa_change)[2], rho_llib = sp(s, d$llib)[1], rho_depth = sp(s, d$depth)[1],
+      rho_lbg = sp(s, d$lbg)[1], rho_sat = sp(s, d$sat)[1], p_batch = tryCatch(kruskal.test(s, d$batch)$p.value, error = function(e) NA)) }
+}
+A <- bind_rows(A) %>% mutate(fdr_psa = p.adjust(p_psa, "BH"), fdr_NR = p.adjust(p_NR_vs_R, "BH"))
+Bres <- bind_rows(Bres); D <- bind_rows(D)
+
+```
+
+### C. Paired on-treatment induction
+
+For each compartment, patients with both pre- and on-treatment tissue are pseudobulked jointly over the union of both timepoints' LOQ universes (TMM, log-CPM). Each patient's change in each technical factor is tested by Wilcoxon signed-rank test. Each feature's change is then regressed on the change in library size, signal depth, background or saturation, and on library size plus depth. The intercept and its P value give the induction at unchanged technical quality. Tables A–D are written and the main results printed.
+
+```{r comp-49-technical-confounding-02}
+## ---- C. paired induction ----
+C <- list(); Cd <- list()
+for (sg in names(seg)) {
+  s0 <- paste0(sg, "__Screening"); s1 <- paste0(sg, "__Cycle1")
+  pts <- intersect(pbs[[s0]]$meta$subject_id, pbs[[s1]]$meta$subject_id)
+  g <- intersect(union(uni[[s0]]$g10, uni[[s1]]$g10), rownames(raw))
+  idx <- which(cd$segment_name == seg[sg] & cd$timepoint %in% c("Screening", "Cycle1") & cd$subject_id %in% pts)
+  key <- paste(cd$subject_id[idx], cd$timepoint[idx]); cnt <- t(rowsum(t(raw[g, idx]), key))
+  lc <- cpm(calcNormFactors(DGEList(cnt)), log = TRUE, prior.count = 1); F <- score(lc, key_feats)
+  tt <- cd[idx, ] %>% mutate(key = key) %>% group_by(key) %>% summarise(lraw = mean(lraw), sat = mean(sat), lbg = mean(lbg), depth = mean(depth), .groups = "drop")
+  tt <- tt[match(colnames(lc), tt$key), ]; tt$llib <- log(colSums(cnt))[colnames(lc)]
+  pid <- sub(" .*", "", colnames(lc)); tp <- sub(".* ", "", colnames(lc))
+  dl <- function(x) { x0 <- setNames(x[tp == "Screening"], pid[tp == "Screening"]); x1 <- setNames(x[tp == "Cycle1"], pid[tp == "Cycle1"]); x1[pts] - x0[pts] }
+  dt <- data.frame(patient = pts, sapply(c("llib", "lraw", "sat", "lbg", "depth"), function(v) dl(tt[[v]])))
+  for (v in c("llib", "lraw", "sat", "lbg", "depth"))
+    Cd[[paste(sg, v)]] <- data.frame(segment = sg, factor = v, n = length(pts), median_change = median(dt[[v]]),
+                                     n_up = sum(dt[[v]] > 0), p_signed_rank = wilcox.test(dt[[v]], exact = FALSE)$p.value)
+  for (f in key_feats) { y <- dl(F[, f]); if (all(is.na(y))) next
+    dd <- cbind(dt, y = y)
+    fits <- list(unadjusted = summary(lm(y ~ 1, dd))$coefficients[1, c(1, 4)],
+                 adj_llib = summary(lm(y ~ llib, dd))$coefficients[1, c(1, 4)],
+                 adj_depth = summary(lm(y ~ depth, dd))$coefficients[1, c(1, 4)],
+                 adj_lbg = summary(lm(y ~ lbg, dd))$coefficients[1, c(1, 4)],
+                 adj_sat = summary(lm(y ~ sat, dd))$coefficients[1, c(1, 4)],
+                 adj_llib_depth = summary(lm(y ~ llib + depth, dd))$coefficients[1, c(1, 4)])
+    C[[paste(sg, f)]] <- data.frame(segment = sg, feature = f, n = length(y), model = names(fits),
+                                    change = sapply(fits, `[`, 1), p = sapply(fits, `[`, 2)) }
+}
+C <- bind_rows(C); Cd <- bind_rows(Cd)
+write.csv(A, file.path(out_dir, "A_technical_vs_response.csv"), row.names = FALSE)
+write.csv(Bres, file.path(out_dir, "B_features_adjusted_for_technical.csv"), row.names = FALSE)
+write.csv(Cd, file.path(out_dir, "C_technical_change_on_treatment.csv"), row.names = FALSE)
+write.csv(C, file.path(out_dir, "C_induction_adjusted_for_technical.csv"), row.names = FALSE)
+write.csv(D, file.path(out_dir, "D_PCs_vs_response_and_technical.csv"), row.names = FALSE)
+
+options(width = 220); f2 <- function(x) as.data.frame(mutate(x, across(where(is.numeric), ~signif(.x, 2))))
+cat("\n==== A. technical factors associated with PSA change / NR (P < 0.05) ====\n"); print(f2(A %>% filter(p_psa < 0.05 | p_NR_vs_R < 0.05)), row.names = FALSE)
+cat("min FDR psa:", signif(min(A$fdr_psa, na.rm = TRUE), 2), " min FDR NR:", signif(min(A$fdr_NR, na.rm = TRUE), 2), "\n")
+cat("\n==== B. FOLH1: P by model ====\n"); print(f2(Bres %>% filter(feature == "FOLH1") %>% select(stratum, model, p) %>% pivot_wider(names_from = model, values_from = p)), row.names = FALSE)
+cat("\n==== B. all features: strata with P<0.05 by model ====\n"); print(Bres %>% group_by(feature, model) %>% summarise(n_p05 = sum(p < 0.05, na.rm = TRUE), neg = sum(beta < 0, na.rm = TRUE), .groups = "drop") %>% pivot_wider(names_from = model, values_from = c(n_p05)) %>% select(-neg) %>% group_by(feature) %>% summarise(across(everything(), ~max(.x, na.rm = TRUE))) %>% as.data.frame(), row.names = FALSE)
+cat("\n==== C. technical change on treatment ====\n"); print(f2(Cd), row.names = FALSE)
+cat("\n==== C. induction P by adjustment ====\n"); print(f2(C %>% select(segment, feature, model, p) %>% pivot_wider(names_from = model, values_from = p)), row.names = FALSE)
+cat("\n==== D. PCs associated with PSA change (P<0.05) ====\n"); print(f2(D %>% filter(p_psa < 0.05)), row.names = FALSE)
+cat("R21 complete.\n")
+
+```
+
+### E. Transcriptome-wide model with technical covariates
+
+The primary limma-voom model (robust eBayes, `~ PSA + batch`) is refitted for each stratum with signal depth, and with signal depth plus background and saturation, as extra covariates. For the PSA coefficient, the script records the number of genes at FDR < 0.05 and < 0.1 and π₁ (lfdr).
+
+```{r comp-49-technical-confounding-03}
+## ---- E. transcriptome-wide pseudobulk limma-voom with technical covariates (pi1, FDR counts) ----
+suppressMessages(library(limma))
+E <- list()
+for (sid in names(pbs)) {
+  p <- pbs[[sid]]; m <- p$meta; tch <- tech_of(sid, m$subject_id)
+  d <- data.frame(m, tch[, -1]); d$psa <- d$psa_change_capped / 50; d$batch <- factor(d$study_batch)
+  nb <- nlevels(droplevels(d$batch)) > 1
+  for (mn in c("base", "depth", "depth_lbg_sat")) {
+    rhs <- c(base = "psa", depth = "psa + depth", depth_lbg_sat = "psa + depth + lbg + sat")[mn]
+    X <- model.matrix(as.formula(paste("~", rhs, if (nb) "+ batch" else "")), d)
+    tt <- topTable(eBayes(lmFit(voom(p$dge, X), X), robust = TRUE), coef = "psa", number = Inf)
+    E[[paste(sid, mn)]] <- data.frame(stratum = sid, model = mn, fdr05 = sum(tt$adj.P.Val < 0.05), fdr10 = sum(tt$adj.P.Val < 0.1),
+                                      pi1 = 1 - propTrueNull(tt$P.Value, method = "lfdr"))
+  }
+}
+E <- bind_rows(E); write.csv(E, file.path(out_dir, "E_transcriptome_wide_adjusted_for_technical.csv"), row.names = FALSE)
+cat("\n==== E. transcriptome-wide pseudobulk with technical covariates ====\n")
+print(f2(E %>% pivot_wider(names_from = model, values_from = c(fdr05, pi1)) %>% select(-starts_with("fdr10"))), row.names = FALSE)
+```

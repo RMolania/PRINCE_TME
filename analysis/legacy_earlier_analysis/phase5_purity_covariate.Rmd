@@ -1,0 +1,211 @@
+---
+title: "Legacy: ESTIMATE tumour purity as a covariate in the AOI-level differential expression"
+subtitle: "PRINCE spatial transcriptomics: `phase5_purity_covariate`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "results_legacy"))
+```
+
+## Overview
+
+This is a legacy script from the earlier all-site analysis (primary tumours plus metastatic biopsies from bone, lymph node and soft tissue). It is included for transparency and is not part of the bone-only pipeline. It added the per-AOI tumour purity estimate supplied with the data (ESTIMATE) to the RUV-covariate, patient-blocked non-responder versus responder model of phase4. It then classified each earlier hit as purity-robust, purity-driven (lost after adjustment) or new after adjustment. It also tested whether purity differed by response group within each stratum, and between archival and pre-treatment samples within each compartment.
+
+Its frozen top tables with purity (`data/previous_analysis/Phase5_Purity/*_toptable_with_purity.csv`) are read by comp_18. comp_18 shows that purity adjustment reproduces the direction of the earlier named genes but not their transcriptome-wide significance at patient level.
+
+**Manuscript items supported**
+
+- Extended Data Fig. 8a (earlier AOI-level gene counts with ESTIMATE purity as a covariate), via comp_18 reading the frozen `data/previous_analysis/Phase5_Purity/*_toptable_with_purity.csv`
+- Results: Re-evaluation of earlier neuroendocrine, purity and bone-niche findings
+
+**Pipeline step:** `./run_pipeline.sh --legacy` (optional; not needed to reproduce the manuscript, whose frozen inputs are in `data/previous_analysis/`). Approximate runtime: minutes to tens of minutes.
+
+**Inputs**
+
+- `results_legacy/phase3_ruv_results.rds`
+- `results_legacy/phase4_de_results.rds`
+
+**Outputs**
+
+- `results_legacy/previous_analysis/Phase5_Purity/*_toptable_with_purity.csv (frozen copies in data/previous_analysis/Phase5_Purity/)`
+- `results_legacy/phase5_purity_results.rds`
+- `results_legacy/phase5_summary_table.csv`
+
+**Depends on**: `phase3_normalization`, `phase4_DE`
+
+## Analysis
+
+### Legacy purity adjustment
+
+The header explains the source of the purity estimate and the aim, which was to separate purity-robust from purity-driven hits.
+
+Sets the working directory to `results_legacy/` and loads the phase3 and phase4 results.
+
+```{r phase5-purity-covariate-01}
+## ============================================================================
+## PRINCE Trial GeoMx DSP -- Phase 5: Tumour Purity as a Covariate
+##
+## tumour.purity.estimate (colData, no NAs in any of the 6 strata) is used
+## directly -- it's already a marker-based purity estimate provided with the
+## trial data (Phase 6 deconvolution will provide an independent cross-check
+## later). Re-runs each stratum's primary (RUV-covariate) NRvsR contrast from
+## Phase 4 with purity added as an extra covariate, and reports which Phase 4
+## hits are purity-robust vs purity-driven.
+## ============================================================================
+
+suppressMessages({
+  library(SummarizedExperiment); library(dplyr)
+  library(edgeR); library(limma); library(ggplot2)
+})
+
+PRINCE_ROOT <- normalizePath(Sys.getenv("PRINCE_ROOT", "."))
+RAW_DIR <- file.path(PRINCE_ROOT, "data", "interim")     # all-site QC'd objects written by comp_00a_qc
+dir.create(file.path(PRINCE_ROOT, "results_legacy"), showWarnings = FALSE)
+setwd(file.path(PRINCE_ROOT, "results_legacy"))           # legacy outputs; frozen copies used downstream are in data/previous_analysis
+dir.create("Results/Phase5_Purity", showWarnings = FALSE, recursive = TRUE)
+
+phase3 <- readRDS("phase3_ruv_results.rds")
+phase4 <- readRDS("phase4_de_results.rds")
+
+get_W <- function(entry) {
+  if (!is.null(entry$W)) return(entry$W)
+  aname <- paste0("RUVIIIprps_k_", entry$chosen_k)
+  entry$se@metadata$RUVIII$W[[aname]]
+}
+
+```
+
+### Purity versus response group
+
+Within each stratum, the script fits `purity ~ response group` at AOI level and reports R², the F-test P and the group means.
+
+```{r phase5-purity-covariate-02}
+## ---------------------------------------------------------------------------
+## Step 1: purity vs response_group_neat, per stratum
+## ---------------------------------------------------------------------------
+cat("================ PURITY vs RESPONSE GROUP, PER STRATUM ================\n")
+purity_assoc <- list()
+for (stratum_id in names(phase3)) {
+  cd <- phase3[[stratum_id]]$cd
+  bio <- droplevels(factor(cd$response_group_neat))
+  fit <- lm(tumour.purity.estimate ~ bio, data = cd)
+  r2 <- summary(fit)$r.squared
+  pval <- tryCatch(anova(fit)$`Pr(>F)`[1], error = function(e) NA)
+  cat(sprintf("%-22s R2=%.3f  p=%.4f  (purity by group: %s)\n", stratum_id, r2, pval,
+              paste(round(tapply(cd$tumour.purity.estimate, bio, mean), 3), collapse = " / ")))
+  purity_assoc[[stratum_id]] <- data.frame(stratum = stratum_id, r2 = r2, pval = pval)
+}
+purity_assoc_tab <- bind_rows(purity_assoc)
+
+```
+
+### Purity versus timepoint
+
+Within each compartment, archival and pre-treatment AOIs are pooled and purity is compared between timepoints.
+
+```{r phase5-purity-covariate-03}
+## ---------------------------------------------------------------------------
+## Step 2: purity vs timepoint, per segment (pooling Archival + Screening)
+## ---------------------------------------------------------------------------
+cat("\n================ PURITY vs TIMEPOINT, PER SEGMENT (pooled Archival+Screening) ================\n")
+for (seg in c("CD45+", "PSMA+", "PanCK+PSMA-")) {
+  arch_id <- paste0(gsub("[^A-Za-z0-9]", "", seg), "__Archival")
+  scr_id  <- paste0(gsub("[^A-Za-z0-9]", "", seg), "__Screening")
+  cd_a <- phase3[[arch_id]]$cd; cd_s <- phase3[[scr_id]]$cd
+  pooled <- rbind(data.frame(purity = cd_a$tumour.purity.estimate, timepoint = "Archival"),
+                   data.frame(purity = cd_s$tumour.purity.estimate, timepoint = "Screening"))
+  fit <- lm(purity ~ timepoint, data = pooled)
+  r2 <- summary(fit)$r.squared
+  pval <- anova(fit)$`Pr(>F)`[1]
+  cat(sprintf("%-14s R2=%.3f  p=%.4f  (mean purity Archival=%.3f, Screening=%.3f)\n", seg, r2, pval,
+              mean(cd_a$tumour.purity.estimate), mean(cd_s$tumour.purity.estimate)))
+}
+
+```
+
+### Differential expression with purity
+
+Refits the phase4 model (RUV factors, two-pass blocking, voomWithQualityWeights, robust eBayes) with purity added as a covariate. FDR < 0.05 hits are compared with phase4: purity-robust, purity-driven (lost) and new after adjustment. Top tables and the summary are written.
+
+```{r phase5-purity-covariate-04}
+## ---------------------------------------------------------------------------
+## Step 3: re-run NRvsR with purity added to the RUV-covariate design
+## ---------------------------------------------------------------------------
+cat("\n================ DE WITH PURITY ADDED TO RUV-COVARIATE MODEL ================\n")
+
+run_limma_voom_purity <- function(counts, bio, pid, W, purity) {
+  design_base <- model.matrix(~0 + bio)
+  colnames(design_base) <- make.names(colnames(design_base))
+  colnames(W) <- paste0("W", seq_len(ncol(W)))
+  design <- cbind(design_base, W, purity = purity)
+  dge <- DGEList(counts); dge <- calcNormFactors(dge, method = "TMM")
+  v1 <- voom(dge, design, plot = FALSE)
+  dupcor1 <- duplicateCorrelation(v1, design, block = pid)
+  v2 <- voomWithQualityWeights(dge, design, block = pid, correlation = dupcor1$consensus, plot = FALSE)
+  dupcor2 <- duplicateCorrelation(v2, design, block = pid)
+  fit <- lmFit(v2, design, block = pid, correlation = dupcor2$consensus)
+  bio_cols <- colnames(design_base)
+  nr_col <- bio_cols[grepl("Non_Responder", bio_cols)]
+  r_col  <- bio_cols[grepl("Responder", bio_cols) & !grepl("Non_Responder", bio_cols)]
+  cm <- makeContrasts(contrasts = paste0(nr_col, " - ", r_col), levels = design)
+  fit2 <- eBayes(contrasts.fit(fit, cm), robust = TRUE)
+  topTable(fit2, number = Inf, sort.by = "P")
+}
+
+summary_rows <- list()
+robustness_details <- list()
+
+for (stratum_id in names(phase3)) {
+  entry <- phase3[[stratum_id]]
+  cd <- entry$cd
+  counts <- assay(entry$se, "all_count")
+  bio <- droplevels(factor(cd$response_group_neat))
+  pid <- factor(cd$subject_id)
+  W <- get_W(entry)
+  purity <- cd$tumour.purity.estimate
+
+  tt_purity <- run_limma_voom_purity(counts, bio, pid, W, purity)
+  tt_noPurity <- phase4$de_results[[stratum_id]]$fit_with$toptable
+
+  sig_purity <- rownames(tt_purity)[tt_purity$adj.P.Val < 0.05]
+  sig_noPurity <- rownames(tt_noPurity)[tt_noPurity$adj.P.Val < 0.05]
+  purity_robust <- intersect(sig_noPurity, sig_purity)
+  purity_driven <- setdiff(sig_noPurity, sig_purity)
+  new_after_purity <- setdiff(sig_purity, sig_noPurity)
+
+  cat(sprintf("\n%s : DE (no purity)=%d | DE (+purity)=%d | purity-robust=%d | purity-driven(lost)=%d | new-after-purity=%d\n",
+              stratum_id, length(sig_noPurity), length(sig_purity), length(purity_robust),
+              length(purity_driven), length(new_after_purity)))
+
+  write.csv(tt_purity, file.path("Results/Phase5_Purity", paste0(stratum_id, "_toptable_with_purity.csv")))
+  robustness_details[[stratum_id]] <- list(purity_robust = purity_robust, purity_driven = purity_driven,
+                                            new_after_purity = new_after_purity)
+  summary_rows[[stratum_id]] <- data.frame(
+    stratum = stratum_id, n_sig_no_purity = length(sig_noPurity), n_sig_with_purity = length(sig_purity),
+    n_purity_robust = length(purity_robust), n_purity_driven_lost = length(purity_driven),
+    n_new_after_purity = length(new_after_purity)
+  )
+}
+
+summary_tab <- bind_rows(summary_rows)
+cat("\n\n================ PHASE 5 SUMMARY ================\n")
+print(summary_tab, row.names = FALSE)
+
+saveRDS(list(purity_assoc = purity_assoc_tab, summary_table = summary_tab,
+             robustness_details = robustness_details),
+        "phase5_purity_results.rds")
+write.csv(summary_tab, "phase5_summary_table.csv", row.names = FALSE)
+cat("\nSaved phase5_purity_results.rds, phase5_summary_table.csv, and per-stratum",
+    "topTables under Results/Phase5_Purity/\n")
+cat("Phase 5 script complete.\n")
+```

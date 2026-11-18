@@ -1,0 +1,179 @@
+---
+title: "AOI-level mixed models with between- and within-patient purity and signal-depth terms"
+subtitle: "PRINCE spatial transcriptomics: `comp_35_aoi_dream_purity`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+This script asks whether AOI-level associations with PSA change, chiefly for *FOLH1*, depend on tumour content or on AOI signal depth. It avoids mixing between- and within-patient variation. Each covariate (logit SpatialDecon tumour fraction, logit ESTIMATE purity, log % genes above LOQ) is split into the patient mean (`_b`) and the AOI's deviation from it (`_w`), following Mundlak. Four models are fitted per compartment × timepoint stratum: M0 = PSA change + batch + (1 | patient); M1 adds the SpatialDecon terms; M2 the ESTIMATE terms; M3 the SpatialDecon and signal-depth terms.
+
+Pre-specified features (*FOLH1*, Hallmark androgen response, HLA class I, Hallmark IFN-α, p53 core, Beltran 13-gene NE set) are fitted with lmerTest using Kenward–Roger degrees of freedom. Model-based P values can be anti-conservative with few patients, so inference uses 500 permutations of PSA change across patients, with each AOI keeping its patient's value. Transcriptome-wide models use dream with voomWithDreamWeights. Their concordance with patient pseudobulk is measured by Spearman correlation of t statistics, and M3 is calibrated by `N_PERM` patient-level permutations (default 20, the number used for the released results).
+
+**Manuscript items supported**
+
+- Supplementary Fig. 1c (*FOLH1* patient-permutation P per stratum under M0–M3; drawn by `comp_39_supp_fig6`)
+- Supplementary Tables 75–77 (purity agreement; feature models; transcriptome-wide dream models)
+- Results: Lesional PSMA expression is lower in poor responders (purity-split AOI models)
+- Methods: AOI-level analyses (models M0–M3)
+
+**Pipeline step:** `./run_pipeline.sh --only 35_pre`; also run as step(s) `35_cycle1` (see `steps.tsv`). Approximate runtime: about 3.5 h with parallel workers (run as two jobs: Archival + Screening strata, then Cycle1 strata with OUT_TAG=_cycle1).
+
+**Inputs**
+
+- `data/phase2_se_qc_filtered.qs`
+- `data/reference/msigdb_gene_sets.rds`
+- `results/C1_clinical/patient_table.qs`
+- `results/R1_loq/loq_gene_universes.qs`
+- `results/C3_deconvolution/deconvolution_proportions.qs`
+- `results/C13_pseudobulk_LOQ/transcriptome_wide_limma_all_strata.csv`
+
+**Outputs**
+
+- `results/R13_aoi_dream_purity/A_purity_agreement<OUT_TAG>.csv`
+- `results/R13_aoi_dream_purity/B_feature_models<OUT_TAG>.csv`
+- `results/R13_aoi_dream_purity/C_genomewide_dream<OUT_TAG>.csv`
+
+**Depends on**: `comp_00b_bone_cohort`, `comp_01_clinical`, `comp_03b_deconv`, `comp_13b_pseudobulk_loq`, `comp_16_loq_filter`
+
+## Analysis
+
+Header: model definitions (M0–M3) and the three outputs: A, purity agreement; B, pre-specified features; C, transcriptome-wide dream.
+
+Set-up. The environment variables `N_PERM` (transcriptome-wide permutations), `STRATA` (subset of strata) and `OUT_TAG` (output suffix) let the strata run as separate jobs. Cross-hybridising probe families are removed, and patient AOIs from the three analysed timepoints are kept (control tissue excluded). The pre-specified programmes are defined. Helpers give a bounded logit (0.01–0.99) and the between/within split, and drop the batch term in strata with a single batch.
+
+```{r comp-35-aoi-dream-purity-01}
+## ============================================================================
+## PRINCE -- R13: AOI-level mixed models with within/between-patient covariate splitting.
+## Per segment x timepoint stratum, AOI counts (LOQ genes), outcome = PSA change (per 50%).
+## Purity from two methods: SpatialDecon tumour fraction (reference-based) and ESTIMATE
+## (expression-signature-based); each logit-transformed and split into patient mean (_b) and
+## within-patient deviation (_w). AOI signal depth (log % genes above LOQ) split the same way.
+##   M0: psa + batch + (1|patient)
+##   M1: M0 + decon_b + decon_w
+##   M2: M0 + estimate_b + estimate_w
+##   M3: M1 + depth_b + depth_w
+##  A. purity agreement (SpatialDecon vs ESTIMATE) and purity/depth vs response
+##  B. pre-specified features: lmer, Kenward-Roger df, 500 patient-level permutations (M0-M3)
+##  C. genome-wide dream (voomWithDreamWeights, Satterthwaite), M0-M3: FDR counts, pi1, FOLH1 rank,
+##     concordance with patient pseudobulk; calibration of M1 and M3 by N_PERM patient permutations.
+## Outputs: results/R13_aoi_dream_purity/
+## ============================================================================
+
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({ library(qs); library(SummarizedExperiment); library(dplyr); library(tidyr); library(edgeR); library(limma)
+  library(variancePartition); library(BiocParallel); library(lme4); library(lmerTest); library(parallel) })
+setwd(PRINCE_DIR)
+check_ram_or_stop(20)
+set.seed(2026)
+out_dir <- file.path(COMP_DIR, "R13_aoi_dream_purity"); dir.create(out_dir, showWarnings = FALSE)
+N_PERM <- as.integer(Sys.getenv("N_PERM", "20")); STRATA <- strsplit(Sys.getenv("STRATA", ""), ",")[[1]]
+BP <- SnowParam(MAX_WORKERS, progressbar = FALSE)
+
+se <- qs::qread("phase2_se_qc_filtered.qs"); cd <- as.data.frame(colData(se))
+pt <- qs::qread(out_path("C1_clinical", "patient_table.qs"))
+loq <- qs::qread(file.path(COMP_DIR, "R1_loq", "loq_gene_universes.qs")); uni <- loq$universes
+dec <- qs::qread(out_path("C3_deconvolution", "deconvolution_proportions.qs"))
+tf <- c(dec$lineage_primary[, "Epithelial_tumour"], dec$lineage_bone[, "Epithelial_tumour"]); tf <- tf[!duplicated(names(tf))]
+pbt <- read.csv(out_path("C13_pseudobulk_LOQ", "transcriptome_wide_limma_all_strata.csv"))
+msig <- readRDS(file.path(PMCC_DIR, "msigdb_gene_sets.rds"))
+artefact_re <- "^(USP17L|PRAMEF|NBPF|OR[0-9]+[A-Z]+[0-9]+)"
+counts_all <- assay(se, "all_count"); counts_all <- counts_all[!grepl(artefact_re, rownames(counts_all)), ]
+code <- c("CD45+" = "CD45", "PSMA+" = "PSMA", "PanCK+PSMA-" = "PanCKPSMA"); tps <- c("Archival", "Screening", "Cycle1")
+keep_aoi <- cd$response_group_neat != "Control" & cd$timepoint %in% tps
+progs <- list(AR_Hallmark = msig$H$HALLMARK_ANDROGEN_RESPONSE, HLA_I = c("HLA-A", "HLA-B", "HLA-C", "B2M", "TAP1", "TAP2", "TAPBP"),
+  Hallmark_IFNa = msig$H$HALLMARK_INTERFERON_ALPHA_RESPONSE, P53_core = c("CDKN1A", "MDM2", "DDB2", "PHLDA3", "GDF15", "TNFRSF10B", "SESN1", "ZMAT3", "RRM2B", "TP53I3"),
+  NE_Beltran13 = c("ASCL1", "SOX2", "NKX2-1", "FOXA2", "INSM1", "CHGA", "CHGB", "SYP", "NCAM1", "EZH2", "AURKA", "MYCN", "PCSK1"))
+logit <- function(p) { p <- pmin(pmax(p, 0.01), 0.99); log(p / (1 - p)) }
+split_bw <- function(x, g) { b <- ave(x, g); list(b = b, w = x - b) }
+forms <- list(M0 = ~ psa + batch + (1 | patient), M1 = ~ psa + batch + decon_b + decon_w + (1 | patient),
+              M2 = ~ psa + batch + est_b + est_w + (1 | patient), M3 = ~ psa + batch + decon_b + decon_w + depth_b + depth_w + (1 | patient))
+fix_form <- function(f, m) if (length(unique(m$batch)) < 2) update(f, ~ . - batch) else f
+
+```
+
+Per stratum:
+- **A. Agreement:** Spearman correlation of SpatialDecon and ESTIMATE purity at AOI, within-patient and patient level, and of patient-mean purity and signal depth with maximal PSA change.
+- **B. Features:** TMM log-CPM on the stratum's LOQ universe. Programme scores are mean z-scores over ≥3 genes. Each feature × model is fitted with lmerTest (Kenward–Roger P for the PSA term), and its permutation P uses 500 patient-level shuffles of PSA change (seeds 1–500).
+- **C. Transcriptome-wide:** voomWithDreamWeights + dream + eBayes per model. Records genes at FDR < 0.05 and < 0.1, π₁ (1 − propTrueNull, lfdr), the *FOLH1* t statistic, P and rank, the Spearman correlation of t statistics with patient pseudobulk, and, for M3, the permutation null of the number of FDR < 0.05 genes.
+
+Results are written after each stratum, so partial runs keep their output, and a compact summary is printed.
+
+```{r comp-35-aoi-dream-purity-02}
+agree <- list(); feat <- list(); gw <- list()
+strata <- as.vector(outer(code, tps, paste, sep = "__")); if (length(STRATA) && nzchar(STRATA[1])) strata <- STRATA
+for (sid in strata) {
+  sg <- names(code)[code == sub("__.*", "", sid)]; tp <- sub(".*__", "", sid)
+  idx <- which(keep_aoi & cd$segment_name == sg & cd$timepoint == tp); d <- cd[idx, ]
+  g <- intersect(uni[[sid]]$g10, rownames(counts_all))
+  m <- data.frame(aoi = rownames(d), patient = d$subject_id, batch = factor(d$study_batch),
+                  decon = logit(tf[rownames(d)]), est = logit(d$tumour.purity.estimate), depth = log(loq$aoi[rownames(d), "pct_above_LOQ_std"])) %>%
+    left_join(pt %>% select(patient = subject_id, psa_change_capped, max_psa_change), by = "patient")
+  m$psa <- m$psa_change_capped / 50
+  for (v in c("decon", "est", "depth")) { s <- split_bw(m[[v]], m$patient); m[[paste0(v, "_b")]] <- s$b; m[[paste0(v, "_w")]] <- s$w }
+  m$batch <- droplevels(m$batch); rownames(m) <- m$aoi
+  ## A. agreement
+  pm <- m %>% group_by(patient) %>% summarise(decon = first(decon_b), est = first(est_b), depth = first(depth_b), psa = first(max_psa_change), .groups = "drop")
+  sp <- function(a, b) unname(suppressWarnings(cor.test(a, b, method = "spearman", exact = FALSE))[c("estimate", "p.value")])
+  agree[[sid]] <- data.frame(stratum = sid, n_aoi = nrow(m), n_patients = nrow(pm),
+    rho_decon_est_AOI = sp(m$decon, m$est)[[1]], rho_decon_est_within = sp(m$decon_w, m$est_w)[[1]], rho_decon_est_patient = sp(pm$decon, pm$est)[[1]],
+    rho_decon_psa = sp(pm$decon, pm$psa)[[1]], p_decon_psa = sp(pm$decon, pm$psa)[[2]], rho_est_psa = sp(pm$est, pm$psa)[[1]], p_est_psa = sp(pm$est, pm$psa)[[2]],
+    rho_depth_psa = sp(pm$depth, pm$psa)[[1]], p_depth_psa = sp(pm$depth, pm$psa)[[2]])
+  ## B. features
+  dge <- calcNormFactors(DGEList(counts_all[g, idx])); lc <- cpm(dge, log = TRUE, prior.count = 1); z <- t(scale(t(lc)))
+  F <- cbind(FOLH1 = if ("FOLH1" %in% rownames(lc)) lc["FOLH1", ] else rep(NA_real_, ncol(lc)),
+             sapply(progs, function(gs) { gg <- intersect(gs, rownames(z)); if (length(gg) >= 3) colMeans(z[gg, , drop = FALSE]) else rep(NA_real_, ncol(z)) }))
+  pts <- unique(m[, c("patient", "psa")])
+  for (f in colnames(F)) { if (all(is.na(F[, f]))) next
+    for (mn in names(forms)) {
+      fm <- fix_form(forms[[mn]], m); dd <- cbind(m, y = F[, f]); ff <- update(fm, y ~ .)
+      fit1 <- function(dd) { fit <- suppressMessages(suppressWarnings(lmerTest::lmer(ff, dd))); summary(fit, ddf = "Kenward-Roger")$coefficients["psa", c(1, 2, 5)] }
+      ob <- tryCatch(fit1(dd), error = function(e) c(NA, NA, NA))
+      pb <- unlist(mclapply(1:500, function(b) { set.seed(b); px <- setNames(sample(pts$psa), pts$patient); dp <- dd; dp$psa <- px[dp$patient]
+        tryCatch(suppressMessages(suppressWarnings(fixef(lme4::lmer(ff, dp))["psa"])), error = function(e) NA) }, mc.cores = MAX_WORKERS))
+      feat[[paste(sid, f, mn)]] <- data.frame(stratum = sid, feature = f, model = mn, beta = ob[1], se = ob[2], p_KR = ob[3],
+        p_perm = (1 + sum(abs(pb) >= abs(ob[1]), na.rm = TRUE)) / (1 + sum(!is.na(pb)))) } }
+  message(sid, " features done")
+  ## C. genome-wide dream
+  for (mn in names(forms)) {
+    fm <- fix_form(forms[[mn]], m); t0 <- Sys.time()
+    v <- voomWithDreamWeights(dge, fm, m, BPPARAM = BP)
+    fit <- variancePartition::eBayes(dream(v, fm, m, BPPARAM = BP)); tt <- variancePartition::topTable(fit, coef = "psa", number = Inf, sort.by = "none")
+    secs <- as.numeric(difftime(Sys.time(), t0, units = "secs"))
+    pbs <- pbt %>% filter(stratum == sid); cc <- intersect(rownames(tt), pbs$gene)
+    perm_n <- NA; perm_med <- NA; perm_95 <- NA; perm_p <- NA
+    if (mn == "M3" && N_PERM > 0) {
+      pn <- sapply(seq_len(N_PERM), function(b) { set.seed(900 + b); px <- setNames(sample(pts$psa), pts$patient); mp <- m; mp$psa <- px[mp$patient]
+        fp <- variancePartition::eBayes(dream(v, fm, mp, BPPARAM = BP)); sum(p.adjust(fp$p.value[, "psa"], "BH") < 0.05) })
+      perm_n <- N_PERM; perm_med <- median(pn); perm_95 <- unname(quantile(pn, 0.95)); perm_p <- (1 + sum(pn >= sum(tt$adj.P.Val < 0.05))) / (1 + N_PERM) }
+    gw[[paste(sid, mn)]] <- data.frame(stratum = sid, model = mn, n_genes = nrow(tt), fdr05 = sum(tt$adj.P.Val < 0.05), fdr10 = sum(tt$adj.P.Val < 0.1),
+      pi1 = 1 - propTrueNull(tt$P.Value, method = "lfdr"), FOLH1_t = tt["FOLH1", "t"], FOLH1_P = tt["FOLH1", "P.Value"], FOLH1_rank = if ("FOLH1" %in% rownames(tt)) rank(tt$P.Value)[rownames(tt) == "FOLH1"] else NA,
+      rho_t_vs_pseudobulk = cor(tt[cc, "t"], pbs$t[match(cc, pbs$gene)], method = "spearman"), secs_per_fit = secs,
+      n_perm = perm_n, perm_median = perm_med, perm_95 = perm_95, perm_p = perm_p, top5 = paste(head(rownames(tt)[order(tt$P.Value)], 5), collapse = ","))
+    message(sid, " ", mn, " dream done (", round(secs), " s/fit)")
+  }
+  write.csv(bind_rows(agree), file.path(out_dir, paste0("A_purity_agreement", Sys.getenv("OUT_TAG", ""), ".csv")), row.names = FALSE)
+  write.csv(bind_rows(feat), file.path(out_dir, paste0("B_feature_models", Sys.getenv("OUT_TAG", ""), ".csv")), row.names = FALSE)
+  write.csv(bind_rows(gw), file.path(out_dir, paste0("C_genomewide_dream", Sys.getenv("OUT_TAG", ""), ".csv")), row.names = FALSE)
+}
+options(width = 220); f2 <- function(x) as.data.frame(mutate(x, across(where(is.numeric), ~signif(.x, 2))))
+cat("\n==== A ====\n"); print(f2(bind_rows(agree)), row.names = FALSE)
+cat("\n==== B (FOLH1, AR, p53, HLA) ====\n")
+print(f2(bind_rows(feat) %>% filter(feature %in% c("FOLH1", "AR_Hallmark", "P53_core", "HLA_I", "NE_Beltran13")) %>% select(stratum, feature, model, beta, p_KR, p_perm) %>%
+  pivot_wider(names_from = model, values_from = c(beta, p_KR, p_perm))), row.names = FALSE)
+cat("\n==== C ====\n"); print(f2(bind_rows(gw) %>% select(-top5)), row.names = FALSE)
+cat("R13 complete.\n")
+```

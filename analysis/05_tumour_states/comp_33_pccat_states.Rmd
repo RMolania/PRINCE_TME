@@ -1,0 +1,176 @@
+---
+title: "PCCAT-derived tumour-state signatures and their scores in PRINCE"
+subtitle: "PRINCE spatial transcriptomics: `comp_33_pccat_states`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+Defines 20-gene signatures for prostate tumour-cell lineage and plasticity states, including neuroendocrine (NEPC-like) and AR-negative/PSMA-negative double-negative-like (DNPC-like) states, and scores them in every PRINCE stratum. The signatures are derived **only** from the external PCCAT single-cell atlas, never from PRINCE data, so their association with response is not circular.
+
+From advanced-disease (CRPC, mCRPC, NEPC) epithelial cells, a state's markers are the genes with the largest log2 fold change against all other epithelial states. They must be detected in at least 25% of the state's cells, have mean CPM10k ≥ 1 in the state and be higher than the out-group in at least 70% of donors carrying the state (donors with ≥ 10 cells). Signatures are made for each fine (ct.L3) state and for coarse lineages (NE, LPC, club, hillock, basal, luminal). The DNPC-like set contrasts non-NE epithelial cells with zero counts for *AR*, *FOLH1*, *CHGA*, *SYP*, *INSM1* and *ASCL1* against AR+ *FOLH1*+ luminal cells; the reverse contrast gives an AR+/PSMA+ luminal set.
+
+In PRINCE, signatures are scored with singscore over the stratum's LOQ-detected genes at AOI level, and at patient-pseudobulk level by singscore and mean z-score (at least five detected genes). The number of each signature's genes above LOQ is recorded, so poorly measured signatures can be flagged downstream.
+
+**Manuscript items supported**
+
+- Supplementary Table 66 (S66_PCCAT_state_signatures), via `comp_29_supp_tables_v4`
+- Scores used by the association, validation and critical-review analyses of the PCCAT tumour-state scores (`comp_33a`, `comp_33b`, `comp_33c`; Supplementary Tables 67–73)
+- Methods: Atlas-derived tumour-state signatures
+- Results: 'Re-evaluation of earlier neuroendocrine, purity and bone-niche findings' (lineage-state paragraph)
+
+**Pipeline step:** `./run_pipeline.sh --only 33_pccat_states`.
+
+**Inputs**
+
+- `data/refs/pccat_subsample.qs`
+- `data/phase2_se_qc_filtered.qs`
+- `results/R1_loq/loq_gene_universes.qs`
+- `results/C13_pseudobulk_LOQ/pseudobulk_strata.qs`
+- `data/reference/msigdb_gene_sets.rds`
+
+**Outputs**
+
+- `results/R11_pccat_states/A_PCCAT_state_signatures_top20.csv`
+- `results/R11_pccat_states/C_scores.qs`
+- `results/R11_pccat_states/C_aoi_scores.csv`
+- `results/R11_pccat_states/C_patient_scores.csv`
+- `results/R11_pccat_states/C_signature_detection.csv`
+
+**Depends on**: `comp_03a_build_refs`, `comp_00b_bone_cohort`, `comp_16_loq_filter`, `comp_13b_pseudobulk_loq`
+
+## Analysis
+
+### PCCAT tumour-state signatures
+The header states the rule that signatures come only from the external atlas, and summarises the marker criteria and the scoring in PRINCE.
+
+Load packages and check that at least 25 GB of RAM is free, because the atlas count matrix is large.
+
+```{r comp-33-pccat-states-01}
+## ============================================================================
+## PRINCE -- R11: PCCAT tumour-state signatures (NEPC-like and other lineage states) and scoring.
+## Signatures are defined ONLY from the external PCCAT atlas (refs/pccat_subsample.qs), never from
+## PRINCE data.
+##  A. Tumour epithelial cells from advanced disease (CRPC, mCRPC, NEPC). For each ct.L3 state,
+##     donor-level pseudobulk (CPM) per state; top-20 markers = genes with the largest
+##     log2FC vs all other epithelial states, requiring detection in >= 25% of the state's cells,
+##     mean CPM10k >= 1 in the state, and higher in >= 70% of donors with that state.
+##     Coarse lineages pooled the same way: NE (all NE_*), LPC, Club, Hillock, Basal, Luminal.
+##  B. Data-driven 'AR-low / PSMA-low, non-NE' (double-negative-like, DNPC-like) cells:
+##     advanced-disease epithelial cells with AR = 0 and FOLH1 = 0 counts, no NE marker
+##     (CHGA, SYP, INSM1, ASCL1 = 0), excluding ct.L2 NE; top-20 markers vs AR+ FOLH1+ luminal cells.
+##  C. Scores in PRINCE: AOI level (singscore over LOQ-detected genes of the stratum) and patient
+##     pseudobulk (singscore and mean z), all nine strata; plus FOLH1, AR (Hallmark) and
+##     KLK3/AR panel for reference. Detection of signature genes above LOQ is reported.
+## Outputs: results/R11_pccat_states/
+## ============================================================================
+
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({ library(qs); library(Matrix); library(SummarizedExperiment); library(dplyr); library(tidyr); library(edgeR); library(singscore) })
+setwd(PRINCE_DIR)
+check_ram_or_stop(25)
+out_dir <- file.path(COMP_DIR, "R11_pccat_states"); dir.create(out_dir, showWarnings = FALSE)
+
+```
+
+### A. State signatures from the atlas
+Restrict the PCCAT subsample to epithelial cells (luminal, basal, club, hillock, LPC, NE) from CRPC, mCRPC and NEPC samples. `stats_for` normalises to counts per 10,000, takes the 200 candidates with the largest log2 fold change (pseudocount 0.1) among genes detected in ≥ 25% of in-state cells with mean ≥ 1, keeps those higher than the out-group mean in ≥ 70% of donors with ≥ 10 state cells, and returns the top 20. This is run for every fine state against all other epithelial states and for every coarse lineage.
+
+```{r comp-33-pccat-states-02}
+## ---- A + B. signatures from PCCAT ---------------------------------------------------------------
+pc <- qs::qread("refs/pccat_subsample.qs", nthreads = 1); X <- pc$counts; m <- pc$meta
+epi <- m$ct.L2 %in% c("Luminal", "Basal", "Club", "Hillock", "LPCs", "NE") & m$Group2 %in% c("CRPC", "mCRPC", "NEPC") & !is.na(m$ct.L3)
+X <- X[, epi]; m <- m[epi, ]; lib <- pmax(Matrix::colSums(X), 1)
+cat("advanced-disease epithelial cells:", ncol(X), "\n"); print(table(m$ct.L3, m$Group2))
+m$coarse <- ifelse(m$ct.L2 == "NE", "NE_all", paste0(m$ct.L2, "_all"))
+norm10k <- function(cols) X[, cols, drop = FALSE] %*% Diagonal(x = 1e4 / lib[cols])
+stats_for <- function(in_cells, out_cells, label) {
+  a <- norm10k(which(in_cells)); b <- norm10k(which(out_cells))
+  mi <- Matrix::rowMeans(a); mo <- Matrix::rowMeans(b); det <- Matrix::rowMeans(a > 0)
+  lfc <- log2(mi + 0.1) - log2(mo + 0.1)
+  ## donor consistency: fraction of donors (with >= 10 cells in the state) where state mean > out mean
+  dn <- table(m$Donor_ID[in_cells]); dn <- names(dn[dn >= 10])
+  cand <- names(sort(lfc[det >= 0.25 & mi >= 1], decreasing = TRUE))[1:200]; cand <- cand[!is.na(cand)]
+  cons <- if (length(dn) >= 2) sapply(cand, function(g) mean(sapply(dn, function(d) { cc <- which(in_cells & m$Donor_ID == d)
+    mean(X[g, cc] * 1e4 / lib[cc]) > mo[g] }))) else setNames(rep(1, length(cand)), cand)
+  keep <- cand[cons >= 0.7]
+  data.frame(signature = label, gene = head(keep, 20), log2FC = lfc[head(keep, 20)], det = det[head(keep, 20)],
+             mean_in = mi[head(keep, 20)], donor_consistency = cons[head(keep, 20)], n_cells = sum(in_cells), n_donors = length(dn))
+}
+sigs <- list()
+for (st in sort(unique(m$ct.L3))) sigs[[st]] <- stats_for(m$ct.L3 == st, m$ct.L3 != st, st)
+for (co in sort(unique(m$coarse))) sigs[[co]] <- stats_for(m$coarse == co, m$coarse != co, co)
+```
+
+### B. Double-negative-like cells
+Non-NE epithelial cells with zero counts for *AR*, *FOLH1* and the NE markers *CHGA*, *SYP*, *INSM1* and *ASCL1* are contrasted with AR+ *FOLH1*+ luminal cells, and the reverse contrast is also run, using the same marker criteria. All signatures are written to the top-20 table, the atlas object is freed, and the leading genes of each signature are printed.
+
+```{r comp-33-pccat-states-03}
+## B. DNPC-like
+g0 <- function(g) if (g %in% rownames(X)) X[g, ] == 0 else rep(TRUE, ncol(X))
+dn_cells <- m$ct.L2 != "NE" & g0("AR") & g0("FOLH1") & g0("CHGA") & g0("SYP") & g0("INSM1") & g0("ASCL1")
+arpos <- m$ct.L2 == "Luminal" & X["AR", ] > 0 & X["FOLH1", ] > 0
+cat("DNPC-like cells:", sum(dn_cells), " AR+FOLH1+ luminal:", sum(arpos), "\n"); print(table(m$ct.L3[dn_cells]))
+sigs[["DNPC_like"]] <- stats_for(dn_cells, arpos, "DNPC_like")
+## also the reverse: AR+/PSMA+ luminal signature vs DNPC-like (should anti-correlate)
+sigs[["ARpos_PSMApos_luminal"]] <- stats_for(arpos, dn_cells, "ARpos_PSMApos_luminal")
+sig_tab <- bind_rows(sigs); rm(pc, X); invisible(gc())
+write.csv(sig_tab, file.path(out_dir, "A_PCCAT_state_signatures_top20.csv"), row.names = FALSE)
+sig_list <- split(sig_tab$gene, sig_tab$signature)
+cat("\nSignatures (top genes):\n"); for (s in names(sig_list)) cat(sprintf("%-24s %s\n", s, paste(head(sig_list[[s]], 10), collapse = ",")))
+
+```
+
+### C. Scoring PRINCE
+For each of the nine strata (Control AOIs excluded), compute singscore for every PCCAT signature and the two AR reference sets (Hallmark androgen; *AR*, *KLK3*, *FOLH1*, *NKX3-1*, *HOXB13*), with *FOLH1* and *AR* log2 CPM alongside. This is done at AOI level on TMM log2 CPM over the stratum's LOQ universe, and at patient level on the pseudobulk, where a mean z-score version is added. Scores need at least five detected genes. The number of each signature's genes above LOQ is tabulated per stratum. Scores are saved as a list (signatures, AOI and patient tables) and as CSV files.
+
+```{r comp-33-pccat-states-04}
+## ---- C. score PRINCE -----------------------------------------------------------------------------
+se <- qs::qread("phase2_se_qc_filtered.qs"); cd <- as.data.frame(colData(se))
+uni <- qs::qread(file.path(COMP_DIR, "R1_loq", "loq_gene_universes.qs"))$universes
+pbs <- qs::qread(out_path("C13_pseudobulk_LOQ", "pseudobulk_strata.qs"))
+msig <- readRDS(file.path(PMCC_DIR, "msigdb_gene_sets.rds"))
+ref_sets <- list(AR_Hallmark = msig$H$HALLMARK_ANDROGEN_RESPONSE, AR_panel5 = c("AR", "KLK3", "FOLH1", "NKX3-1", "HOXB13"))
+all_sets <- c(sig_list, ref_sets)
+artefact_re <- "^(USP17L|PRAMEF|NBPF|OR[0-9]+[A-Z]+[0-9]+)"
+counts_all <- assay(se, "all_count"); counts_all <- counts_all[!grepl(artefact_re, rownames(counts_all)), ]
+code <- c("CD45+" = "CD45", "PSMA+" = "PSMA", "PanCK+PSMA-" = "PanCKPSMA"); tps <- c("Archival", "Screening", "Cycle1")
+keep_aoi <- cd$response_group_neat != "Control" & cd$timepoint %in% tps
+aoi_scores <- list(); pt_scores <- list(); det_rows <- list()
+for (sg in names(code)) for (tp in tps) {
+  sid <- paste0(code[sg], "__", tp); g <- intersect(uni[[sid]]$g10, rownames(counts_all))
+  idx <- which(keep_aoi & cd$segment_name == sg & cd$timepoint == tp)
+  lc <- cpm(calcNormFactors(DGEList(counts_all[g, idx])), log = TRUE, prior.count = 1); rk <- rankGenes(lc); z <- t(scale(t(lc)))
+  S <- sapply(all_sets, function(gs) { gg <- intersect(gs, rownames(lc)); if (length(gg) >= 5) simpleScore(rk, upSet = gg)$TotalScore else rep(NA, ncol(lc)) })
+  aoi_scores[[sid]] <- data.frame(aoi = colnames(lc), stratum = sid, subject_id = cd$subject_id[idx], roi = cd$roi_name[idx], batch = cd$study_batch[idx],
+                                  FOLH1 = lc["FOLH1", ], AR = if ("AR" %in% rownames(lc)) lc["AR", ] else NA, S, check.names = FALSE)
+  p <- pbs[[sid]]; rkp <- rankGenes(p$lcpm); zp <- t(scale(t(p$lcpm)))
+  Sp <- sapply(all_sets, function(gs) { gg <- intersect(gs, rownames(p$lcpm)); if (length(gg) >= 5) simpleScore(rkp, upSet = gg)$TotalScore else rep(NA, ncol(p$lcpm)) })
+  Zp <- sapply(all_sets, function(gs) { gg <- intersect(gs, rownames(zp)); if (length(gg) >= 5) colMeans(zp[gg, , drop = FALSE]) else rep(NA, ncol(zp)) })
+  colnames(Zp) <- paste0(colnames(Zp), "__z")
+  pt_scores[[sid]] <- data.frame(stratum = sid, subject_id = p$meta$subject_id, batch = p$meta$study_batch, FOLH1 = p$lcpm["FOLH1", ],
+                                 AR = if ("AR" %in% rownames(p$lcpm)) p$lcpm["AR", ] else NA, Sp, Zp, check.names = FALSE)
+  det_rows[[sid]] <- data.frame(stratum = sid, signature = names(all_sets), n_genes = lengths(all_sets),
+                                n_detected_LOQ = sapply(all_sets, function(gs) length(intersect(gs, g))))
+}
+qs::qsave(list(signatures = sig_list, aoi = bind_rows(aoi_scores), patient = bind_rows(pt_scores)), file.path(out_dir, "C_scores.qs"))
+write.csv(bind_rows(aoi_scores), file.path(out_dir, "C_aoi_scores.csv"), row.names = FALSE)
+write.csv(bind_rows(pt_scores), file.path(out_dir, "C_patient_scores.csv"), row.names = FALSE)
+write.csv(bind_rows(det_rows), file.path(out_dir, "C_signature_detection.csv"), row.names = FALSE)
+cat("\nDetection of signature genes above LOQ (min across strata):\n")
+print(as.data.frame(bind_rows(det_rows) %>% group_by(signature) %>% summarise(n_genes = first(n_genes), min_det = min(n_detected_LOQ), max_det = max(n_detected_LOQ))), row.names = FALSE)
+cat("R11 complete.\n")
+```

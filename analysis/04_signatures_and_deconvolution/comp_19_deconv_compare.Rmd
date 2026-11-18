@@ -1,0 +1,203 @@
+---
+title: "SpatialDecon versus BayesPrism on criteria with known answers"
+subtitle: "PRINCE spatial transcriptomics: `comp_19_deconv_compare`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+Chooses the deconvolution method objectively, using four criteria whose correct answer is known in advance rather than agreement with a hypothesis.
+1. Technical replicates: control-tissue AOIs are the same tissue profiled across batches, so the between-batch share of variance in their lineage fractions should be low.
+2. Compartment ordering: within co-located AOIs of one ROI, immune fraction should be higher in CD45⁺ than in PSMA⁺ AOIs, and tumour fraction higher in PSMA⁺ than in CD45⁺ AOIs.
+3. Marker concordance: each cell-type fraction should correlate with canonical marker genes for that cell type.
+4. Cross-method agreement per cell type.
+
+Control AOIs are used here only as technical replicates for this quality assessment, never in response analyses. Lineages are collapsed from reference cell types (tumour, immune, stroma or marrow) before criteria 1 and 2.
+
+**Manuscript items supported**
+
+- Extended Data Fig. 2a–d (between-batch variance in control tissue, compartment ordering, marker concordance, cross-method agreement), via comp_21
+- Supplementary Tables 27–29 (via comp_25)
+- Results: A background-aware, patient-level framework (choice of SpatialDecon)
+- Methods: Deconvolution
+
+**Pipeline step:** `./run_pipeline.sh --only 19_deconv_compare`. Approximate runtime: under a minute.
+
+**Inputs**
+
+- `data/phase2_se_qc_filtered.qs`
+- `results/C3_deconvolution/deconvolution_proportions.qs`
+- `results/R2_deconv_compare/bayesprism_primary.qs`
+- `results/R2_deconv_compare/bayesprism_bone.qs`
+
+**Outputs**
+
+- `results/R2_deconv_compare/1_control_replicate_consistency.csv`
+- `results/R2_deconv_compare/2_within_roi_ordering.csv`
+- `results/R2_deconv_compare/3_marker_concordance.csv`
+- `results/R2_deconv_compare/4_cross_method_agreement.csv`
+
+**Depends on**: `comp_03b_deconv`, `comp_17_bayesprism`, `comp_00b_bone_cohort`
+
+## Analysis
+
+Header describing the four comparison criteria.
+
+### Set-up
+Loads the AOI object, SpatialDecon proportions and BayesPrism fractions, computes log₂ CPM for marker look-ups, and defines how reference cell types collapse into coarse lineages for the primary (PCCAT) and bone (GSE143791 + PCCAT tumour) references.
+
+```{r comp-19-deconv-compare-01}
+## ============================================================================
+## PRINCE -- R2b: SpatialDecon vs BayesPrism, judged on criteria with known answers
+##  1. Technical replicates: the 42 Control-tissue AOIs are the same tissue profiled
+##     across batches -> between-batch share of variance in their cell fractions
+##     (lower = better) per segment, and mean absolute deviation from the segment mean
+##  2. Within-ROI compartment ordering: in co-located AOIs, immune fraction should be
+##     CD45+ > PSMA+ and tumour fraction PSMA+ > CD45+ (fraction of ROIs obeying)
+##  3. Marker concordance: Spearman(fraction, canonical marker log-CPM) per cell type
+##  4. Cross-method agreement per cell type (Spearman across AOIs)
+## Inputs: C3 SpatialDecon proportions; R2a BayesPrism theta (comp_17_bayesprism.R)
+## Outputs: results/R2_deconv_compare/
+## ============================================================================
+
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({ library(qs); library(SummarizedExperiment); library(dplyr); library(tidyr) })
+setwd(PRINCE_DIR)
+out_dir <- file.path(COMP_DIR, "R2_deconv_compare")
+
+se <- qs::qread("phase2_se_qc_filtered.qs"); cd <- as.data.frame(colData(se))
+sd_ <- qs::qread(out_path("C3_deconvolution", "deconvolution_proportions.qs"))
+bp_p <- qs::qread(file.path(out_dir, "bayesprism_primary.qs"))$theta
+bp_b <- qs::qread(file.path(out_dir, "bayesprism_bone.qs"))$theta
+lcpm <- log2(sweep(assay(se, "all_count"), 2, colSums(assay(se, "all_count")), "/") * 1e6 + 1)
+
+lin_primary <- c(Luminal = "Tumour", Basal = "Tumour", Club = "Tumour", Hillock = "Tumour", LPCs = "Tumour", NE = "Tumour",
+  CD4T = "Immune", CD8T = "Immune", NK = "Immune", T_MKI67 = "Immune", B = "Immune", Plasma_B = "Immune", Mph = "Immune",
+  Mono = "Immune", DCs = "Immune", Neutrophils = "Immune", Mye_cycling = "Immune", Mast = "Immune",
+  CAFs = "Stroma", Mural = "Stroma", Pericytes = "Stroma", Endo = "Stroma")
+lin_bone <- function(t) ifelse(grepl("^Tumour", t), "Tumour",
+  ifelse(grepl("Osteo|Endo|Peri|Fibro|MSC|Erythro|Progen", t), "Stroma/marrow", "Immune"))
+coarse <- function(P, ref) {
+  m <- if (ref == "primary") lin_primary[colnames(P)] else lin_bone(colnames(P)); m[is.na(m)] <- "Other"
+  sapply(split(colnames(P), m), function(cc) rowSums(P[, cc, drop = FALSE]))
+}
+methods <- list(
+  SpatialDecon = list(primary = sd_$prop_primary, bone = sd_$prop_bone),
+  BayesPrism = list(primary = bp_p, bone = bp_b))
+
+```
+
+### 1. Technical-replicate consistency
+For control-tissue AOIs (primary reference), per compartment and lineage: the between-batch sum of squares as a share of the total variance (lower is more robust to batch) and the mean absolute deviation from the compartment mean.
+
+```{r comp-19-deconv-compare-02}
+## ---- 1. technical replicates -----------------------------------------------------------------
+ctrl <- rownames(cd)[cd$response_group_neat == "Control"]
+rep_rows <- list()
+for (mt in names(methods)) {
+  P <- methods[[mt]]$primary; ctrl_m <- intersect(ctrl, rownames(P)); C <- coarse(P[ctrl_m, ], "primary")
+  for (sg in unique(cd[ctrl_m, "segment_name"])) {
+    a <- ctrl_m[cd[ctrl_m, "segment_name"] == sg]; b <- factor(cd[a, "study_batch"])
+    for (lin in colnames(C)) {
+      y <- C[a, lin]; tot <- sum((y - mean(y))^2)
+      btw <- sum(tapply(y, b, function(z) length(z) * (mean(z) - mean(y))^2))
+      rep_rows[[paste(mt, sg, lin)]] <- data.frame(method = mt, segment = sg, lineage = lin, n = length(a), n_batches = nlevels(b),
+        mean_frac = mean(y), batch_share = ifelse(tot > 0, btw / tot, NA), mad = mean(abs(y - mean(y))))
+    }
+  }
+}
+rep_tab <- bind_rows(rep_rows)
+
+```
+
+### 2. Within-ROI compartment ordering
+Pairs CD45⁺ and PSMA⁺ AOIs from the same ROI (non-control AOIs, both references) and records the fraction of ROIs in which immune fraction is higher in CD45⁺ and tumour fraction is higher in PSMA⁺, with the median fractions per compartment.
+
+```{r comp-19-deconv-compare-03}
+## ---- 2. within-ROI compartment ordering ---------------------------------------------------------
+ord_rows <- list()
+for (mt in names(methods)) {
+  C <- rbind(coarse(methods[[mt]]$primary, "primary")[, c("Tumour", "Immune")],
+             coarse(methods[[mt]]$bone, "bone")[, c("Tumour", "Immune")])
+  d <- cd[rownames(C), c("subject_id", "timepoint", "roi_name", "segment_name", "response_group_neat")] %>%
+    mutate(tumour = C[, "Tumour"], immune = C[, "Immune"], aoi = rownames(C)) %>% filter(response_group_neat != "Control")
+  w <- d %>% select(subject_id, timepoint, roi_name, segment_name, tumour, immune) %>%
+    pivot_wider(names_from = segment_name, values_from = c(tumour, immune)) %>%
+    filter(!is.na(`tumour_CD45+`), !is.na(`tumour_PSMA+`))
+  ord_rows[[mt]] <- data.frame(method = mt, n_roi = nrow(w),
+    immune_CD45_gt_PSMA = mean(w$`immune_CD45+` > w$`immune_PSMA+`),
+    tumour_PSMA_gt_CD45 = mean(w$`tumour_PSMA+` > w$`tumour_CD45+`),
+    median_tumour_CD45 = median(d$tumour[d$segment_name == "CD45+"]), median_tumour_PSMA = median(d$tumour[d$segment_name == "PSMA+"]),
+    median_immune_CD45 = median(d$immune[d$segment_name == "CD45+"]))
+}
+ord_tab <- bind_rows(ord_rows)
+
+```
+
+### 3. Marker concordance
+Spearman correlation, across AOIs, between each cell-type fraction and the mean log-CPM of two or three canonical markers for that cell type (for example *CD8A*/*CD8B* for CD8 T cells, *KLK3*/*AR* for AR-active tumour, *ACP5*/*CTSK*/*MMP9* for osteoclasts), per method and reference.
+
+```{r comp-19-deconv-compare-04}
+## ---- 3. marker concordance --------------------------------------------------------------------------
+markers <- list(CD8T = c("CD8A", "CD8B"), CD4T = c("CD4", "IL7R"), Plasma_B = c("MZB1", "JCHAIN"), Mph = c("CD68", "CD163", "C1QA"),
+  Endo = c("PECAM1", "VWF"), CAFs = c("COL1A1", "DCN"), Mast = c("TPSAB1", "CPA3"), Luminal = c("KLK3", "AR"), NE = c("CHGA", "SYP"),
+  Tumour_AR = c("KLK3", "AR"), Tumour_NE = c("CHGA", "SYP"), Osteoblasts = c("COL1A1", "RUNX2", "SP7"),
+  Osteoclasts = c("ACP5", "CTSK", "MMP9"), TAM = c("CD163", "C1QA"), Erythroid = c("HBB", "GYPA"), `CTL-1` = c("CD8A", "GZMK"))
+mk_rows <- list()
+for (mt in names(methods)) for (ref in c("primary", "bone")) {
+  P <- methods[[mt]][[ref]]
+  for (t in intersect(names(markers), colnames(P))) {
+    g <- intersect(markers[[t]], rownames(lcpm)); a <- rownames(P)
+    mk_rows[[paste(mt, ref, t)]] <- data.frame(method = mt, reference = ref, cell_type = t,
+      spearman = cor(P[, t], colMeans(lcpm[g, a, drop = FALSE]), method = "spearman"), mean_frac = mean(P[, t]))
+  }
+}
+mk_tab <- bind_rows(mk_rows)
+
+```
+
+### 4. Cross-method agreement
+Spearman correlation between SpatialDecon and BayesPrism estimates for each shared cell type and reference. Prints all four summaries and writes the tables.
+
+```{r comp-19-deconv-compare-05}
+## ---- 4. cross-method agreement -----------------------------------------------------------------------
+ag_rows <- list()
+for (ref in c("primary", "bone")) {
+  A <- methods$SpatialDecon[[ref]]; B <- methods$BayesPrism[[ref]]
+  a <- intersect(rownames(A), rownames(B)); ct <- intersect(colnames(A), colnames(B))
+  for (t in ct) ag_rows[[paste(ref, t)]] <- data.frame(reference = ref, cell_type = t,
+    spearman = suppressWarnings(cor(A[a, t], B[a, t], method = "spearman")), mean_SD = mean(A[a, t]), mean_BP = mean(B[a, t]))
+}
+ag_tab <- bind_rows(ag_rows)
+
+options(width = 220)
+fmt <- function(x) as.data.frame(x %>% mutate(across(where(is.numeric), ~signif(.x, 3))))
+cat("\n==== 1. Control technical replicates: between-batch share of variance (lower = better) ====\n")
+print(fmt(rep_tab %>% select(method, segment, lineage, n, mean_frac, batch_share) %>%
+  pivot_wider(names_from = method, values_from = c(mean_frac, batch_share))), row.names = FALSE)
+cat("\nMean between-batch share by method:\n"); print(fmt(rep_tab %>% group_by(method) %>% summarise(mean_batch_share = mean(batch_share, na.rm = TRUE), mean_mad = mean(mad))))
+cat("\n==== 2. Within-ROI compartment ordering ====\n"); print(fmt(ord_tab), row.names = FALSE)
+cat("\n==== 3. Marker concordance (Spearman) ====\n")
+print(fmt(mk_tab %>% select(method, reference, cell_type, spearman) %>% pivot_wider(names_from = method, values_from = spearman)), row.names = FALSE)
+print(fmt(mk_tab %>% group_by(method) %>% summarise(median_rho = median(spearman, na.rm = TRUE), n = n())))
+cat("\n==== 4. Cross-method agreement ====\n"); print(fmt(ag_tab), row.names = FALSE)
+
+write.csv(rep_tab, file.path(out_dir, "1_control_replicate_consistency.csv"), row.names = FALSE)
+write.csv(ord_tab, file.path(out_dir, "2_within_roi_ordering.csv"), row.names = FALSE)
+write.csv(mk_tab, file.path(out_dir, "3_marker_concordance.csv"), row.names = FALSE)
+write.csv(ag_tab, file.path(out_dir, "4_cross_method_agreement.csv"), row.names = FALSE)
+cat("\nR2b complete.\n")
+```

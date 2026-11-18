@@ -1,0 +1,165 @@
+---
+title: "Pre-specified patient-selection models: PSMA-PET, tissue FOLH1 and ctDNA"
+subtitle: "PRINCE spatial transcriptomics: `comp_38_prediction`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+This script asks whether lesional *FOLH1* adds to whole-body PSMA-PET SUVmean, and to baseline ctDNA fraction, for flagging patients unlikely to respond. The predictors are baseline only. Tissue *FOLH1* is each patient's mean within-stratum z-score over the PSMA⁺ and PanCK⁺PSMA⁻ pseudobulk of the archival primary, the pre-treatment bone, or either. It is deliberately not batch-adjusted, so the model could be applied prospectively. All continuous predictors are rank-based inverse-normal transformed, because one baseline SUVmean value (38.3) would otherwise dominate a linear logit.
+
+Five nested models (SUV; *FOLH1*; SUV + *FOLH1*; SUV + ctDNA; SUV + *FOLH1* + ctDNA) are compared on the same patients for each *FOLH1* source. Outcomes are PSA50 failure (logistic), capped PSA change (linear) and rPFS (Cox). With few events, leave-one-out AUC is biased downwards, so discrimination is estimated by leave-pair-out validation, by 50 repeats of stratified four-fold cross-validation and by bootstrap optimism correction (500 resamples). Out-of-fold probabilities feed a decision curve. The Riley et al. criteria give the sample size needed to develop such a model.
+
+**Manuscript items supported**
+
+- Fig. 2e (ROC curves from out-of-fold probabilities; drawn by `comp_41_figures_v5`)
+- Supplementary Fig. 1d,e (ROC and decision curve; drawn by `comp_39_supp_fig6`)
+- Supplementary Tables 83–85 (selection models, decision curve, sample size)
+- Results: patient-selection paragraph (cross-validated and leave-pair-out AUCs; about 290–480 patients required)
+- Methods: Prediction
+
+**Pipeline step:** `./run_pipeline.sh --only 38_prediction`. Approximate runtime: seconds.
+
+**Inputs**
+
+- `results/C1_clinical/patient_table.qs`
+- `results/C13_pseudobulk_LOQ/pseudobulk_strata.qs`
+
+**Outputs**
+
+- `results/R16_prediction/A_model_performance.csv`
+- `results/R16_prediction/B_decision_curve.csv`
+- `results/R16_prediction/C_sample_size_riley.csv`
+- `results/R16_prediction/oof_predictions.qs`
+
+**Depends on**: `comp_01_clinical`, `comp_13b_pseudobulk_loq`
+
+## Analysis
+
+Header: predictors, outcomes, the five models and the validation scheme, with the reason leave-one-out AUC is not used for discrimination.
+
+- Build the three *FOLH1* sources from the LOQ pseudobulk (z-score within stratum, average over tumour compartments, inverse-normal transform) and the clinical predictors (SUVmean, ctDNA fraction).
+- Validation helpers: `loo` (leave-one-out linear predictions of PSA change and Cox linear predictors); `lpo_auc` (every failure × non-failure pair held out together); `rcv` (50 × stratified four-fold CV, which returns mean out-of-fold probabilities and the mean and 2.5–97.5% range of AUC); `optimism_auc` (Harrell bootstrap, B = 500); and `net_benefit` for the decision curve.
+- For each *FOLH1* source, patients with complete SUV, ctDNA and *FOLH1* are analysed. The script records apparent, optimism-corrected, leave-pair-out and repeated-CV AUC, leave-one-out R² for PSA change and the leave-one-out C-index for rPFS. It also computes net benefit at thresholds of 5–50% against flagging all patients.
+
+```{r comp-38-prediction-01}
+## ============================================================================
+## PRINCE -- R16: pre-specified patient-selection models (PSMA-PET +/- tissue FOLH1 +/- ctDNA).
+## Predictors (baseline only):
+##   SUV    = whole-body PSMA-PET SUVmean (screening)
+##   ctDNA  = log10(baseline ctDNA fraction + 0.01)
+##   FOLH1  = tissue FOLH1, mean of within-stratum z (no batch adjustment: deployable) over tumour
+##            compartments (PSMA+, PanCK+PSMA-) at: archival primary | screening bone | either
+## Outcomes: PSA50 failure (logistic), capped max PSA change (linear), rPFS (Cox).
+## Models: SUV | FOLH1 | SUV+FOLH1 | SUV+ctDNA | SUV+FOLH1+ctDNA, on the same patients per FOLH1 source.
+## Validation (LOO AUC is biased downward for weak predictors with few events -- the refitted
+## intercept moves against the held-out case -- so it is not used for discrimination):
+##   leave-pair-out AUC (Airola et al. 2011; every failure x non-failure pair held out together),
+##   Harrell bootstrap optimism-corrected AUC (B=500), repeated stratified 4-fold CV (50 repeats;
+##   class balance fixed in training) AUC + out-of-fold probabilities for the decision curve,
+##   LOO R^2 (PSA change), LOO C-index for rPFS from uncentred linear predictors.
+## Riley et al. 2020 minimum sample size for a new model (binary outcome).
+## Outputs: results/R16_prediction/
+## ============================================================================
+
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({ library(qs); library(dplyr); library(tidyr); library(survival); library(pROC) })
+setwd(PRINCE_DIR)
+set.seed(20261026)
+out_dir <- file.path(COMP_DIR, "R16_prediction"); dir.create(out_dir, showWarnings = FALSE)
+pt <- qs::qread(out_path("C1_clinical", "patient_table.qs"))
+pbs <- qs::qread(out_path("C13_pseudobulk_LOQ", "pseudobulk_strata.qs"))
+
+rint <- function(v) qnorm((rank(v, na.last = "keep") - 0.5) / sum(!is.na(v)))
+fz <- function(sid) { p <- pbs[[sid]]; data.frame(subject_id = p$meta$subject_id, z = as.numeric(scale(p$lcpm["FOLH1", ]))) }
+src <- list(archival = c("PSMA__Archival", "PanCKPSMA__Archival"), bone = c("PSMA__Screening", "PanCKPSMA__Screening"))
+src$either <- c(src$archival, src$bone)
+fol <- lapply(src, function(s) bind_rows(lapply(s, fz)) %>% group_by(subject_id) %>% summarise(FOLH1 = mean(z), .groups = "drop") %>% mutate(FOLH1 = rint(FOLH1)))
+
+## continuous predictors rank-based inverse-normal transformed: baseline SUVmean has one extreme value
+## (38.3 in a PSA50 non-responder; others 5.8-14.9) that otherwise dominates a linear logit
+base <- pt %>% transmute(subject_id, fail = as.integer(PSA50 == 0), psa = psa_change_capped, r_pfstime, r_pfsevent,
+                         SUV = rint(PSMAPET_BL_SUVmean), ctDNA = rint(ctDNA_BL))
+models <- list(SUV = "SUV", FOLH1 = "FOLH1", SUV_FOLH1 = c("SUV", "FOLH1"), SUV_ctDNA = c("SUV", "ctDNA"), SUV_FOLH1_ctDNA = c("SUV", "FOLH1", "ctDNA"))
+
+fml <- function(y, v) as.formula(paste(y, "~", paste(v, collapse = "+")))
+loo <- function(d, v) { n <- nrow(d); lp_lin <- lp_cox <- numeric(n)
+  for (i in seq_len(n)) { tr <- d[-i, ]; te <- d[i, , drop = FALSE]
+    lp_lin[i] <- predict(lm(fml("psa", v), tr), te)
+    lp_cox[i] <- sum(coef(coxph(fml("Surv(r_pfstime, r_pfsevent)", v), tr)) * unlist(te[, v])) }
+  list(lp_lin = lp_lin, lp_cox = lp_cox) }
+lpo_auc <- function(d, v) { pos <- which(d$fail == 1); neg <- which(d$fail == 0)
+  mean(apply(expand.grid(pos, neg), 1, function(ij) { m <- suppressWarnings(glm(fml("fail", v), binomial, d[-ij, ]))
+    pr <- predict(m, d[ij, ]); (pr[1] > pr[2]) + 0.5 * (pr[1] == pr[2]) })) }
+rcv <- function(d, v, k = 4, R = 50) { P <- matrix(NA, nrow(d), R); auc_r <- numeric(R)
+  for (r in seq_len(R)) { fold <- integer(nrow(d))
+    for (cl in 0:1) { w <- which(d$fail == cl); fold[w] <- sample(rep_len(seq_len(k), length(w))) }
+    for (f in seq_len(k)) { m <- suppressWarnings(glm(fml("fail", v), binomial, d[fold != f, ]))
+      P[fold == f, r] <- predict(m, d[fold == f, ], type = "response") }
+    auc_r[r] <- as.numeric(auc(d$fail, P[, r], quiet = TRUE, direction = "<")) }
+  list(pr = rowMeans(P), auc = mean(auc_r), auc_lo = quantile(auc_r, 0.025), auc_hi = quantile(auc_r, 0.975)) }
+optimism_auc <- function(d, v, B = 500) { fl <- as.formula(paste("fail ~", paste(v, collapse = "+")))
+  app <- as.numeric(auc(d$fail, suppressWarnings(predict(glm(fl, binomial, d))), quiet = TRUE, direction = "<"))
+  opt <- replicate(B, { b <- d[sample(nrow(d), replace = TRUE), ]; if (length(unique(b$fail)) < 2) return(NA)
+    m <- suppressWarnings(glm(fl, binomial, b))
+    as.numeric(auc(b$fail, predict(m), quiet = TRUE, direction = "<")) - as.numeric(auc(d$fail, predict(m, d), quiet = TRUE, direction = "<")) })
+  c(apparent = app, corrected = app - mean(opt, na.rm = TRUE)) }
+net_benefit <- function(y, p, th) sapply(th, function(t) { f <- p >= t; sum(f & y == 1) / length(y) - sum(f & y == 0) / length(y) * t / (1 - t) })
+
+a_rows <- list(); dca_rows <- list(); oof <- list()
+for (s in names(fol)) {
+  d <- base %>% inner_join(fol[[s]], by = "subject_id") %>% filter(complete.cases(SUV, ctDNA, FOLH1))
+  res <- lapply(models, function(v) loo(d, v)); cvr <- lapply(models, function(v) rcv(d, v))
+  for (mn in names(models)) { r <- res[[mn]]; oa <- optimism_auc(d, models[[mn]])
+    a_rows[[paste(s, mn)]] <- data.frame(folh1_source = s, model = mn, n = nrow(d), n_fail = sum(d$fail),
+      AUC_apparent = oa[1], AUC_optimism_corrected = oa[2], AUC_leave_pair_out = lpo_auc(d, models[[mn]]),
+      AUC_rep_strat_CV = cvr[[mn]]$auc, AUC_CV_lo = cvr[[mn]]$auc_lo, AUC_CV_hi = cvr[[mn]]$auc_hi,
+      R2_LOO_psa = 1 - sum((d$psa - r$lp_lin)^2) / sum((d$psa - mean(d$psa))^2),
+      C_LOO_rPFS = concordance(Surv(d$r_pfstime, d$r_pfsevent) ~ r$lp_cox, reverse = TRUE)$concordance) }
+  th <- seq(0.05, 0.5, 0.05)
+  dca_rows[[s]] <- bind_rows(data.frame(folh1_source = s, strategy = "flag_all", threshold = th, net_benefit = net_benefit(d$fail, rep(1, nrow(d)), th)),
+    bind_rows(lapply(names(models), function(mn) data.frame(folh1_source = s, strategy = mn, threshold = th, net_benefit = net_benefit(d$fail, cvr[[mn]]$pr, th)))))
+  oof[[s]] <- data.frame(folh1_source = s, d, setNames(as.data.frame(sapply(cvr, `[[`, "pr")), paste0("pr_", names(cvr)))) }
+a_tab <- bind_rows(a_rows); dca <- bind_rows(dca_rows)
+
+```
+
+Minimum sample size by the Riley et al. (2020) criteria for a binary outcome. These are global shrinkage ≥0.9, optimism in R² ≤0.05 and precise estimation of overall risk. The anticipated Cox–Snell R² is taken from the apparent SUV + *FOLH1* (± ctDNA) fits, and also at half that value. Results and out-of-fold predictions are written; the predictions are reused for the ROC panels.
+
+```{r comp-38-prediction-02}
+## Riley et al. (BMJ 2020) criteria, binary outcome, anticipated R2_CS from the apparent SUV+FOLH1(+ctDNA) fits
+riley <- function(Pp, R2cs, phi, S = 0.9, delta = 0.05) { lnL0 <- phi * log(phi) + (1 - phi) * log(1 - phi)
+  maxR2 <- 1 - exp(2 * lnL0); n1 <- Pp / ((S - 1) * log(1 - R2cs / S))
+  S2 <- R2cs / (R2cs + delta * maxR2); n2 <- Pp / ((S2 - 1) * log(1 - R2cs / S2)); n3 <- (1.96 / 0.05)^2 * phi * (1 - phi)
+  c(n_shrinkage = ceiling(n1), n_optimism = ceiling(n2), n_risk_precision = ceiling(n3)) }
+d_e <- base %>% inner_join(fol$either, by = "subject_id") %>% filter(complete.cases(SUV, ctDNA, FOLH1)); phi <- mean(d_e$fail)
+ss <- bind_rows(lapply(list(SUV_FOLH1 = c("SUV", "FOLH1"), SUV_FOLH1_ctDNA = c("SUV", "FOLH1", "ctDNA")), function(v) {
+  m <- suppressWarnings(glm(as.formula(paste("fail ~", paste(v, collapse = "+"))), binomial, d_e))
+  R2app <- 1 - exp(-(m$null.deviance - m$deviance) / nrow(d_e))
+  bind_rows(lapply(c(apparent = 1, halved = 0.5), function(k) { n <- riley(length(v), R2app * k, phi)
+    data.frame(predictors = length(v), R2cs_anticipated = R2app * k, event_rate = phi, t(n), n_required = max(n), events_required = ceiling(max(n) * phi)) }), .id = "R2_assumption") }), .id = "model")
+
+write.csv(a_tab, file.path(out_dir, "A_model_performance.csv"), row.names = FALSE)
+write.csv(dca, file.path(out_dir, "B_decision_curve.csv"), row.names = FALSE)
+write.csv(ss, file.path(out_dir, "C_sample_size_riley.csv"), row.names = FALSE)
+qs::qsave(oof, file.path(out_dir, "oof_predictions.qs"))
+options(width = 220); f2 <- function(x) as.data.frame(mutate(x, across(where(is.numeric), ~signif(.x, 3))))
+cat("\n==== A. LOO performance ====\n"); print(f2(a_tab), row.names = FALSE)
+cat("\n==== B. decision curve (FOLH1 from either source) ====\n")
+print(f2(dca %>% filter(folh1_source == "either") %>% pivot_wider(names_from = strategy, values_from = net_benefit) %>% select(-folh1_source)), row.names = FALSE)
+cat("\n==== C. Riley minimum sample size ====\n"); print(f2(ss), row.names = FALSE)
+cat("R16 complete.\n")
+```

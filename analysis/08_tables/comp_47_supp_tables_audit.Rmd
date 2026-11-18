@@ -1,0 +1,139 @@
+---
+title: "Supplementary Tables: LOQ-universe replacements and robustness tables S98–S104"
+subtitle: "PRINCE spatial transcriptomics: `comp_47_supp_tables_audit`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+This is the last step in building the Supplementary Tables workbook (comp_15 → 25 → 29 → 42 → 47). It came out of an internal audit of the workbook. In the v5 workbook, sheets S15–S21 still held the pre-LOQ pseudobulk results, while the manuscript text reports the analysis on the LOQ gene universe. This script replaces those sheets with the `C13_pseudobulk_LOQ` equivalents and recomputes π₁ (1 − π₀, limma `propTrueNull`, lfdr method) from the LOQ-universe limma results.
+
+It also adds the robustness tables built by the later scripts: the feature-free purity adjustment (S98, comp_45), *FOLH1* adjusted for signal depth (S99, comp_46), technical confounding (S100, comp_49), on-treatment change of the immune microenvironment (S101, comp_50), the STAMPEDE signatures (S102, comp_51), pre-treatment *FOLH1* versus the on-treatment response (S103, comp_52) and the morphometric PSMA⁺ share (S104, comp_53). Each sheet carries its caption in row 1. Because `openxlsx` appends replaced sheets at the end, the workbook is reopened at the end and the sheets are put back in numerical order.
+
+**Manuscript items supported**
+
+- Supplementary Tables 15–21 (patient-level feature tests, transcriptome-wide summary, π₁, paired programmes, p53 targets, *FOLH1* primary–metastasis concordance, PSA50 prediction), replaced with LOQ-universe results
+- Supplementary Table 98 (AOI-level models with a feature-free SpatialDecon tumour fraction)
+- Supplementary Table 99 (patient pseudobulk *FOLH1* adjusted for AOI signal depth)
+- Supplementary Table 100 (technical confounding)
+- Supplementary Table 101 (on-treatment change of the immune microenvironment)
+- Supplementary Table 102 (STAMPEDE transcriptome signatures)
+- Supplementary Table 103 (pre-treatment *FOLH1* versus on-treatment response)
+- Supplementary Table 104 (morphometric PSMA⁺ tumour share)
+- Final workbook: `results/Manuscript_v5/Supplementary_Tables_v5.xlsx`, released as Supplementary_Tables_v6.xlsx
+
+**Pipeline step:** `./run_pipeline.sh --only 47_supp_tables_audit`. Approximate runtime: under a minute.
+
+**Inputs**
+
+- `results/Manuscript_v5/Supplementary_Tables_v5.xlsx`
+- `results/C13_pseudobulk_LOQ/transcriptome_wide_limma_all_strata.csv`
+- `results/C13_pseudobulk_LOQ/feature_tests_pseudobulk.csv`
+- `results/C13_pseudobulk_LOQ/transcriptome_wide_summary.csv`
+- `results/C13_pseudobulk_LOQ/paired_induction_apriori_sets.csv`
+- `results/C13_pseudobulk_LOQ/FOLH1_primary_met_concordance.csv`
+- `results/C13_pseudobulk_LOQ/PSA50_prediction_cv_permutation.csv`
+- `results/Manuscript_v5/p53_core_target_paired_induction_LOQ.csv`
+- `results/R19_purity_feature_free/*.csv`
+- `results/R20_depth_adjusted/FOLH1_depth_adjusted_pseudobulk.csv`
+- `results/R21_technical/*.csv`
+- `results/R22_tme_on_treatment/*.csv`
+- `results/R23_grist_signatures/*.csv`
+- `results/R24_dose_interferon/*.csv`
+- `results/R25_psma_fraction/*.csv`
+
+**Outputs**
+
+- `results/Manuscript_v5/Supplementary_Tables_v5.xlsx (updated in place)`
+
+**Depends on**: `comp_42`, `comp_13b`, `comp_28`, `comp_41`, `comp_45`, `comp_46`, `comp_49`, `comp_50`, `comp_51`, `comp_52`, `comp_53`
+
+## Analysis
+
+### Audit corrections to the Supplementary Tables
+
+The header lists what the audit changed: S15–S21 are rebuilt from the LOQ-universe pseudobulk results, and S98 and S99 hold the feature-free purity and signal-depth-adjusted analyses.
+
+The script loads the existing workbook and defines `put()`, which deletes a sheet if it exists, writes the caption in row 1 and writes the table from row 3. π₁ is recomputed for each stratum from the LOQ-universe transcriptome-wide P values (lfdr method). Sheets S15–S21 are then rewritten, and S98–S104 are assembled by stacking the component tables of each robustness analysis, with a `table` column naming the component. The workbook is saved, reopened and its sheets reordered by the number in the S-prefix, so that the sheets replaced here return to their numbered positions.
+
+```{r comp-47-supp-tables-audit-01}
+## ============================================================================
+## PRINCE manuscript v5 -- Supplementary Tables after the internal audit (2026-10-27).
+##  * S15-S21 previously held pre-LOQ (C13_pseudobulk) results while the text reports the LOQ-universe
+##    analysis; they are replaced by the C13_pseudobulk_LOQ equivalents (pi1 recomputed from the LOQ limma).
+##  * S98: R19 purity adjustment with a feature-free SpatialDecon tumour fraction.
+##  * S99: R20 patient pseudobulk FOLH1 adjusted for AOI signal depth.
+## ============================================================================
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({ library(openxlsx); library(dplyr); library(limma) })
+f <- file.path(COMP_DIR, "Manuscript_v5", "Supplementary_Tables_v5.xlsx")
+wb <- loadWorkbook(f)
+p <- function(...) file.path(COMP_DIR, ...)
+put <- function(name, df, desc) {
+  if (name %in% names(wb)) removeWorksheet(wb, name)
+  addWorksheet(wb, name); writeData(wb, name, desc, startRow = 1); writeData(wb, name, df, startRow = 3)
+}
+tw <- read.csv(p("C13_pseudobulk_LOQ", "transcriptome_wide_limma_all_strata.csv"))
+pi1 <- tw %>% group_by(stratum) %>% summarise(n_genes = n(), pi1 = 1 - propTrueNull(P.Value, method = "lfdr"), .groups = "drop")
+put("S15_pb_feature_tests", read.csv(p("C13_pseudobulk_LOQ", "feature_tests_pseudobulk.csv")),
+    "Table S15. PRIMARY: patient-level pseudobulk tests of pre-specified (a priori) and post-hoc (exploratory) features, all strata, LOQ gene universe.")
+put("S16_pb_transcriptome", read.csv(p("C13_pseudobulk_LOQ", "transcriptome_wide_summary.csv")),
+    "Table S16. PRIMARY: transcriptome-wide pseudobulk limma-voom (robust) summary per stratum, LOQ gene universe; entries for named genes are 'FDR (P)'.")
+put("S17_pi1", pi1, "Table S17. Estimated fraction of response-associated genes (pi1 = 1 - pi0; limma propTrueNull, lfdr) per stratum, LOQ gene universe.")
+put("S18_paired_programmes", read.csv(p("C13_pseudobulk_LOQ", "paired_induction_apriori_sets.csv")),
+    "Table S18. Paired pre-treatment -> on-treatment change in pre-specified programmes, LOQ gene universe.")
+put("S19_p53_targets", read.csv(p("Manuscript_v5", "p53_core_target_paired_induction_LOQ.csv")),
+    "Table S19. Paired induction of canonical p53 target genes, LOQ gene universe (SESN1 and TP53I3 below LOQ in every paired universe).")
+put("S20_FOLH1", read.csv(p("C13_pseudobulk_LOQ", "FOLH1_primary_met_concordance.csv")),
+    "Table S20. FOLH1 primary-metastasis concordance (patient pseudobulk, LOQ gene universe).")
+put("S21_prediction", read.csv(p("C13_pseudobulk_LOQ", "PSA50_prediction_cv_permutation.csv")),
+    "Table S21. Exploratory elastic-net PSA50 prediction (pre-treatment bone a priori features and clinical features): repeated stratified CV AUC and label-permutation P (null from 5-repeat CV, hence conservative).")
+r19 <- read.csv(p("R19_purity_feature_free", "feature_models_feature_free_purity.csv"))
+r19g <- read.csv(p("R19_purity_feature_free", "genomewide_dream_feature_free_purity.csv"))
+r19a <- read.csv(p("R19_purity_feature_free", "tumour_fraction_agreement_summary.csv"))
+put("S98_purity_feature_free", bind_rows(mutate(r19, table = "feature models"), mutate(r19g, table = "transcriptome-wide (M1f)"), mutate(r19a, table = "tumour fraction agreement")),
+    "Table S98. AOI-level models with a feature-free SpatialDecon tumour fraction (all FOLH1, AR, HLA-I, IFN-alpha, p53 and neuroendocrine programme genes removed from the marker set): agreement with the original fraction; PSA change (M1f, M3f) and non-responder vs responder (M1f; M2e = ESTIMATE) feature models with Kenward-Roger P, 500 patient-permutation P and BH-FDR within outcome x model; transcriptome-wide dream gene counts.")
+put("S99_FOLH1_depth_adjusted", read.csv(p("R20_depth_adjusted", "FOLH1_depth_adjusted_pseudobulk.csv")),
+    "Table S99. Patient pseudobulk FOLH1 vs PSA change (per 50%) with batch, before and after adjustment for patient-mean AOI signal depth (log % genes above LOQ); Spearman correlations of FOLH1 and PSA change with signal depth.")
+r21 <- function(f, t) mutate(read.csv(p("R21_technical", f)), table = t)
+put("S100_technical_confounding", bind_rows(r21("A_technical_vs_response.csv", "A technical factor vs response"), r21("B_features_adjusted_for_technical.csv", "B feature ~ PSA + batch + technical"),
+    r21("C_technical_change_on_treatment.csv", "C technical change on treatment"), r21("C_induction_adjusted_for_technical.csv", "C induction adjusted for technical change"),
+    r21("D_PCs_vs_response_and_technical.csv", "D principal components"), r21("E_transcriptome_wide_adjusted_for_technical.csv", "E transcriptome-wide with technical covariates")),
+    "Table S100. Technical confounding (comp_49): library size, raw reads, sequencing saturation, negative-probe background, signal depth, AOI number and slide-processing experiment vs response; key features and paired induction adjusted for technical factors; transcriptome-wide pseudobulk with technical covariates; principal components vs PSA change and technical factors.")
+put("S101_TME_on_treatment", bind_rows(mutate(read.csv(p("R22_tme_on_treatment", "A_tme_programme_gene_change.csv")), table = "programmes and genes"),
+    mutate(read.csv(p("R22_tme_on_treatment", "D_deconvolved_change.csv")), table = "deconvolved fractions")),
+    "Table S101. On-treatment change (pre-treatment -> on-treatment bone, paired patient pseudobulk) of immune-microenvironment programmes, checkpoint/myeloid genes and SpatialDecon fractions (comp_50): Wilcoxon signed-rank P, BH-FDR within compartment x family, P adjusted for change in tumour fraction and in library size + signal depth, AOI-level mixed-model P, and association of change and on-treatment level with PSA change.")
+put("S102_STAMPEDE_signatures", bind_rows(mutate(read.csv(p("R23_grist_signatures", "A_signature_tests_per_stratum.csv")), table = "per stratum"),
+    mutate(read.csv(p("R23_grist_signatures", "B_pretreatment_consistency.csv")), table = "pre-treatment consistency"),
+    mutate(read.csv(p("R23_grist_signatures", "D_not_scored.csv")), table = "not scored")),
+    "Table S102. STAMPEDE transcriptome signatures (Grist et al., Cell 2025, Table S4) scored in PRINCE patient pseudobulk (comp_51): single-direction sets as published; PTEN-loss classifiers oriented by PTEN mRNA (exploratory); coherence, association with PSA change, rPFS, FOLH1 and ctDNA alterations, BH within stratum; signatures not reproducible from the published gene lists.")
+rd <- function(d, f, t) mutate(read.csv(p(d, f)), table = t)
+put("S103_FOLH1_predicts_induction", bind_rows(rd("R24_dose_interferon", "A_folh1_vs_induction_ancova.csv", "A ANCOVA: on-treatment ~ pre-treatment + pre-treatment tumour FOLH1"),
+    rd("R24_dose_interferon", "B_within_roi_crossfire.csv", "B within-ROI (AOI-level) crossfire models"), rd("R24_dose_interferon", "C_mediation.csv", "C mediation (bootstrap)"),
+    rd("R24_dose_interferon", "C_ctdna.csv", "C IFN-a induction by week-12 ctDNA")),
+    "Table S103. Pre-treatment tumour FOLH1 versus the on-treatment response (comp_52): ANCOVA with permutation, batch, technical/composition, leave-one-out, own-compartment FOLH1 and PSMA-PET SUVmean alternatives; within-ROI AOI-level models; mediation of the FOLH1-PSA association through IFN-a induction.")
+put("S104_morphometric_PSMA_share", bind_rows(rd("R25_psma_fraction", "A_psma_fraction_vs_outcome.csv", "A PSMA+ share vs outcome"), rd("R25_psma_fraction", "B_paired_change.csv", "B paired change"),
+    rd("R25_psma_fraction", "B_progression.csv", "B progression biopsies"), rd("R25_psma_fraction", "C_FOLH1_nuclei_adjusted.csv", "C FOLH1 adjusted for nuclei count")),
+    "Table S104. Morphometric PSMA+ share of tumour (nuclei and area from GeoMx segmentation; comp_53) versus PSA change, response group, rPFS, PSMA-PET SUVmean and tissue FOLH1; paired change; progression biopsies; FOLH1 association adjusted for pseudobulk nuclei count.")
+saveWorkbook(wb, f, overwrite = TRUE)
+cat("Supplementary tables updated:", length(names(wb)), "sheets\n")
+## restore numerical sheet order (removeWorksheet/addWorksheet appends at the end)
+wb <- loadWorkbook(f)
+num <- as.integer(sub("^S([0-9]+)_.*", "\\1", names(wb)))
+worksheetOrder(wb) <- order(num)
+saveWorkbook(wb, f, overwrite = TRUE)
+cat("sheet order:", paste(head(names(wb)[order(num)], 3), collapse = ", "), "...", paste(tail(names(wb)[order(num)], 3), collapse = ", "), "\n")
+```

@@ -1,0 +1,149 @@
+---
+title: "BayesPrism deconvolution with the SpatialDecon references"
+subtitle: "PRINCE spatial transcriptomics: `comp_17_bayesprism`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+Estimates cell-type fractions for every AOI with BayesPrism, using the same tissue-matched single-cell references as the SpatialDecon analysis (comp_03b), so that the two methods can be compared on criteria with a known answer (comp_19). Archival primary tumours and control-tissue AOIs are deconvolved with PCCAT primary-tumour cells (L2 cell types, at most 200 cells per type). Bone AOIs are deconvolved with GSE143791 tumour and involved-marrow non-tumour cells (at most 200 per type) plus PCCAT castration-resistant luminal (Tumour_AR) and NEPC neuroendocrine (Tumour_NE) cells.
+
+BayesPrism receives raw counts. Ribosomal, mitochondrial, *MALAT1* and sex-chromosome genes are removed with `cleanup.genes`, and markers are chosen with `select.marker` to keep the Gibbs sampling tractable. Each reference run is skipped when its output already exists.
+
+**Manuscript items supported**
+
+- Extended Data Fig. 2 (SpatialDecon versus BayesPrism), via comp_19 and comp_21
+- Supplementary Tables 27–29 (via comp_19/comp_25)
+- Supplementary Data 3 (per-AOI BayesPrism fractions, via comp_48)
+- Methods: Deconvolution
+
+**Pipeline step:** `./run_pipeline.sh --only 17_bayesprism`. Approximate runtime: long (BayesPrism Gibbs sampling for two references; needs at least 25 GB free RAM; existing outputs are reused).
+
+**Inputs**
+
+- `data/phase2_se_qc_filtered.qs`
+- `data/refs/pccat_subsample.qs`
+- `data/reference/GSE143791/GSE143791_cell.annotation.human.csv.gz`
+- `data/reference/GSE143791/raw_files/BMET*-(Tumor|Involved).count*`
+
+**Outputs**
+
+- `results/R2_deconv_compare/bayesprism_primary.qs`
+- `results/R2_deconv_compare/bayesprism_bone.qs`
+
+**Depends on**: `comp_00b_bone_cohort`, `comp_03a_build_refs`
+
+## Analysis
+
+Header describing the two references and the AOIs each is applied to.
+
+### Set-up and BayesPrism wrapper
+Checks free memory, fixes the seed, loads raw AOI counts and defines a per-cell-type down-sampling helper. `run_bp` restricts reference and mixture to shared genes, removes ribosomal, mitochondrial, *MALAT1* and sex-chromosome genes, computes differential-expression statistics between cell types, selects markers (P ≤ 0.01, log fold change ≥ 0.1), runs BayesPrism with the tumour cell type as the malignant key, and saves the final cell-type fractions (θ).
+
+```{r comp-17-bayesprism-01}
+## ============================================================================
+## PRINCE -- R2a: BayesPrism deconvolution with the same references as SpatialDecon
+## (comp_03b_deconv.R), to compare the two methods objectively.
+##   PRIMARY ref: PCCAT primary-tumour cells, ct.L2 (<= 200 cells per type)
+##     -> Archival AOIs + Control-tissue AOIs
+##   BONE ref:    GSE143791 Tumor+Involved non-tumour cells (<= 200 per type)
+##                + PCCAT CRPC/mCRPC Luminal (Tumour_AR) and NEPC NE (Tumour_NE)
+##     -> Screening / Cycle1 / DiseaseProgression AOIs
+## Raw counts in; BayesPrism gene cleanup (ribosomal, mitochondrial, sex chrom.)
+## and marker selection (select.marker) to keep runtime reasonable.
+## Outputs: results/R2_deconv_compare/bayesprism_{primary,bone}.qs
+## ============================================================================
+
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({
+  library(qs); library(SummarizedExperiment); library(Matrix); library(data.table); library(BayesPrism)
+})
+setwd(PRINCE_DIR)
+check_ram_or_stop(25)
+set.seed(2026); data.table::setDTthreads(1)
+out_dir <- file.path(COMP_DIR, "R2_deconv_compare"); dir.create(out_dir, showWarnings = FALSE)
+cap <- function(lab, n) unlist(lapply(split(seq_along(lab), lab), function(i) if (length(i) > n) sample(i, n) else i))
+
+se <- qs::qread("phase2_se_qc_filtered.qs"); cd <- as.data.frame(colData(se))
+mix_all <- t(as.matrix(assay(se, "all_count")))          # AOIs x genes, raw counts
+
+run_bp <- function(ref_counts, labels, key, aois, tag) {
+  f <- file.path(out_dir, paste0("bayesprism_", tag, ".qs"))
+  if (file.exists(f)) { message("exists: ", f); return(invisible(NULL)) }
+  genes <- intersect(colnames(ref_counts), colnames(mix_all))
+  ref <- ref_counts[, genes]; mix <- mix_all[aois, genes]
+  ref <- cleanup.genes(input = ref, input.type = "count.matrix", species = "hs",
+                       gene.group = c("Rb", "Mrp", "other_Rb", "chrM", "MALAT1", "chrX", "chrY"), exp.cells = 5)
+  ds <- get.exp.stat(sc.dat = ref[, colSums(ref > 0) > 3], cell.type.labels = labels, cell.state.labels = labels,
+                     pseudo.count = 0.1, cell.count.cutoff = 50, n.cores = MAX_WORKERS)
+  ref_m <- select.marker(sc.dat = ref, stat = ds, pval.max = 0.01, lfc.min = 0.1)
+  message(tag, ": reference ", nrow(ref_m), " cells x ", ncol(ref_m), " marker genes; mixtures ", nrow(mix))
+  pr <- new.prism(reference = ref_m, mixture = mix, input.type = "count.matrix",
+                  cell.type.labels = labels, cell.state.labels = labels, key = key, outlier.cut = 0.01, outlier.fraction = 0.1)
+  bp <- run.prism(prism = pr, n.cores = MAX_WORKERS)
+  theta <- get.fraction(bp = bp, which.theta = "final", state.or.type = "type")
+  qs::qsave(list(theta = theta, n_genes = ncol(ref_m), n_cells = nrow(ref_m)), f)
+  message("saved ", f)
+}
+
+```
+
+### Primary-tumour reference
+PCCAT primary-tumour cells capped at 200 per L2 cell type. PCCAT castration-resistant luminal and NEPC neuroendocrine tumour cells (up to 300 each) are also extracted here for the bone reference. The primary reference is applied to archival and control-tissue AOIs, with luminal cells as the tumour key.
+
+```{r comp-17-bayesprism-02}
+## ---- PRIMARY reference -------------------------------------------------------------
+pc <- qs::qread(file.path(PRINCE_DIR, "refs/pccat_subsample.qs"), nthreads = 1)
+pri <- which(pc$meta$Group2 == "Pri")
+pri <- pri[cap(pc$meta$ct.L2[pri], 200)]
+ref_pri <- t(as.matrix(pc$counts[, pri])); lab_pri <- pc$meta$ct.L2[pri]
+tum_ar <- which(pc$meta$Group2 %in% c("CRPC", "mCRPC") & pc$meta$ct.L2 == "Luminal"); tum_ar <- tum_ar[cap(rep("a", length(tum_ar)), 300)]
+tum_ne <- which(pc$meta$Group2 == "NEPC" & pc$meta$ct.L2 == "NE"); tum_ne <- tum_ne[cap(rep("a", length(tum_ne)), 300)]
+tum_counts <- t(as.matrix(pc$counts[, c(tum_ar, tum_ne)]))
+tum_lab <- c(rep("Tumour_AR", length(tum_ar)), rep("Tumour_NE", length(tum_ne)))
+rm(pc); invisible(gc())
+
+a_aoi <- rownames(cd)[cd$timepoint == "Archival" | cd$response_group_neat == "Control"]
+run_bp(ref_pri, lab_pri, key = "Luminal", aois = a_aoi, tag = "primary")
+rm(ref_pri); invisible(gc())
+
+```
+
+### Bone-metastasis reference
+Reads GSE143791 tumour and involved-marrow count files, keeps non-tumour cells, caps each annotated type at 200 cells and adds the PCCAT Tumour_AR and Tumour_NE profiles on shared genes. Applied to pre-treatment, on-treatment and progression bone AOIs with Tumour_AR as the tumour key.
+
+```{r comp-17-bayesprism-03}
+## ---- BONE reference ------------------------------------------------------------------
+gdir <- file.path(PMCC_DIR, "GSE143791")
+ann <- fread(file.path(gdir, "GSE143791_cell.annotation.human.csv.gz"))
+files <- list.files(file.path(gdir, "raw_files"), pattern = "BMET[0-9]+-(Tumor|Involved)\\.count", full.names = TRUE)
+mats <- lapply(files, function(f) {
+  d <- fread(f, nThread = 1); g <- d[[1]]; d[[1]] <- NULL
+  keep <- intersect(colnames(d), ann$barcode[ann$cells != "Tumor"])
+  m <- Matrix(as.matrix(d[, ..keep]), sparse = TRUE); rownames(m) <- g
+  m[!duplicated(g), , drop = FALSE]
+})
+genes <- Reduce(intersect, lapply(mats, rownames))
+bone <- do.call(cbind, lapply(mats, function(m) m[genes, ])); rm(mats); invisible(gc())
+blab <- ann$cells[match(colnames(bone), ann$barcode)]
+idx <- cap(blab, 200); bone <- bone[, idx]; blab <- blab[idx]
+common <- intersect(rownames(bone), colnames(tum_counts))
+ref_bone <- rbind(t(as.matrix(bone[common, ])), tum_counts[, common]); lab_bone <- c(blab, tum_lab)
+rm(bone); invisible(gc())
+b_aoi <- rownames(cd)[cd$timepoint %in% c("Screening", "Cycle1", "DiseaseProgression")]
+run_bp(ref_bone, lab_bone, key = "Tumour_AR", aois = b_aoi, tag = "bone")
+message("BayesPrism complete.")
+```

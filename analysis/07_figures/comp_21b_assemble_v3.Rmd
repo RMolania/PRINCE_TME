@@ -1,0 +1,71 @@
+---
+title: "Assemble the v3 Extended Data figure set"
+subtitle: "PRINCE spatial transcriptomics: `comp_21b_assemble_v3`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+Several Extended Data panels were first rendered by the version-1 and version-2 figure scripts (`comp_11_extended_figures`, `comp_14_revised_figures`). This step copies them into `results/Manuscript_v3/` under the numbering of the v3 figure set, together with the exported gene-set table (Supplementary Data 5). Later figure scripts and the supplementary-table builders read these files from `Manuscript_v3/`. No computation is done here.
+
+**Manuscript items supported**
+
+- Intermediate figure files used by `comp_25_supp_tables_v3`, `comp_28_figures_v4` and later steps
+- Supplementary Data 5 (gene sets), copied forward
+
+**Pipeline step:** `./run_pipeline.sh --only 21b_assemble_v3`. Approximate runtime: seconds.
+
+**Inputs**
+
+- `results/Manuscript/ExtendedDataFig{1,7,8,10}.{pdf,png}`
+- `results/Manuscript_v2/ExtendedDataFig9.{pdf,png}`
+- `results/Manuscript/Supplementary_Data_5_gene_sets.csv`
+
+**Outputs**
+
+- `results/Manuscript_v3/ExtendedDataFig{1,6,7,8,10}.{pdf,png}`
+- `results/Manuscript_v3/Supplementary_Data_5_gene_sets.csv`
+
+**Depends on**: `comp_11_extended_figures`, `comp_14_revised_figures`, `comp_12_export_genesets`, `comp_21_figures_v3`
+
+## Analysis
+
+Load the shared set-up (folder definitions).
+
+Copy each figure in both PDF and PNG format to its v3 number: version-1 Extended Data Fig. 1, 7, 8 and 10 become v3 Extended Data Fig. 1, 8, 7 and 10, and version-2 Extended Data Fig. 9 becomes v3 Extended Data Fig. 6. `file.copy` is wrapped in `stopifnot`, so a missing source file stops the pipeline.
+
+```{r comp-21b-assemble-v3-01}
+## ============================================================================
+## PRINCE -- assemble the v3 Extended Data / Supplementary figure set
+## Copies figure files rendered by earlier figure scripts into Manuscript_v3/
+## under the numbering used by the v3 figure set, which later figure scripts and
+## the supplementary-table builders read from.
+## ============================================================================
+
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+
+cp <- function(from, to) stopifnot(file.copy(file.path(COMP_DIR, from), file.path(COMP_DIR, to), overwrite = TRUE))
+dir.create(file.path(COMP_DIR, "Manuscript_v3"), showWarnings = FALSE)
+for (e in c("pdf", "png")) {
+  cp(paste0("Manuscript/ExtendedDataFig1.", e),     paste0("Manuscript_v3/ExtendedDataFig1.", e))
+  cp(paste0("Manuscript_v2/ExtendedDataFig9.", e),  paste0("Manuscript_v3/ExtendedDataFig6.", e))
+  cp(paste0("Manuscript/ExtendedDataFig8.", e),     paste0("Manuscript_v3/ExtendedDataFig7.", e))
+  cp(paste0("Manuscript/ExtendedDataFig7.", e),     paste0("Manuscript_v3/ExtendedDataFig8.", e))
+  cp(paste0("Manuscript/ExtendedDataFig10.", e),    paste0("Manuscript_v3/ExtendedDataFig10.", e))
+}
+cp("Manuscript/Supplementary_Data_5_gene_sets.csv", "Manuscript_v3/Supplementary_Data_5_gene_sets.csv")
+cat("v3 figure set assembled\n")
+```

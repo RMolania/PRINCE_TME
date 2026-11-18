@@ -1,0 +1,125 @@
+---
+title: "Sensitivity of the transcriptome-wide pseudobulk model to PSA coding and weighting"
+subtitle: "PRINCE spatial transcriptomics: `comp_54_psa_coding_sensitivity`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+The primary transcriptome-wide model regresses patient pseudobulk expression on maximal PSA change, capped at +100% and scaled per 50%, with batch (limma-voom, robust eBayes). This script checks whether its conclusions depend on that coding or on sample weighting. Six alternatives are fitted in every stratum: rank-based inverse-normal scores of uncapped PSA change (M1), PSA capped at +50% (M2), log₂ PSA ratio (M3), voom with sample quality weights (M4), and the reference model plus log library size (M5) or signal depth (M6).
+
+For each stratum and model, the script records the number of genes at FDR < 0.1 and < 0.05, π₁, the *FOLH1* and *TRPM8* statistics, the Spearman correlation of moderated t statistics with the reference model, and the maximum leverage of any patient. The aim is to show whether the sparse transcriptome-wide result and the direction of *FOLH1* are stable to reasonable alternative codings.
+
+**Manuscript items supported**
+
+- Not cited directly in the manuscript, and its outputs are not assembled into a Supplementary Table. It is an internal sensitivity analysis of the primary transcriptome-wide model (Results: no gene at FDR < 0.05; Methods: Patient-level pseudobulk).
+
+**Pipeline step:** `./run_pipeline.sh --only 54_psa_coding_sensitivity`. Approximate runtime: a few minutes (needs about 20 GB of free memory, checked at start).
+
+**Inputs**
+
+- `results/C13_pseudobulk_LOQ/pseudobulk_strata.qs`
+- `results/R1_loq/loq_gene_universes.qs`
+- `data/phase2_se_qc_filtered.qs`
+
+**Outputs**
+
+- `results/R26_psa_coding_sensitivity/A_per_stratum_model.csv`
+- `results/R26_psa_coding_sensitivity/B_summary_by_model.csv`
+- `results/R26_psa_coding_sensitivity/toptables.qs`
+
+**Depends on**: `comp_16`, `comp_13b`
+
+## Analysis
+
+### Coding of PSA change
+
+The header defines the reference model M0 and the six alternatives M1–M6, and lists the per-stratum summaries recorded.
+
+For each pseudobulk stratum, the script adds patient-mean signal depth to the metadata and builds the four PSA codings. Each model is fitted with batch whenever the stratum has more than one batch, using voom (voomWithQualityWeights for M4) and robust eBayes, and the PSA coefficient is extracted. Patient leverage is the largest diagonal element of the hat matrix. The Spearman correlation of each model's t statistics with M0 measures how far the gene ranking changes. The script writes the per-stratum results, a summary by model across strata (FDR < 0.1 counts, π₁ in pre-treatment bone and archival strata, *FOLH1* sign and rank) and all top tables.
+
+```{r comp-54-psa-coding-sensitivity-01}
+## ============================================================================
+## PRINCE -- R26: sensitivity of the primary transcriptome-wide pseudobulk model
+## (limma-voom ~ PSA change capped at +100%, per 50% + batch) to the coding of PSA change
+## and to sample weighting / technical covariates.
+##   M0 reference: capped PSA (+100%) / 50 + batch
+##   M1 rank-based inverse-normal scores of uncapped maximal PSA change + batch
+##   M2 PSA capped at +50% / 50 + batch
+##   M3 log2 PSA ratio, log2(1 + change/100), change floored at -99% and uncapped + batch
+##   M4 M0 with voomWithQualityWeights (sample-level weights)
+##   M5 M0 + log10 library size
+##   M6 M0 + patient mean % genes above LOQ (signal depth)
+## Per stratum: genes at FDR < 0.1 / 0.05, pi1 (propTrueNull lfdr), FOLH1 / TRPM8 rank, P and FDR,
+## Spearman of moderated t with M0, and max patient leverage of the PSA term.
+## Outputs: results/R26_psa_coding_sensitivity/
+## ============================================================================
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({ library(qs); library(SummarizedExperiment); library(dplyr); library(edgeR); library(limma) })
+setwd(PRINCE_DIR); check_ram_or_stop(20); set.seed(2026)
+out_dir <- file.path(COMP_DIR, "R26_psa_coding_sensitivity"); dir.create(out_dir, showWarnings = FALSE)
+pbs <- qs::qread(out_path("C13_pseudobulk_LOQ", "pseudobulk_strata.qs"))
+loq <- qs::qread(file.path(COMP_DIR, "R1_loq", "loq_gene_universes.qs"))
+se <- qs::qread("phase2_se_qc_filtered.qs"); cd <- as.data.frame(colData(se))
+cd$depth <- loq$aoi[rownames(cd), "pct_above_LOQ_std"]
+seg_of <- c(CD45 = "CD45+", PSMA = "PSMA+", PanCKPSMA = "PanCK+PSMA-")
+
+inv_norm <- function(x) qnorm((rank(x, ties.method = "average") - 0.5) / length(x))
+res <- list(); tts <- list()
+for (sid in names(pbs)) {
+  p <- pbs[[sid]]; m <- p$meta; sg <- seg_of[sub("__.*", "", sid)]; tp <- sub(".*__", "", sid)
+  dep <- cd %>% filter(segment_name == sg, timepoint == tp, response_group_neat != "Control") %>%
+    group_by(subject_id) %>% summarise(depth = mean(depth, na.rm = TRUE), .groups = "drop")
+  m$depth <- dep$depth[match(m$subject_id, dep$subject_id)]
+  m$psa_M0 <- m$psa_change_capped / 50
+  m$psa_M1 <- inv_norm(m$max_psa_change)
+  m$psa_M2 <- pmin(m$max_psa_change, 50) / 50
+  m$psa_M3 <- log2(1 + pmax(m$max_psa_change, -99) / 100)
+  m$batch <- factor(m$study_batch); nb <- nlevels(droplevels(m$batch)) > 1
+  specs <- list(M0 = c("psa_M0"), M1 = c("psa_M1"), M2 = c("psa_M2"), M3 = c("psa_M3"), M4 = c("psa_M0"),
+                M5 = c("psa_M0", "log_lib"), M6 = c("psa_M0", "depth"))
+  for (mn in names(specs)) {
+    rhs <- c(specs[[mn]], if (nb) "batch")
+    X <- model.matrix(reformulate(rhs), m); colnames(X)[2] <- "psa"
+    v <- if (mn == "M4") voomWithQualityWeights(p$dge, X) else voom(p$dge, X)
+    tt <- topTable(eBayes(lmFit(v, X), robust = TRUE), coef = "psa", number = Inf, sort.by = "none")
+    tt$gene <- rownames(tt); tt$rank <- rank(tt$P.Value); tts[[paste(sid, mn)]] <- tt %>% mutate(stratum = sid, model = mn)
+    H <- X %*% solve(crossprod(X)) %*% t(X)
+    g <- function(gn, col) if (gn %in% rownames(tt)) tt[gn, col] else NA
+    res[[paste(sid, mn)]] <- data.frame(stratum = sid, model = mn, n = nrow(m), n_genes = nrow(tt),
+      fdr10 = sum(tt$adj.P.Val < 0.1), fdr05 = sum(tt$adj.P.Val < 0.05), pi1 = 1 - propTrueNull(tt$P.Value, method = "lfdr"),
+      top_genes_fdr10 = paste(head(tt$gene[order(tt$P.Value)][tt$adj.P.Val[order(tt$P.Value)] < 0.1], 5), collapse = ";"),
+      FOLH1_t = g("FOLH1", "t"), FOLH1_P = g("FOLH1", "P.Value"), FOLH1_FDR = g("FOLH1", "adj.P.Val"), FOLH1_rank = g("FOLH1", "rank"),
+      TRPM8_FDR = g("TRPM8", "adj.P.Val"), max_leverage = max(diag(H)),
+      rho_t_vs_M0 = NA_real_)
+  }
+  t0 <- tts[[paste(sid, "M0")]]$t
+  for (mn in names(specs)) res[[paste(sid, mn)]]$rho_t_vs_M0 <- cor(tts[[paste(sid, mn)]]$t, t0, method = "spearman")
+}
+res <- bind_rows(res)
+summ <- res %>% group_by(model) %>% summarise(strata_with_fdr10 = sum(fdr10 > 0), total_fdr10 = sum(fdr10), max_fdr10 = max(fdr10),
+  pi1_pre_bone = paste(sprintf("%.2f", pi1[grepl("Screening", stratum)]), collapse = "/"), pi1_archival = paste(sprintf("%.2f", pi1[grepl("Archival", stratum)]), collapse = "/"),
+  FOLH1_neg = sum(FOLH1_t < 0), FOLH1_P05 = sum(FOLH1_P < 0.05), FOLH1_median_rank = median(FOLH1_rank),
+  min_rho_t = min(rho_t_vs_M0), median_rho_t = median(rho_t_vs_M0), .groups = "drop")
+write.csv(res, file.path(out_dir, "A_per_stratum_model.csv"), row.names = FALSE)
+write.csv(summ, file.path(out_dir, "B_summary_by_model.csv"), row.names = FALSE)
+qs::qsave(bind_rows(tts), file.path(out_dir, "toptables.qs"))
+options(width = 250); f2 <- function(x) as.data.frame(mutate(x, across(where(is.numeric), ~signif(.x, 2))))
+print(f2(res %>% select(-top_genes_fdr10)), row.names = FALSE)
+print(res %>% filter(fdr10 > 0) %>% select(stratum, model, fdr10, top_genes_fdr10), row.names = FALSE)
+print(f2(summ), row.names = FALSE)
+cat("R26 complete.\n")
+```

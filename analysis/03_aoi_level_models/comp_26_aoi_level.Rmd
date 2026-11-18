@@ -1,0 +1,284 @@
+---
+title: "AOI-level analysis arm with the patient as the unit of replication"
+subtitle: "PRINCE spatial transcriptomics: `comp_26_aoi_level`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+Repeats the main questions at AOI resolution while keeping the patient as the unit of inference. Everything uses the same LOQ ≥ 10% gene universe as the patient-level primary analysis (`comp_13b_pseudobulk_loq`), with cross-hybridising probe families (*USP17L*, *PRAMEF*, *NBPF*, olfactory receptors) removed and Control AOIs excluded.
+
+**A. Transcriptome-wide.** AOI-level limma-voom with design ~ outcome + batch, with patient as a blocking factor (two-pass `duplicateCorrelation`) and robust eBayes. It is run for continuous PSA change (per 50 percentage points, capped at +100%) and for non-responders versus responders (intermediate patients dropped). Each stratum is calibrated by 200 permutations that shuffle the outcome across **patients**, so every AOI keeps its patient's value, refitting with the observed consensus correlation. Gene-wise t statistics are compared with the patient pseudobulk ones.
+
+**B. Pre-specified features.** Linear mixed models, feature ~ PSA change + batch + (1 | patient) (lmerTest, REML, Satterthwaite df). Inference uses a patient-level permutation P (500 shuffles of PSA change across patients), because model-based P values can be anti-conservative with few patients. A refit excluding batch 3 (the batch that contains all intermediate patients) is also reported.
+
+**C. On-treatment change.** In patients with Screening and Cycle1 AOIs in a compartment: feature ~ timepoint + (1 | patient), and feature ~ timepoint × PSA + (1 | patient) for differential change by response.
+
+**Manuscript items supported**
+
+- Extended Data Fig. 3a–d (AOI-level arm: permutation calibration, concordance with pseudobulk, on-treatment change, feature mixed models), drawn by `comp_28_figures_v4` (v4 ExtendedDataFig4)
+- Extended Data Fig. 1f (AOI-level gene counts vs permutation null, PSA contrast), drawn by `comp_28_figures_v4` and reused in `comp_41_figures_v5`
+- Fig. 2a (AOI-LMM permutation P column for *FOLH1*) and Fig. 4c (AOI-level confirmation marks), via `comp_28` panels reused by `comp_41`
+- Supplementary Tables 38–42 (S38_AOI_tw_summary to S42_AOI_on_treatment), via `comp_29_supp_tables_v4`
+- Supplementary Data 1 (AOI-level gene results), via `comp_29_supp_tables_v4`
+- Methods: AOI-level analyses
+
+**Pipeline step:** `./run_pipeline.sh --only 26_aoi_level`. Approximate runtime: hours: permutation loops (200 per stratum and contrast; 500 lmer refits per feature and stratum) run in parallel over PRINCE_MAX_WORKERS.
+
+**Inputs**
+
+- `data/phase2_se_qc_filtered.qs`
+- `results/C1_clinical/patient_table.qs`
+- `results/R1_loq/loq_gene_universes.qs`
+- `data/reference/msigdb_gene_sets.rds`
+- `data/reference/ProstateCancer_GeneSignatures.R`
+- `data/reference/celltype_markers_AllLevels.xlsx`
+- `results/R3_nepc_purity/PCCAT_NEPC_vs_CRPC_signature.txt`
+- `results/C13_pseudobulk_LOQ/transcriptome_wide_limma_all_strata.csv`
+- `results/C13_pseudobulk_LOQ/feature_tests_pseudobulk.csv`
+
+**Outputs**
+
+- `results/R6_aoi_level/A_aoi_transcriptome_wide_summary.csv`
+- `results/R6_aoi_level/A_aoi_permutation_calibration.csv`
+- `results/R6_aoi_level/A_aoi_vs_pseudobulk_concordance.csv`
+- `results/R6_aoi_level/A_aoi_transcriptome_wide_genes.qs`
+- `results/R6_aoi_level/B_aoi_feature_lmm.csv`
+- `results/R6_aoi_level/B_aoi_feature_scores.qs`
+- `results/R6_aoi_level/C_aoi_on_treatment_change.csv`
+
+**Depends on**: `comp_00b_bone_cohort`, `comp_01_clinical`, `comp_16_loq_filter`, `comp_13b_pseudobulk_loq`, `comp_20_external_ne_signatures`
+
+## Analysis
+
+### AOI-level arm
+The header lists the three parts (transcriptome-wide with patient blocking and patient-level permutation; feature mixed models; on-treatment change) and the feature definitions.
+
+Load the bone-only AOI object, clinical table, LOQ gene universes and gene-set sources, and define the pre-specified features: single genes (*FOLH1*, *B2M*, *CD276*, p53 targets, *STAT1*, *IRF9*, *HLA-B*) as log2 CPM, and programmes (AR, neuroendocrine, p53, interferon, MHC, T-cell-inflamed, bone TAM/TIM, osteoclast) as the mean z-score over LOQ-detected genes, requiring at least three. `stratum_data` returns TMM-normalised counts, log2 CPM and per-AOI metadata with the patient's PSA change scaled per 50 percentage points. `fixdesign` drops aliased columns, for example when a stratum has one batch.
+
+```{r comp-26-aoi-level-01}
+## ============================================================================
+## PRINCE -- R6: AOI-level analysis arm, done with the patient as the unit of replication
+## On the negative-probe (LOQ) gene universe of each segment x timepoint stratum:
+##  A. Transcriptome-wide AOI-level limma-voom, design ~ PSA change (per 50%) + batch, with
+##     patient as a blocking factor (two-pass duplicateCorrelation). Calibrated by shuffling
+##     the PSA outcome across PATIENTS (every AOI keeps its patient's value), refitting with the
+##     observed consensus correlation (200 permutations). Same for NR vs R (Intermediate dropped).
+##     Concordance of AOI-level and patient-pseudobulk t statistics (C13_pseudobulk_LOQ).
+##  B. AOI-level linear mixed models for pre-specified features:
+##       feature ~ PSA change + batch + (1 | patient)   (lmerTest, Satterthwaite df)
+##     with a patient-level permutation P (500 shuffles of PSA across patients).
+##  C. AOI-level on-treatment change (patients with Screening and Cycle1 AOIs per compartment):
+##       feature ~ timepoint + (1 | patient)  and  feature ~ timepoint * PSA + (1 | patient)
+## Features: genes (log2 CPM) and programmes (mean z-score over LOQ-detected genes, as in C13b).
+## Outputs: results/R6_aoi_level/
+## ============================================================================
+
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({ library(qs); library(SummarizedExperiment); library(dplyr); library(tidyr); library(edgeR)
+  library(limma); library(lme4); library(lmerTest); library(parallel) })
+setwd(PRINCE_DIR)
+check_ram_or_stop(20)
+set.seed(2026)
+out_dir <- file.path(COMP_DIR, "R6_aoi_level"); dir.create(out_dir, showWarnings = FALSE)
+N_PERM_TW <- 200; N_PERM_FT <- 500
+
+se <- qs::qread("phase2_se_qc_filtered.qs"); cd <- as.data.frame(colData(se))
+pt <- qs::qread(out_path("C1_clinical", "patient_table.qs"))
+uni <- qs::qread(file.path(COMP_DIR, "R1_loq", "loq_gene_universes.qs"))$universes
+msig <- readRDS(file.path(PMCC_DIR, "msigdb_gene_sets.rds"))
+sig_env <- new.env(); sys.source(file.path(PMCC_DIR, "ProstateCancer_GeneSignatures.R"), envir = sig_env)
+l2 <- readxl::read_excel(file.path(PMCC_DIR, "celltype_markers_AllLevels.xlsx"), sheet = "L2")
+pccat_ne <- readLines(file.path(COMP_DIR, "R3_nepc_purity", "PCCAT_NEPC_vs_CRPC_signature.txt"))
+artefact_re <- "^(USP17L|PRAMEF|NBPF|OR[0-9]+[A-Z]+[0-9]+)"
+code <- c("CD45+" = "CD45", "PSMA+" = "PSMA", "PanCK+PSMA-" = "PanCKPSMA")
+tp_levels <- c("Archival", "Screening", "Cycle1")
+p53_core <- c("CDKN1A", "MDM2", "DDB2", "PHLDA3", "GDF15", "TNFRSF10B", "SESN1", "ZMAT3", "RRM2B", "TP53I3")
+
+genes_f <- c("FOLH1", "B2M", "CD276", "MDM2", "CDKN1A", "PHLDA3", "STAT1", "IRF9", "HLA-B")
+progs <- list(
+  AR_Hallmark = msig$H$HALLMARK_ANDROGEN_RESPONSE, AR_Nelson = msig$C2_CGP$NELSON_RESPONSE_TO_ANDROGEN_UP,
+  NE_Nouruzi_ASCL1 = msig$C2_CGP$NOURUZI_NEPC_ASCL1_TARGETS, NE_PCCAT_markers = head(na.omit(l2$NE), 50),
+  NE_PCCAT_NEPC_vs_CRPC = pccat_ne,
+  NE_Beltran13 = c("ASCL1", "SOX2", "NKX2-1", "FOXA2", "INSM1", "CHGA", "CHGB", "SYP", "NCAM1", "EZH2", "AURKA", "MYCN", "PCSK1"),
+  P53_core = p53_core, Hallmark_P53 = msig$H$HALLMARK_P53_PATHWAY, Hallmark_IFNa = msig$H$HALLMARK_INTERFERON_ALPHA_RESPONSE,
+  IFN_I = sig_env$immune_sigs$IFN_I, IFN_I_STING_tumour = c("IRF9", "STAT1", "IRF7", "OAS1", "STING1", "TMEM173", "B2M"),
+  MHC_I = sig_env$immune_sigs$MHC_I, MHC_II = sig_env$immune_sigs$MHC_II,
+  Tcell_inflamed_GEP = sig_env$immune_sigs$Tcell_inflamed_GEP,
+  Bone_TAM_TIM = c("FOLR2", "SIGLEC1", "LYVE1", "SPP1", "IL4R", "CD200R1", "CD101", "LYZ", "S100A9", "S100A12",
+                   "APOE", "TGFB1", "C1QA", "C1QB", "C1QC", "FN1", "MMP9", "IL1RN", "CD163", "CLEC7A", "TREM1",
+                   "FCN1", "CSTA", "VCAN", "PLAUR"),
+  Osteoclast = c("ACP5", "CTSK", "MMP9", "OSCAR", "CALCR", "TNFRSF11A", "DCSTAMP", "OCSTAMP", "NFATC1"))
+
+keep_aoi <- cd$response_group_neat != "Control" & cd$timepoint %in% tp_levels
+counts_all <- assay(se, "all_count"); counts_all <- counts_all[!grepl(artefact_re, rownames(counts_all)), ]
+
+stratum_data <- function(sg, tp, genes = NULL) {
+  idx <- which(keep_aoi & cd$segment_name == sg & cd$timepoint %in% tp); d <- cd[idx, ]
+  g <- if (is.null(genes)) intersect(uni[[paste0(code[sg], "__", tp)]]$g10, rownames(counts_all)) else genes
+  dge <- calcNormFactors(DGEList(counts_all[g, idx]))
+  meta <- d %>% select(subject_id, timepoint, study_batch, roi = any_of("roi")) %>%
+    left_join(pt %>% select(subject_id, response_group_neat, max_psa_change, psa_change_capped), by = "subject_id")
+  meta$psa <- meta$psa_change_capped / 50
+  list(dge = dge, meta = meta, lcpm = cpm(dge, log = TRUE, prior.count = 1))
+}
+feature_matrix <- function(lcpm) {
+  z <- t(scale(t(lcpm)))
+  gf <- t(lcpm[intersect(genes_f, rownames(lcpm)), , drop = FALSE])
+  pf <- sapply(progs, function(g) { g <- intersect(g, rownames(z)); if (length(g) >= 3) colMeans(z[g, , drop = FALSE]) else rep(NA_real_, ncol(z)) })
+  cbind(gf, pf)
+}
+fixdesign <- function(f, m) { X <- model.matrix(f, m); X[, qr(X)$pivot[seq_len(qr(X)$rank)], drop = FALSE] }
+
+```
+
+### A. Transcriptome-wide, patient-blocked
+For each stratum and contrast (PSA change; NR vs R with intermediate patients dropped), fit voom → `duplicateCorrelation` → voom with block → `duplicateCorrelation` → robust eBayes, with ~ x + batch. The null distribution of the number of genes at FDR < 0.05 comes from 200 patient-level shuffles of the outcome, refitted with the observed voom weights and consensus correlation. The permutation P is (1 + shuffles ≥ observed) / 201. π₁ is 1 − propTrueNull (local-FDR method). Concordance with the patient pseudobulk analysis (PSA contrast) is the Spearman correlation of gene-wise t statistics, the sign agreement among the top 500 pseudobulk genes and the overlap of the top 200 genes.
+
+```{r comp-26-aoi-level-02}
+## ---- A. transcriptome-wide AOI-level with patient blocking --------------------------------------
+pb_tw <- read.csv(out_path("C13_pseudobulk_LOQ", "transcriptome_wide_limma_all_strata.csv"))
+tw_rows <- list(); tw_genes <- list(); perm_rows <- list()
+for (sg in names(code)) for (tp in tp_levels) {
+  sid <- paste0(code[sg], "__", tp); s <- stratum_data(sg, tp); m <- s$meta; subj <- m$subject_id
+  for (ct in c("PSA", "NR")) {
+    keep <- if (ct == "NR") m$response_group_neat %in% c("Responder", "Non_Responder") else rep(TRUE, nrow(m))
+    mm <- m[keep, ]; dge <- s$dge[, keep]; sb <- subj[keep]
+    mm$x <- if (ct == "NR") as.integer(mm$response_group_neat == "Non_Responder") else mm$psa
+    f <- if (length(unique(mm$study_batch)) > 1) ~ x + study_batch else ~ x
+    X <- fixdesign(f, mm)
+    v <- voom(dge, X); dc <- duplicateCorrelation(v, X, block = sb)
+    v <- voom(dge, X, block = sb, correlation = dc$consensus); dc <- duplicateCorrelation(v, X, block = sb)
+    fit <- eBayes(lmFit(v, X, block = sb, correlation = dc$consensus), robust = TRUE)
+    tt <- topTable(fit, coef = "x", number = Inf, sort.by = "none")
+    ## permutation: shuffle the patient-level outcome across patients, keep the consensus correlation
+    pts <- unique(data.frame(subject_id = sb, x = mm$x))
+    perm <- unlist(mclapply(seq_len(N_PERM_TW), function(b) {
+      set.seed(1000 + b); px <- setNames(sample(pts$x), pts$subject_id); mp <- mm; mp$x <- px[sb]
+      Xp <- fixdesign(f, mp)
+      fp <- eBayes(lmFit(v, Xp, block = sb, correlation = dc$consensus), robust = TRUE)
+      sum(p.adjust(fp$p.value[, "x"], "BH") < 0.05)
+    }, mc.cores = MAX_WORKERS))
+    obs05 <- sum(tt$adj.P.Val < 0.05)
+    tw_rows[[paste(sid, ct)]] <- data.frame(stratum = sid, contrast = ct, n_aoi = nrow(mm), n_patients = length(unique(sb)),
+      n_genes = nrow(tt), consensus_cor = dc$consensus, fdr05 = obs05, fdr10 = sum(tt$adj.P.Val < 0.1),
+      pi1 = 1 - propTrueNull(tt$P.Value, method = "lfdr"))
+    perm_rows[[paste(sid, ct)]] <- data.frame(stratum = sid, contrast = ct, observed_fdr05 = obs05,
+      perm_median = median(perm), perm_95pct = unname(quantile(perm, 0.95)), perm_max = max(perm),
+      frac_perm_any = mean(perm > 0), perm_p = (1 + sum(perm >= obs05)) / (1 + N_PERM_TW))
+    tw_genes[[paste(sid, ct)]] <- tt %>% mutate(gene = rownames(tt), stratum = sid, contrast = ct) %>%
+      select(stratum, contrast, gene, logFC, t, P.Value, adj.P.Val)
+  }
+  message(sid, " transcriptome-wide done")
+}
+tw_tab <- bind_rows(tw_rows); perm_tab <- bind_rows(perm_rows); tw_genes <- bind_rows(tw_genes)
+## concordance with patient pseudobulk (PSA contrast)
+conc <- tw_genes %>% filter(contrast == "PSA") %>%
+  inner_join(pb_tw %>% select(stratum, gene, t_pb = t, logFC_pb = logFC, P_pb = P.Value), by = c("stratum", "gene")) %>%
+  group_by(stratum) %>% summarise(n_genes = n(), rho_t = cor(t, t_pb, method = "spearman"),
+    sign_agree_top500 = { o <- order(P_pb)[1:500]; mean(sign(t[o]) == sign(t_pb[o])) },
+    overlap_top200 = length(intersect(gene[order(P.Value)][1:200], gene[order(P_pb)][1:200])), .groups = "drop")
+write.csv(tw_tab, file.path(out_dir, "A_aoi_transcriptome_wide_summary.csv"), row.names = FALSE)
+write.csv(perm_tab, file.path(out_dir, "A_aoi_permutation_calibration.csv"), row.names = FALSE)
+write.csv(conc, file.path(out_dir, "A_aoi_vs_pseudobulk_concordance.csv"), row.names = FALSE)
+qs::qsave(tw_genes, file.path(out_dir, "A_aoi_transcriptome_wide_genes.qs"))
+
+```
+
+### B. Feature mixed models
+For every feature and stratum, fit feature ~ PSA + batch + (1 | patient) by REML (batch dropped when only one level is present). The patient-permutation P compares |β| with 500 refits after shuffling PSA change across patients. Also reported are the fit without batch 3 and, where the feature exists there, the matching patient-pseudobulk β, P and Spearman ρ from `comp_13b`. BH-FDR on the permutation P is computed within stratum. Per-AOI feature scores are saved for reuse.
+
+```{r comp-26-aoi-level-03}
+## ---- B. AOI-level mixed models for pre-specified features ---------------------------------------
+fit_lmm <- function(y, x, batch, subj) {
+  dd <- data.frame(y = y, x = x, batch = factor(batch), subj = factor(subj))[complete.cases(y, x), ]
+  f <- if (nlevels(droplevels(dd$batch)) > 1) y ~ x + batch + (1 | subj) else y ~ x + (1 | subj)
+  m <- suppressMessages(suppressWarnings(lmerTest::lmer(f, data = dd, REML = TRUE)))
+  s <- summary(m)$coefficients; c(beta = s["x", "Estimate"], se = s["x", "Std. Error"], p = s["x", "Pr(>|t|)"])
+}
+ft_rows <- list(); aoi_scores <- list()
+for (sg in names(code)) for (tp in tp_levels) {
+  sid <- paste0(code[sg], "__", tp); s <- stratum_data(sg, tp); m <- s$meta; F <- feature_matrix(s$lcpm)
+  aoi_scores[[sid]] <- cbind(data.frame(aoi = colnames(s$lcpm), stratum = sid), m, F)
+  pts <- unique(m[, c("subject_id", "psa")])
+  for (f in colnames(F)) {
+    y <- F[, f]; if (all(is.na(y))) next
+    ob <- tryCatch(fit_lmm(y, m$psa, m$study_batch, m$subject_id), error = function(e) c(NA, NA, NA))
+    if (is.na(ob[1])) next
+    pb <- unlist(mclapply(seq_len(N_PERM_FT), function(b) {
+      set.seed(5000 + b); px <- setNames(sample(pts$psa), pts$subject_id)
+      tryCatch(fit_lmm(y, px[m$subject_id], m$study_batch, m$subject_id)[1], error = function(e) NA)
+    }, mc.cores = MAX_WORKERS))
+    nb3 <- m$study_batch != "batch_3"
+    o3 <- tryCatch(fit_lmm(y[nb3], m$psa[nb3], m$study_batch[nb3], m$subject_id[nb3]), error = function(e) c(NA, NA, NA))
+    ft_rows[[paste(sid, f)]] <- data.frame(stratum = sid, feature = f, n_aoi = sum(!is.na(y)), n_patients = nrow(pts),
+      beta_aoi = ob[1], se_aoi = ob[2], p_aoi_lmm = ob[3],
+      p_aoi_perm = (1 + sum(abs(pb) >= abs(ob[1]), na.rm = TRUE)) / (1 + sum(!is.na(pb))),
+      beta_aoi_no_b3 = o3[1], p_aoi_no_b3 = o3[3])
+  }
+  message(sid, " feature LMMs done")
+}
+ft_tab <- bind_rows(ft_rows) %>% group_by(stratum) %>% mutate(fdr_aoi_perm = p.adjust(p_aoi_perm, "BH")) %>% ungroup()
+## compare with patient pseudobulk feature tests where the feature exists there
+pbf <- read.csv(out_path("C13_pseudobulk_LOQ", "feature_tests_pseudobulk.csv")) %>%
+  mutate(feature = recode(feature, Hallmark_androgen = "AR_Hallmark", Hallmark_P53 = "Hallmark_P53")) %>%
+  select(stratum, feature, beta_psa_pb = beta_psa, p_psa_pb = p_psa, rho_pb = rho, p_rho_pb = p_rho)
+ft_tab <- left_join(ft_tab, pbf, by = c("stratum", "feature"))
+write.csv(ft_tab, file.path(out_dir, "B_aoi_feature_lmm.csv"), row.names = FALSE)
+qs::qsave(bind_rows(aoi_scores), file.path(out_dir, "B_aoi_feature_scores.qs"))
+
+```
+
+### C. On-treatment change at AOI level
+For each compartment, restrict to patients with both Screening and Cycle1 AOIs and use the union of the two timepoints' LOQ gene universes. Fit feature ~ timepoint + (1 | patient) for the mean change and feature ~ timepoint × PSA + (1 | patient) for change that depends on response, with BH-FDR within compartment. The ten canonical p53 targets are added as single genes. The chunk ends by printing the key results for each part.
+
+```{r comp-26-aoi-level-04}
+## ---- C. AOI-level on-treatment change ------------------------------------------------------------
+ch_rows <- list(); gene_rows <- list()
+for (sg in names(code)) {
+  both <- intersect(cd$subject_id[keep_aoi & cd$segment_name == sg & cd$timepoint == "Screening"],
+                    cd$subject_id[keep_aoi & cd$segment_name == sg & cd$timepoint == "Cycle1"])
+  g <- union(uni[[paste0(code[sg], "__Screening")]]$g10, uni[[paste0(code[sg], "__Cycle1")]]$g10)
+  s <- stratum_data(sg, c("Screening", "Cycle1"), genes = intersect(g, rownames(counts_all)))
+  k <- s$meta$subject_id %in% both; m <- s$meta[k, ]; lc <- s$lcpm[, k]
+  m$tp <- factor(m$timepoint, c("Screening", "Cycle1"))
+  F <- feature_matrix(lc)
+  for (f in c(colnames(F), setdiff(intersect(p53_core, rownames(lc)), colnames(F)))) {
+    y <- if (f %in% colnames(F)) F[, f] else lc[f, ]
+    dd <- data.frame(y = y, tp = m$tp, psa = m$psa, subj = factor(m$subject_id))
+    a <- tryCatch(summary(suppressMessages(lmerTest::lmer(y ~ tp + (1 | subj), dd)))$coefficients["tpCycle1", ], error = function(e) rep(NA, 5))
+    b <- tryCatch(summary(suppressMessages(lmerTest::lmer(y ~ tp * psa + (1 | subj), dd)))$coefficients["tpCycle1:psa", ], error = function(e) rep(NA, 5))
+    ch_rows[[paste(sg, f)]] <- data.frame(segment = sg, feature = f, n_patients = length(both), n_aoi = nrow(m),
+      change = a[1], p_change = a[5], change_x_psa = b[1], p_change_x_psa = b[5])
+  }
+  message(sg, " on-treatment AOI-level done")
+}
+ch_tab <- bind_rows(ch_rows) %>% group_by(segment) %>%
+  mutate(fdr_change = p.adjust(p_change, "BH"), fdr_change_x_psa = p.adjust(p_change_x_psa, "BH")) %>% ungroup()
+write.csv(ch_tab, file.path(out_dir, "C_aoi_on_treatment_change.csv"), row.names = FALSE)
+
+options(width = 220)
+cat("\n==== A. AOI-level transcriptome-wide (patient-blocked) ====\n"); print(as.data.frame(tw_tab), row.names = FALSE)
+cat("\n==== A. permutation calibration ====\n"); print(as.data.frame(perm_tab), row.names = FALSE)
+cat("\n==== A. AOI vs pseudobulk concordance ====\n"); print(as.data.frame(conc), row.names = FALSE)
+cat("\n==== B. key features ====\n")
+print(as.data.frame(ft_tab %>% filter(feature %in% c("FOLH1", "AR_Hallmark", "B2M", "MHC_I", "IFN_I_STING_tumour", "NE_PCCAT_markers")) %>%
+  mutate(across(where(is.numeric), ~signif(.x, 2)))), row.names = FALSE)
+cat("\n==== C. on-treatment change (p53, IFN, MHC) ====\n")
+print(as.data.frame(ch_tab %>% filter(feature %in% c("P53_core", "Hallmark_IFNa", "MHC_I", "IFN_I_STING_tumour", "MDM2", "CDKN1A")) %>%
+  mutate(across(where(is.numeric), ~signif(.x, 2)))), row.names = FALSE)
+cat("R6 AOI-level complete.\n")
+```

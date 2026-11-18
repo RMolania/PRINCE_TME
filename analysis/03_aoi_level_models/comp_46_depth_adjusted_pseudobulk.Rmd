@@ -1,0 +1,92 @@
+---
+title: "Patient pseudobulk FOLH1 vs PSA change adjusted for AOI signal depth"
+subtitle: "PRINCE spatial transcriptomics: `comp_46_depth_adjusted_pseudobulk`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+An internal audit found that the manuscript's statement on AOI signal depth had no script or output behind it, so this script was added to make that analysis reproducible. For each compartment × timepoint pseudobulk stratum, signal depth is the patient mean of log(% genes above LOQ) over the AOIs that formed the pseudobulk. The script reports the Spearman correlation of *FOLH1* with signal depth and of signal depth with maximal PSA change. It then compares the primary patient-level model, *FOLH1* ~ PSA change (per 50%) + batch (as in `comp_13b`), with the same model plus signal depth.
+
+**Manuscript items supported**
+
+- Supplementary Table 99 (patient pseudobulk *FOLH1* vs PSA change with batch, before and after adjustment for signal depth; assembled by `comp_47_supp_tables_audit`)
+- Results: *FOLH1* section, signal-depth paragraph (correlation of *FOLH1* with signal depth in bone; P values before and after adjustment)
+
+**Pipeline step:** `./run_pipeline.sh --only 46_depth_adjusted_pseudobulk`. Approximate runtime: seconds.
+
+**Inputs**
+
+- `data/phase2_se_qc_filtered.qs`
+- `results/R1_loq/loq_gene_universes.qs`
+- `results/C13_pseudobulk_LOQ/pseudobulk_strata.qs`
+
+**Outputs**
+
+- `results/R20_depth_adjusted/FOLH1_depth_adjusted_pseudobulk.csv`
+
+**Depends on**: `comp_00b_bone_cohort`, `comp_13b_pseudobulk_loq`, `comp_16_loq_filter`
+
+## Analysis
+
+Header: why the script was added, the definition of patient signal depth and the two models compared.
+
+For each pseudobulk stratum that contains *FOLH1*, compute patient mean log signal depth from the non-control AOIs of that compartment and timepoint, and assert that every pseudobulk patient has a value. Fit *FOLH1* log-CPM ~ PSA change/50 (+ batch where more than one batch is present), with and without signal depth. Record β and P for the PSA term together with the two Spearman correlations, then write and print the table.
+
+```{r comp-46-depth-adjusted-pseudobulk-01}
+## ============================================================================
+## PRINCE -- R20: patient pseudobulk FOLH1 vs PSA change adjusted for AOI signal depth.
+## Audit finding: the manuscript's signal-depth sentence had no script/output behind it; this makes it reproducible.
+## Per segment x timepoint stratum (C13_pseudobulk_LOQ objects):
+##   depth = patient mean of log(% genes above LOQ) over the AOIs that formed the pseudobulk
+##   rho(FOLH1, depth), rho(depth, PSA change) at patient level;
+##   lm FOLH1 ~ psa + batch  (as comp_13b B)  vs  lm FOLH1 ~ psa + batch + depth
+## Outputs: results/R20_depth_adjusted/FOLH1_depth_adjusted_pseudobulk.csv
+## ============================================================================
+
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({ library(qs); library(SummarizedExperiment); library(dplyr) })
+setwd(PRINCE_DIR)
+out_dir <- file.path(COMP_DIR, "R20_depth_adjusted"); dir.create(out_dir, showWarnings = FALSE)
+se <- qs::qread("phase2_se_qc_filtered.qs"); cd <- as.data.frame(colData(se))
+loq <- qs::qread(file.path(COMP_DIR, "R1_loq", "loq_gene_universes.qs"))
+pbs <- qs::qread(out_path("C13_pseudobulk_LOQ", "pseudobulk_strata.qs"))
+seg <- c(CD45 = "CD45+", PSMA = "PSMA+", PanCKPSMA = "PanCK+PSMA-")
+cd$depth <- log(loq$aoi[rownames(cd), "pct_above_LOQ_std"])
+
+fit_lm <- function(y, x, batch, z = NULL) {
+  b <- droplevels(factor(batch)); d <- data.frame(y, x, b); if (!is.null(z)) d$z <- z
+  f <- paste("y ~ x", if (nlevels(b) > 1) "+ b" else "", if (!is.null(z)) "+ z" else "")
+  s <- summary(lm(as.formula(f), d))$coefficients; c(s["x", 1], s["x", 4])
+}
+sp <- function(a, b) { t <- suppressWarnings(cor.test(a, b, method = "spearman", exact = FALSE)); c(unname(t$estimate), t$p.value) }
+res <- list()
+for (sid in names(pbs)) {
+  p <- pbs[[sid]]; m <- p$meta; if (!"FOLH1" %in% rownames(p$lcpm)) next
+  sg <- seg[sub("__.*", "", sid)]; tp <- sub(".*__", "", sid)
+  dp <- cd %>% filter(segment_name == sg, timepoint == tp, response_group_neat != "Control") %>%
+    group_by(subject_id) %>% summarise(depth = mean(depth), .groups = "drop")
+  depth <- dp$depth[match(m$subject_id, dp$subject_id)]; stopifnot(!anyNA(depth))
+  y <- p$lcpm["FOLH1", ]; psa <- m$psa_change_capped / 50
+  a0 <- fit_lm(y, psa, m$study_batch); a1 <- fit_lm(y, psa, m$study_batch, depth)
+  r1 <- sp(y, depth); r2 <- sp(depth, m$max_psa_change)
+  res[[sid]] <- data.frame(stratum = sid, n = length(y), rho_FOLH1_depth = r1[1], p_FOLH1_depth = r1[2],
+    rho_depth_psa = r2[1], p_depth_psa = r2[2], beta_psa = a0[1], p_psa = a0[2], beta_psa_depth_adj = a1[1], p_psa_depth_adj = a1[2])
+}
+res <- bind_rows(res)
+write.csv(res, file.path(out_dir, "FOLH1_depth_adjusted_pseudobulk.csv"), row.names = FALSE)
+print(mutate(res, across(where(is.numeric), ~signif(.x, 2))), row.names = FALSE)
+```

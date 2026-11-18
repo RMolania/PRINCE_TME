@@ -1,0 +1,264 @@
+---
+title: "Per-stratum RUV-4 normalisation with k chosen on absolute batch variance"
+subtitle: "PRINCE spatial transcriptomics: `comp_02_normalize`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+Each of the nine compartment × timepoint strata (CD45⁺, PSMA⁺, PanCK⁺PSMA⁻ × Archival, Screening, Cycle1) is normalised separately, using patient AOIs only. Within a stratum, genes are kept if they are above the AOI LOQ in at least 10% of AOIs. Cross-hybridising probe families (USP17L, PRAMEF, NBPF, olfactory receptors) are removed. AOIs whose RLE median or IQR lies more than 3 robust z-units from the stratum are excluded as outliers.
+
+Batch is partly aliased with response group in this cohort, so the script uses RUV-4 rather than RUV-III. The negative controls are 2,000 singscore stable genes. The design matrix X protects both response group and standardised continuous PSA change, so the biological signal is not removed as unwanted variation. The number of factors k (1–8) is chosen on an absolute criterion: the gene-wise between-batch sum of squares, relative to k = 0. The relative top-PC R² was not used because it had earlier made PSMA⁺ correction look like a failure. The smallest k is chosen that reduces absolute batch variance to ≤ 60% while retaining ≥ 70% of the response sum of squares in informative positive-control markers (those with baseline F ≥ 2). Looser fallbacks are flagged MARGINAL.
+
+Control tissue-microarray AOIs are technical replicates. They are projected onto each stratum's unwanted factors only as a diagnostic of batch removal and are never analysed for biology. These RUV-4-normalised data feed the earlier AOI-level models. The manuscript's primary analysis is patient-level pseudobulk on the LOQ gene universe and is run in later scripts.
+
+**Manuscript items supported**
+
+- Supplementary Table 3 (per-stratum normalisation summary, written by comp_11)
+- Supplementary Fig. 5 (absolute versus relative batch metric and k selection in the nine strata; drawn by comp_11)
+- Methods: Reconciliation with earlier analyses and the standR workflow (RUV-4 AOI-level models)
+- Intermediate results used by comp_04, comp_05, comp_07, comp_10, comp_11 and later scripts
+
+**Pipeline step:** `./run_pipeline.sh --only 02_normalize`. Approximate runtime: minutes.
+
+**Inputs**
+
+- `data/phase2_se_qc_filtered.qs`
+- `results/C1_clinical/patient_table.qs`
+
+**Outputs**
+
+- `results/C2_normalization/normalized_strata.qs`
+- `results/C2_normalization/normalization_summary.csv`
+- `results/C2_normalization/k_sweep_all_strata.csv`
+- `results/C2_normalization/k_selection_all_strata.pdf`
+
+**Depends on**: `comp_00b_bone_cohort`, `comp_01_clinical`
+
+## Analysis
+
+Script header: the normalisation decisions applied here (outlier removal, artefact probes, RUV-4 with stable-gene controls, absolute batch criterion for k, positive-control check, control replicates as a diagnostic only).
+
+### Set-up and helper functions
+- Reads the QC-filtered bone-only object, the patient table and 2,000 singscore stable genes (the RUV negative controls).
+- Defines the artefact-probe pattern and compartment-specific positive-control markers (immune markers for CD45⁺; FOLH1, KLK3 and AR for PSMA⁺; keratins and EPCAM for PanCK⁺PSMA⁻).
+- Fixes the k range (1–8), the batch target (≤ 60% of baseline between-batch variance) and the signal floor (≥ 70% of baseline response sum of squares).
+- Helpers compute between-group and total sums of squares, per-gene response sums of squares, RLE outliers (|robust z| > 3 on per-AOI RLE median or IQR) and logCPM.
+- Identifies control-tissue AOIs and builds the grid of nine strata.
+
+```{r comp-02-normalize-01}
+## ============================================================================
+## PRINCE comprehensive analysis -- C2: re-normalization of all strata
+## (3 segments x Archival / Screening / Cycle1), applying the Phase 3d findings:
+##   * RLE outlier AOIs (|robust z| > 3 on per-AOI RLE median or IQR) removed first
+##   * artefact probe families (USP17L, PRAMEF, NBPF, olfactory receptors) removed
+##   * RUV-4, singscore stable genes as negative controls (chosen because the
+##     response group is aliased with batch in some strata); X protects response group + continuous PSA change
+##   * k chosen on ABSOLUTE batch variance (gene-wise between-study_batch SS), not the
+##     relative top-PC R2 that misled Phase 3 for PSMA+ (phase3d_psma_rootcause.R)
+##   * positive-control check = retained response SS (not the F ratio, which explodes
+##     when the baseline F is ~0)
+##   * diagnostic only: Control-tissue replicates projected onto each stratum's W
+## Intermediate AOIs are kept (needed for the continuous outcome); Control AOIs and
+## DiseaseProgression are not normalized here.
+## ============================================================================
+
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({
+  library(qs); library(SummarizedExperiment); library(dplyr)
+  library(ruv); library(edgeR); library(singscore); library(ggplot2)
+})
+setwd(PRINCE_DIR)
+check_ram_or_stop(20)
+
+se <- qs::qread("phase2_se_qc_filtered.qs")
+cd_full <- as.data.frame(colData(se))
+pt <- qs::qread(out_path("C1_clinical", "patient_table.qs"))
+stable_genes <- singscore::getStableGenes(n_stable = 2000)
+artefact_re <- "^(USP17L|PRAMEF|NBPF|OR[0-9]+[A-Z]+[0-9]+)"
+pos_ctrl_markers <- list(
+  "CD45+"       = c("PTPRC", "CD3D", "CD8A", "CD68"),
+  "PSMA+"       = c("FOLH1", "KLK3", "AR"),
+  "PanCK+PSMA-" = c("KRT8", "KRT18", "EPCAM", "KRT19")
+)
+K_RANGE <- 1:8
+BATCH_TARGET <- 0.60   # keep <= 60% of baseline absolute batch variance
+SIGNAL_MIN   <- 0.70   # keep >= 70% of baseline response SS in positive controls
+
+group_ss <- function(mat, g) {  # mat: AOIs x genes
+  g <- factor(g); n <- as.vector(table(g)); mu <- colMeans(mat)
+  gm <- rowsum(mat, g) / n
+  list(between = colSums(sweep(sweep(gm, 2, mu)^2, 1, n, `*`)),
+       total = colSums(sweep(mat, 2, mu)^2))
+}
+resp_ss <- function(mat, genes, resp) sapply(genes, function(g)
+  summary(aov(mat[, g] ~ resp))[[1]][1, "Sum Sq"])
+rle_outliers <- function(logcpm) {  # AOIs x genes
+  rle <- sweep(logcpm, 2, apply(logcpm, 2, median))
+  z <- function(v) (v - median(v)) / mad(v)
+  abs(z(apply(rle, 1, median))) > 3 | abs(z(apply(rle, 1, IQR))) > 3
+}
+to_logcpm <- function(counts) t(edgeR::cpm(counts, log = TRUE, prior.count = 0.5))
+
+## control-tissue replicates: logCPM on all genes, projected per stratum later
+ctrl_idx <- cd_full$response_group_neat == "Control"
+ctrl_cd <- cd_full[ctrl_idx, ]
+
+strata <- expand.grid(segment = c("CD45+", "PSMA+", "PanCK+PSMA-"),
+                      timepoint = c("Archival", "Screening", "Cycle1"), stringsAsFactors = FALSE)
+norm <- list(); summary_rows <- list(); sweep_all <- list()
+
+```
+
+### Normalisation of each stratum
+For each compartment × timepoint stratum:
+- filters genes (≥ 10% of AOIs above LOQ, artefact families removed), removes RLE outlier AOIs, refilters and computes logCPM;
+- builds X from response group (responder reference) and standardised capped PSA change, and keeps positive-control markers with baseline response F ≥ 2;
+- fits RUV-4 for k = 1–8 and records, relative to k = 0, the absolute between-batch variance, total variance, batch share and retained positive-control response signal;
+- selects the smallest k meeting both targets; failing that, the smallest k meeting the batch target with ≥ 50% signal, or the best batch reduction, flagged MARGINAL (or k = 1 with low confidence);
+- projects the control-tissue replicates of that compartment onto the stratum's factors through the control-gene loadings and reports their batch share before and after, as a diagnostic only.
+
+The adjusted matrix, unwanted factors W, chosen k, flag and removed outliers are stored per stratum. The summary table, the full k sweep and a k-selection plot are then written.
+
+```{r comp-02-normalize-02}
+for (s in seq_len(nrow(strata))) {
+  seg <- strata$segment[s]; tp <- strata$timepoint[s]
+  sid <- paste0(gsub("[^A-Za-z0-9]", "", seg), "__", tp)
+  cat("\n================", sid, "================\n")
+  idx <- cd_full$segment_name == seg & cd_full$timepoint == tp & !ctrl_idx
+  sub_se <- se[, idx]
+  sub_cd <- as.data.frame(colData(sub_se))
+
+  counts <- assay(sub_se, "all_count")
+  keep <- rowMeans(sweep(counts, 2, sub_cd$LOQ, `>`)) >= 0.10 & !grepl(artefact_re, rownames(counts))
+  counts <- counts[keep, ]
+
+  out <- rle_outliers(to_logcpm(counts))
+  cat("AOIs:", ncol(counts), "| RLE outliers removed:", sum(out), "\n")
+  counts <- counts[, !out]; sub_cd <- sub_cd[!out, ]
+  keep2 <- rowMeans(sweep(counts, 2, sub_cd$LOQ, `>`)) >= 0.10
+  counts <- counts[keep2, ]
+  logcpm <- to_logcpm(counts)
+
+  sub_cd <- left_join(sub_cd %>% mutate(.aoi = rownames(sub_cd)),
+                      pt[, c("subject_id", "psa_change_capped")], by = "subject_id")
+  rownames(sub_cd) <- sub_cd$.aoi
+  resp <- droplevels(factor(sub_cd$response_group_neat,
+                            levels = c("Responder", "Intermediate", "Non_Responder")))
+  X <- cbind(model.matrix(~resp)[, -1, drop = FALSE],
+             psa = as.numeric(scale(sub_cd$psa_change_capped)))
+  ctl <- colnames(logcpm) %in% stable_genes
+  batch <- sub_cd$study_batch
+  markers <- intersect(pos_ctrl_markers[[seg]], colnames(logcpm))
+  rss0 <- resp_ss(logcpm, markers, resp)
+  # only markers that actually carry a response signal at baseline are informative
+  F0 <- sapply(markers, function(g) summary(aov(logcpm[, g] ~ resp))[[1]][1, "F value"])
+  inf_markers <- markers[F0 >= 2]
+  gb0 <- group_ss(logcpm, batch)
+
+  fits <- list(); rows <- list()
+  rows[["0"]] <- data.frame(k = 0, batch_var_frac = 1, total_var_frac = 1,
+                            batch_share = sum(gb0$between) / sum(gb0$total), signal_retained = 1)
+  for (k in K_RANGE) {
+    fit <- tryCatch(ruv::RUV4(Y = logcpm, X = X, ctl = ctl, k = k), error = function(e) NULL)
+    if (is.null(fit)) next
+    Yadj <- logcpm - fit$W %*% fit$alpha
+    gb <- group_ss(Yadj, batch)
+    sig <- if (length(inf_markers)) mean(resp_ss(Yadj, inf_markers, resp) / rss0[inf_markers]) else NA
+    fits[[as.character(k)]] <- fit
+    rows[[as.character(k)]] <- data.frame(
+      k = k, batch_var_frac = sum(gb$between) / sum(gb0$between),
+      total_var_frac = sum(gb$total) / sum(gb0$total),
+      batch_share = sum(gb$between) / sum(gb$total), signal_retained = sig)
+  }
+  sw <- bind_rows(rows)
+  sig_ok <- is.na(sw$signal_retained) | sw$signal_retained >= SIGNAL_MIN
+  cand <- sw$k[sw$k >= 1 & sw$batch_var_frac <= BATCH_TARGET & sig_ok]
+  # tier 2: batch target met with a looser signal floor -- smallest such k, so the
+  # fallback never jumps to a high k that strips most of the total variance
+  cand2 <- sw$k[sw$k >= 1 & sw$batch_var_frac <= BATCH_TARGET &
+                  (is.na(sw$signal_retained) | sw$signal_retained >= 0.5)]
+  if (length(cand)) {
+    k_sel <- min(cand); flag <- "OK"
+  } else if (length(cand2)) {
+    k_sel <- min(cand2)
+    flag <- sprintf("MARGINAL: batch target met but signal retained %.0f%%",
+                    100 * sw$signal_retained[sw$k == k_sel])
+  } else {
+    ok <- sw[sw$k >= 1 & (is.na(sw$signal_retained) | sw$signal_retained >= 0.5), ]
+    if (nrow(ok)) {
+      k_sel <- ok$k[which.min(ok$batch_var_frac)]
+      flag <- sprintf("MARGINAL: best batch reduction only to %.0f%%", 100 * min(ok$batch_var_frac))
+    } else { k_sel <- 1; flag <- "NO defensible k; k=1 -- LOW CONFIDENCE" }
+  }
+  print(sw %>% mutate(across(-k, ~round(.x, 3))), row.names = FALSE)
+  cat("Chosen k =", k_sel, "|", flag, "| informative pos-ctrl markers:",
+      ifelse(length(inf_markers), paste(inf_markers, collapse = ","), "none"), "\n")
+
+  fit <- fits[[as.character(k_sel)]]
+  Yadj <- logcpm - fit$W %*% fit$alpha
+
+  ## Control replicates: project onto this stratum's W via the control-gene loadings
+  cc <- assay(se[colnames(logcpm), ctrl_idx & cd_full$segment_name == seg], "all_count")
+  ctrl_ok <- ncol(cc) >= 4 && length(unique(ctrl_cd$study_batch[ctrl_cd$segment_name == seg])) >= 2
+  ctrl_before <- ctrl_after <- NA
+  if (ctrl_ok) {
+    cb <- ctrl_cd$study_batch[ctrl_cd$segment_name == seg]
+    Yc <- to_logcpm(cc)
+    Yc_c <- sweep(Yc, 2, colMeans(logcpm))
+    a_ctl <- fit$alpha[, ctl, drop = FALSE]
+    Wc <- Yc_c[, ctl] %*% t(a_ctl) %*% solve(a_ctl %*% t(a_ctl))
+    Yc_adj <- Yc - Wc %*% fit$alpha
+    share <- function(m) { g <- group_ss(m, cb); sum(g$between) / sum(g$total) }
+    ctrl_before <- share(Yc); ctrl_after <- share(Yc_adj)
+  }
+  cat(sprintf("Control replicates batch share: before %.3f -> after %.3f\n", ctrl_before, ctrl_after))
+
+  sweep_all[[sid]] <- cbind(stratum = sid, sw)
+  norm[[sid]] <- list(segment = seg, timepoint = tp, cd = sub_cd, counts = counts,
+                      logcpm = logcpm, Yadj = Yadj, W = fit$W, k = k_sel, flag = flag,
+                      outliers_removed = names(out)[out], sweep = sw)
+  summary_rows[[sid]] <- data.frame(
+    stratum = sid, n_aoi = nrow(logcpm), n_outliers_removed = sum(out),
+    n_patients = length(unique(sub_cd$subject_id)),
+    n_NR_patients = length(unique(sub_cd$subject_id[sub_cd$response_group_neat == "Non_Responder"])),
+    n_genes = ncol(logcpm), k = k_sel,
+    batch_var_remaining = round(sw$batch_var_frac[sw$k == k_sel], 3),
+    total_var_remaining = round(sw$total_var_frac[sw$k == k_sel], 3),
+    signal_retained = round(sw$signal_retained[sw$k == k_sel], 3),
+    ctrl_batch_share_before = round(ctrl_before, 3), ctrl_batch_share_after = round(ctrl_after, 3),
+    flag = flag)
+}
+
+summ <- bind_rows(summary_rows)
+options(width = 220)
+cat("\n================ C2 SUMMARY ================\n"); print(summ, row.names = FALSE)
+
+sw_df <- bind_rows(sweep_all)
+p <- ggplot(sw_df, aes(k)) +
+  geom_line(aes(y = batch_var_frac, colour = "batch variance (abs, frac of k=0)")) +
+  geom_line(aes(y = total_var_frac, colour = "total variance (frac of k=0)")) +
+  geom_line(aes(y = signal_retained, colour = "pos-ctrl response SS retained")) +
+  geom_hline(yintercept = c(BATCH_TARGET, SIGNAL_MIN), linetype = "dotted") +
+  facet_wrap(~stratum, ncol = 3) + theme_bw() + labs(y = "fraction", colour = "") +
+  theme(legend.position = "bottom")
+ggsave(out_path("C2_normalization", "k_selection_all_strata.pdf"), p, width = 11, height = 9)
+
+qs::qsave(norm, out_path("C2_normalization", "normalized_strata.qs"), nthreads = 1)
+write.csv(summ, out_path("C2_normalization", "normalization_summary.csv"), row.names = FALSE)
+write.csv(sw_df, out_path("C2_normalization", "k_sweep_all_strata.csv"), row.names = FALSE)
+cat("\nC2 complete.\n")
+```

@@ -1,0 +1,221 @@
+---
+title: "Pre-treatment target expression and the on-treatment interferon response"
+subtitle: "PRINCE spatial transcriptomics: `comp_52_dose_interferon`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+This script asks whether pre-treatment PSMA target density sets the size of the on-treatment interferon, antigen-presentation and p53 response. The predictor is pre-treatment tumour *FOLH1*: the mean within-stratum z-score of pre-treatment PSMA⁺ and PanCK⁺PSMA⁻ pseudobulk. Own-compartment *FOLH1* and baseline PSMA-PET SUVmean are used as alternatives. The outcome is each patient's on-treatment programme score in the joint paired pseudobulk.
+
+The primary model is an ANCOVA, `post ~ pre + FOLH1`, which avoids the regression-to-the-mean problem of analysing raw change scores. It is calibrated by 5,000 permutations of *FOLH1* across patients, with BH correction across compartment × programme. Sensitivity analyses add batch, add the change in tumour fraction, library size and signal depth, and report the worst leave-one-out P. Two further analyses are done. A within-ROI analysis relates interferon and p53 scores in PanCK⁺PSMA⁻ and CD45⁺ AOIs to the *FOLH1* of the co-located PSMA⁺ AOI, splitting *FOLH1* into its patient mean and within-patient deviation. A bootstrap mediation analysis asks how much of the *FOLH1*–PSA association is carried by IFN-α induction.
+
+**Manuscript items supported**
+
+- Fig. 4h (pre-treatment tumour *FOLH1* versus baseline-adjusted on-treatment IFN-α and HLA class I; drawn by comp_41 from `A_paired_values.csv`)
+- Supplementary Table 103 (assembled by comp_47)
+- Results: *FOLH1* versus on-treatment interferon response, within-ROI and mediation analyses
+
+**Pipeline step:** `./run_pipeline.sh --only 52_dose_interferon`. Approximate runtime: several minutes (5,000 permutations per test, parallelised over MAX_WORKERS).
+
+**Inputs**
+
+- `data/phase2_se_qc_filtered.qs`
+- `results/C1_clinical/patient_table.qs`
+- `results/R1_loq/loq_gene_universes.qs`
+- `results/C13_pseudobulk_LOQ/pseudobulk_strata.qs`
+- `results/C3_deconvolution/deconvolution_proportions.qs`
+- `data/reference/msigdb_gene_sets.rds`
+- `data/reference/ProstateCancer_GeneSignatures.R`
+- `.build/comp_13b_pseudobulk_loq.R`
+
+**Outputs**
+
+- `results/R24_dose_interferon/A_folh1_vs_induction_ancova.csv`
+- `results/R24_dose_interferon/A_paired_values.csv`
+- `results/R24_dose_interferon/B_within_roi_crossfire.csv`
+- `results/R24_dose_interferon/C_mediation.csv`
+- `results/R24_dose_interferon/C_ctdna.csv`
+
+**Depends on**: `comp_01`, `comp_03b`, `comp_16`, `comp_13b`
+
+## Analysis
+
+### Does target density set the on-treatment response?
+
+The header defines the predictor, the outcome and analyses A–C.
+
+Loads the inputs and defines the eight programmes analysed: Hallmark IFN-α, IFN-I, IFN-I/STING, IFN-γ six-gene, MHC-I, HLA class I, Hallmark p53 and p53 core. The SpatialDecon tumour fraction and AOI signal depth are prepared for adjustment. The random seed is fixed.
+
+```{r comp-52-dose-interferon-01}
+## ============================================================================
+## PRINCE -- R24: does pre-treatment target density set the on-treatment interferon response?
+## Predictor: pre-treatment tumour FOLH1 = mean within-stratum z of Screening PSMA+ and PanCK+PSMA- pseudobulk FOLH1
+##            (own-compartment FOLH1 and baseline PSMA-PET SUVmean as alternatives).
+## Outcome: on-treatment programme score in paired patients (joint pseudobulk per compartment, union LOQ universe).
+##  A. per compartment x programme: Spearman with raw change; ANCOVA post ~ pre + FOLH1 (avoids regression to the mean);
+##     + batch; + change in tumour fraction, library size and signal depth; leave-one-out worst P; 5,000-permutation P
+##     (FOLH1 shuffled across patients); BH across compartment x programme.
+##  B. within-ROI crossfire: AOI-level IFN programme in PanCK+PSMA- and CD45+ AOIs vs FOLH1 of the co-located PSMA+ AOI,
+##     split into patient mean and within-patient (ROI) deviation; lmer with timepoint x within-patient FOLH1 interaction.
+##  C. mediation: FOLH1 -> IFN induction (ANCOVA-adjusted) -> PSA change / week-12 ctDNA; bootstrap indirect effect.
+## Outputs: results/R24_dose_interferon/
+## ============================================================================
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({ library(qs); library(SummarizedExperiment); library(dplyr); library(tidyr); library(edgeR); library(lme4); library(lmerTest); library(parallel) })
+setwd(PRINCE_DIR); RNGkind("L'Ecuyer-CMRG"); set.seed(2026)   # parallel-safe RNG: mclapply permutations are reproducible
+out_dir <- file.path(COMP_DIR, "R24_dose_interferon"); dir.create(out_dir, showWarnings = FALSE)
+se <- qs::qread("phase2_se_qc_filtered.qs"); cd <- as.data.frame(colData(se))
+pt <- qs::qread(out_path("C1_clinical", "patient_table.qs"))
+loq <- qs::qread(file.path(COMP_DIR, "R1_loq", "loq_gene_universes.qs")); uni <- loq$universes
+pbs <- qs::qread(out_path("C13_pseudobulk_LOQ", "pseudobulk_strata.qs"))
+dec <- qs::qread(out_path("C3_deconvolution", "deconvolution_proportions.qs"))
+msig <- readRDS(file.path(PMCC_DIR, "msigdb_gene_sets.rds"))
+sig_env <- new.env(); sys.source(file.path(PMCC_DIR, "ProstateCancer_GeneSignatures.R"), envir = sig_env)
+src <- readLines(file.path(CODE_DIR, "comp_13b_pseudobulk_loq.R")); eval(parse(text = src[grep("^apriori_genes <- ", src):grep("^posthoc_programmes <- ", src)]))
+progs <- list(Hallmark_IFNa = programmes$Hallmark_IFNa, IFN_I = programmes$IFN_I, IFN_I_STING = programmes$IFN_I_STING_tumour,
+              IFNG_6gene = sig_env$immune_sigs$IFNG_6gene_Ayers, MHC_I = programmes$MHC_I, HLA_I = c("HLA-A", "HLA-B", "HLA-C", "B2M", "TAP1", "TAP2", "TAPBP"),
+              Hallmark_P53 = programmes$Hallmark_P53, P53_core = c("CDKN1A", "MDM2", "DDB2", "PHLDA3", "GDF15", "TNFRSF10B", "SESN1", "ZMAT3", "RRM2B", "TP53I3"))
+seg <- c(CD45 = "CD45+", PSMA = "PSMA+", PanCKPSMA = "PanCK+PSMA-")
+artefact_re <- "^(USP17L|PRAMEF|NBPF|OR[0-9]+[A-Z]+[0-9]+)"
+raw <- assay(se, "all_count"); raw <- raw[!grepl(artefact_re, rownames(raw)), ]
+cd$depth <- log(loq$aoi[rownames(cd), "pct_above_LOQ_std"]); cd$lib <- colSums(assay(se, "all_count"))
+tf <- dec$lineage_bone[, "Epithelial_tumour"]
+logit <- function(p) { p <- pmin(pmax(p, 0.005), 0.995); log(p / (1 - p)) }
+score <- function(lc) { z <- t(scale(t(lc))); sapply(progs, function(g) { g <- intersect(g, rownames(z)); if (length(g) >= 3) colMeans(z[g, , drop = FALSE]) else rep(NA, ncol(z)) }) }
+
+```
+
+### Predictors
+
+*FOLH1* is standardised within each pre-treatment pseudobulk stratum. The tumour predictor is each patient's mean over the PSMA⁺ and PanCK⁺PSMA⁻ z-scores. Baseline PSMA-PET SUVmean is taken from the clinical table.
+
+```{r comp-52-dose-interferon-02}
+## ---- predictors ----
+zf <- function(sid) { p <- pbs[[sid]]; v <- p$lcpm["FOLH1", ]; setNames(as.numeric(scale(v)), p$meta$subject_id) }
+fz <- list(PSMA = zf("PSMA__Screening"), PanCKPSMA = zf("PanCKPSMA__Screening"), CD45 = zf("CD45__Screening"))
+allp <- unique(c(names(fz$PSMA), names(fz$PanCKPSMA)))
+folh1_tum <- sapply(allp, function(p) mean(c(fz$PSMA[p], fz$PanCKPSMA[p]), na.rm = TRUE))
+suv <- setNames(pt$PSMAPET_BL_SUVmean, pt$subject_id)
+
+```
+
+### A. Paired ANCOVA
+
+For each compartment, the joint pre/on-treatment pseudobulk is built and scored. The script also computes each patient's change in tumour fraction, library size and signal depth, their batch, and week-12 ctDNA detection (≥ 1%). For each programme it fits `post ~ pre + FOLH1`, with variants adding batch or composition and technical change, and alternative predictors (own-compartment *FOLH1*, SUVmean). It also records the worst leave-one-out P and a 5,000-permutation P for the *FOLH1* t statistic. BH correction is applied to the permutation P values across all tests. The per-patient values are kept for plotting.
+
+```{r comp-52-dose-interferon-03}
+## ---- A. paired ANCOVA ----
+A <- list(); paired <- list()
+for (sg in names(seg)) {
+  s0 <- paste0(sg, "__Screening"); s1 <- paste0(sg, "__Cycle1")
+  pts <- intersect(pbs[[s0]]$meta$subject_id, pbs[[s1]]$meta$subject_id)
+  g <- intersect(union(uni[[s0]]$g10, uni[[s1]]$g10), rownames(raw))
+  idx <- which(cd$segment_name == seg[sg] & cd$timepoint %in% c("Screening", "Cycle1") & cd$subject_id %in% pts & cd$response_group_neat != "Control")
+  key <- paste(cd$subject_id[idx], cd$timepoint[idx]); cnt <- t(rowsum(t(raw[g, idx]), key))
+  lc <- cpm(calcNormFactors(DGEList(cnt)), log = TRUE, prior.count = 1); F <- score(lc)
+  cv <- cd[idx, ] %>% mutate(key = key, tf = tf[rownames(cd)[idx]]) %>% group_by(key) %>%
+    summarise(tfw = weighted.mean(tf, lib), depth = mean(depth), batch = first(study_batch), .groups = "drop")
+  cv <- cv[match(colnames(lc), cv$key), ]
+  pid <- sub(" .*", "", colnames(lc)); tp <- sub(".* ", "", colnames(lc))
+  at <- function(x, t) setNames(x[tp == t], pid[tp == t])[pts]
+  base <- data.frame(patient = pts, d_tf = at(logit(cv$tfw), "Cycle1") - at(logit(cv$tfw), "Screening"),
+                     d_lib = at(log(colSums(cnt))[colnames(lc)], "Cycle1") - at(log(colSums(cnt))[colnames(lc)], "Screening"),
+                     d_depth = at(cv$depth, "Cycle1") - at(cv$depth, "Screening"), batch = factor(at(cv$batch, "Cycle1")),
+                     folh1 = folh1_tum[pts], folh1_own = fz[[sg]][pts], suv = suv[pts],
+                     psa = pt$max_psa_change[match(pts, pt$subject_id)], ctdna_w12 = as.integer(pt$ctDNA_C5D1[match(pts, pt$subject_id)] >= 0.01))
+  for (f in names(progs)) { if (all(is.na(F[, f]))) next
+    d <- cbind(base, pre = at(F[, f], "Screening"), post = at(F[, f], "Cycle1")); d$delta <- d$post - d$pre
+    paired[[paste(sg, f)]] <- mutate(d, segment = seg[sg], programme = f)
+    cf <- function(fm, dd = d, term = "folh1") { s <- tryCatch(summary(lm(fm, dd))$coefficients, error = function(e) NULL); if (is.null(s) || !term %in% rownames(s)) c(NA, NA, NA) else s[term, c(1, 3, 4)] }
+    nb <- nlevels(droplevels(d$batch)) > 1
+    a0 <- cf(post ~ pre + folh1); a1 <- if (nb) cf(post ~ pre + folh1 + batch) else a0; a2 <- cf(post ~ pre + folh1 + d_tf + d_lib + d_depth)
+    own <- cf(post ~ pre + folh1_own, term = "folh1_own"); sv <- cf(post ~ pre + suv, term = "suv")
+    loo <- max(sapply(seq_len(nrow(d)), function(i) cf(post ~ pre + folh1, d[-i, ])[3]), na.rm = TRUE)
+    ok <- complete.cases(d[, c("pre", "post", "folh1")]); dd <- d[ok, ]
+    tobs <- a0[2]; tperm <- unlist(mclapply(1:5000, function(b) { dp <- dd; dp$folh1 <- sample(dp$folh1); cf(post ~ pre + folh1, dp)[2] }, mc.cores = MAX_WORKERS))
+    r <- suppressWarnings(cor.test(d$delta, d$folh1, method = "spearman", exact = FALSE))
+    A[[paste(sg, f)]] <- data.frame(segment = seg[sg], programme = f, n = sum(ok), rho_delta_folh1 = unname(r$estimate), p_rho = r$p.value,
+      beta_ancova = a0[1], p_ancova = a0[3], p_perm = (1 + sum(abs(tperm) >= abs(tobs), na.rm = TRUE)) / (1 + sum(!is.na(tperm))),
+      p_batch = a1[3], p_adj_tf_lib_depth = a2[3], p_loo_worst = loo, beta_own_folh1 = own[1], p_own_folh1 = own[3], beta_suv = sv[1], p_suv = sv[3])
+  }
+}
+A <- bind_rows(A) %>% mutate(fdr_perm = p.adjust(p_perm, "BH"))
+paired <- bind_rows(paired)
+
+```
+
+### B. Within-ROI analysis
+
+AOI-level scores are computed in each stratum. Each PanCK⁺PSMA⁻ or CD45⁺ AOI is linked to the *FOLH1* of the PSMA⁺ AOI in the same ROI, which is then split into its patient mean (between) and the ROI deviation (within). Mixed models `score ~ timepoint × (within + between) + (1 | patient)` are fitted with Kenward–Roger P values. Separate fits at each timepoint are also reported.
+
+```{r comp-52-dose-interferon-04}
+## ---- B. within-ROI crossfire (AOI level) ----
+aoi_sc <- list()
+for (sgc in names(seg)) for (tp in c("Screening", "Cycle1")) {
+  sid <- paste0(sgc, "__", tp); idx <- which(cd$segment_name == seg[sgc] & cd$timepoint == tp & cd$response_group_neat != "Control")
+  g <- intersect(uni[[sid]]$g10, rownames(raw)); lc <- cpm(calcNormFactors(DGEList(raw[g, idx])), log = TRUE, prior.count = 1)
+  aoi_sc[[sid]] <- data.frame(aoi = colnames(lc), patient = cd$subject_id[idx], timepoint = tp, segment = seg[sgc], roi = paste(cd$subject_id[idx], tp, cd$roi_name[idx]),
+                              score(lc)[, c("Hallmark_IFNa", "IFN_I", "IFN_I_STING", "P53_core")], FOLH1 = if ("FOLH1" %in% rownames(lc)) lc["FOLH1", ] else NA)
+}
+aoi_sc <- bind_rows(aoi_sc)
+psma_roi <- aoi_sc %>% filter(segment == "PSMA+") %>% group_by(roi) %>% summarise(folh1_roi = mean(FOLH1), .groups = "drop")
+B <- list()
+for (tg in c("PanCK+PSMA-", "CD45+")) for (f in c("Hallmark_IFNa", "IFN_I", "IFN_I_STING", "P53_core")) {
+  d <- aoi_sc %>% filter(segment == tg) %>% inner_join(psma_roi, by = "roi") %>% group_by(patient, timepoint) %>%
+    mutate(f_b = mean(folh1_roi), f_w = folh1_roi - mean(folh1_roi), n_roi = n_distinct(roi)) %>% ungroup() %>% mutate(y = .data[[f]], post = as.integer(timepoint == "Cycle1"))
+  d <- d[!is.na(d$y), ]
+  fit <- tryCatch(summary(lmerTest::lmer(y ~ post * (f_w + f_b) + (1 | patient), d), ddf = "Kenward-Roger")$coefficients, error = function(e) NULL)
+  get <- function(t) if (!is.null(fit) && t %in% rownames(fit)) fit[t, c(1, 5)] else c(NA, NA)
+  sep <- lapply(c("Screening", "Cycle1"), function(t) { dt <- d[d$timepoint == t, ]
+    s <- tryCatch(summary(lmerTest::lmer(y ~ f_w + f_b + (1 | patient), dt), ddf = "Kenward-Roger")$coefficients, error = function(e) NULL)
+    if (is.null(s)) c(NA, NA, NA, NA) else c(s["f_w", c(1, 5)], s["f_b", c(1, 5)]) })
+  B[[paste(tg, f)]] <- data.frame(target_segment = tg, programme = f, n_aoi = nrow(d), n_roi = n_distinct(d$roi), n_pat = n_distinct(d$patient),
+    pre_beta_within = sep[[1]][1], pre_p_within = sep[[1]][2], on_beta_within = sep[[2]][1], on_p_within = sep[[2]][2],
+    pre_beta_between = sep[[1]][3], pre_p_between = sep[[1]][4], on_beta_between = sep[[2]][3], on_p_between = sep[[2]][4],
+    interaction_within_beta = get("post:f_w")[1], interaction_within_p = get("post:f_w")[2], interaction_between_beta = get("post:f_b")[1], interaction_between_p = get("post:f_b")[2])
+}
+B <- bind_rows(B)
+
+```
+
+### C. Mediation
+
+IFN-α induction is defined as the standardised residual of on-treatment on pre-treatment score, averaged over the two tumour compartments. The path *FOLH1* → induction → PSA change is decomposed into a, b, direct, total and indirect (a × b) effects, with 5,000 bootstrap resamples for percentile intervals. Induction is also compared by week-12 ctDNA detection (Wilcoxon), when at least eight patients have ctDNA data. All tables are written.
+
+```{r comp-52-dose-interferon-05}
+## ---- C. mediation: FOLH1 -> IFN-a induction (ANCOVA residual, tumour composite) -> PSA change ----
+ind <- paired %>% filter(programme == "Hallmark_IFNa", segment %in% c("PSMA+", "PanCK+PSMA-")) %>% group_by(segment) %>%
+  mutate(r = residuals(lm(post ~ pre, na.action = na.exclude)), rz = as.numeric(scale(r))) %>% ungroup() %>%
+  group_by(patient) %>% summarise(ifn_ind = mean(rz, na.rm = TRUE), folh1 = first(folh1), psa = first(psa), ctdna = first(ctdna_w12), .groups = "drop") %>% filter(complete.cases(ifn_ind, folh1, psa))
+med <- function(d) { a <- coef(lm(ifn_ind ~ folh1, d))[2]; m <- coef(lm(psa ~ ifn_ind + folh1, d)); c(a = unname(a), b = unname(m["ifn_ind"]), direct = unname(m["folh1"]), total = unname(coef(lm(psa ~ folh1, d))[2]), indirect = unname(a * m["ifn_ind"])) }
+mo <- med(ind); bs <- t(replicate(5000, med(ind[sample(nrow(ind), replace = TRUE), ])))
+C <- data.frame(n = nrow(ind), term = names(mo), estimate = mo, lo = apply(bs, 2, quantile, 0.025, na.rm = TRUE), hi = apply(bs, 2, quantile, 0.975, na.rm = TRUE))
+C2 <- if (sum(!is.na(ind$ctdna)) >= 8) data.frame(test = "IFN-a induction by week-12 ctDNA (detected vs not), Wilcoxon",
+  n_detected = sum(ind$ctdna %in% 1), n_undetected = sum(ind$ctdna %in% 0),
+  p = tryCatch(wilcox.test(ind$ifn_ind[ind$ctdna %in% 1], ind$ifn_ind[ind$ctdna %in% 0], exact = FALSE)$p.value, error = function(e) NA)) else NULL
+
+write.csv(A, file.path(out_dir, "A_folh1_vs_induction_ancova.csv"), row.names = FALSE)
+write.csv(paired, file.path(out_dir, "A_paired_values.csv"), row.names = FALSE)
+write.csv(B, file.path(out_dir, "B_within_roi_crossfire.csv"), row.names = FALSE)
+write.csv(C, file.path(out_dir, "C_mediation.csv"), row.names = FALSE)
+if (!is.null(C2)) write.csv(C2, file.path(out_dir, "C_ctdna.csv"), row.names = FALSE)
+options(width = 230); f2 <- function(x) as.data.frame(mutate(x, across(where(is.numeric), ~signif(.x, 2))))
+cat("\n==== A ====\n"); print(f2(A), row.names = FALSE)
+cat("\n==== B ====\n"); print(f2(B), row.names = FALSE)
+cat("\n==== C ====\n"); print(f2(C), row.names = FALSE); if (!is.null(C2)) print(f2(C2), row.names = FALSE)
+cat("R24 complete.\n")
+```

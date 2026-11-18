@@ -1,0 +1,79 @@
+---
+title: "Supplementary Tables, v3 additions (S23–S37)"
+subtitle: "PRINCE spatial transcriptomics: `comp_25_supp_tables_v3`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+Extends the cumulative Supplementary Tables workbook. It loads the v2 workbook written by `comp_15_supp_tables_v2` and appends one sheet per v3 analysis: the negative-probe LOQ gene universes, the primary patient-level feature and paired-induction tests on the LOQ gene universe, p53 target induction, the SpatialDecon–BayesPrism comparison, the reconciliation of earlier NEPC/purity findings, external signatures and the standR arm. Each sheet has its caption in row 1 and the data from row 3.
+
+The workbook is built up step by step (`comp_15` → `comp_25` → `comp_29` → `comp_42` → `comp_47`). The sheets added here are carried unchanged into the final workbook, released as Supplementary_Tables_v6.xlsx.
+
+**Manuscript items supported**
+
+- Supplementary Tables 23–37 (sheets S23_LOQ_summary to S37_standR_perm)
+- Methods: Background and gene universe (S23–S26); Deconvolution (S27–S29); Reconciliation with earlier analyses and the standR workflow (S30–S33, S36, S37); Externally defined signatures (S34, S35)
+
+**Pipeline step:** `./run_pipeline.sh --only 25_supp_tables_v3`. Approximate runtime: seconds.
+
+**Inputs**
+
+- `results/Manuscript_v2/Supplementary_Tables_v2.xlsx`
+- `results/R1_loq/loq_filter_summary.csv`
+- `results/C13_pseudobulk_LOQ/feature_tests_pseudobulk.csv`
+- `results/C13_pseudobulk_LOQ/paired_induction_apriori_sets.csv`
+- `results/Manuscript_v3/p53_core_target_paired_induction_LOQ.csv`
+- `results/R2_deconv_compare/{1_control_replicate_consistency,3_marker_concordance,4_cross_method_agreement}.csv`
+- `results/R3_nepc_purity/{B_pseudobulk_de_by_covariates,B_deck_genes_by_covariates,C_permutation_calibration,D_purity_diagnostics,E_nepc_pet_reproduction,external_signatures_tests}.csv`
+- `results/R5_standR/{standR_vs_primary_summary,standR_permutation_calibration}.csv`
+
+**Outputs**
+
+- `results/Manuscript_v3/Supplementary_Tables_v3.xlsx`
+
+**Depends on**: `comp_15_supp_tables_v2`, `comp_16_loq_filter`, `comp_13b_pseudobulk_loq`, `comp_21_figures_v3`, `comp_19_deconv_compare`, `comp_18_nepc_purity_reconcile`, `comp_20_external_ne_signatures`, `comp_22_standR_arm`, `comp_23_standR_permutation`
+
+## Analysis
+
+Load the v2 workbook, define a helper that appends a CSV as a new captioned sheet, add sheets S23–S37 in order and save the v3 workbook. S24 and S25 are the primary patient-pseudobulk analyses on the LOQ gene universe; S30–S33 are the patient-level reconciliation of the earlier AOI-level findings (covariate sets, named genes, permutation calibration, ESTIMATE purity diagnostics); S36–S37 are the standR arm and its permutation calibration.
+
+```{r comp-25-supp-tables-v3-01}
+## PRINCE manuscript v3 -- Supplementary Tables: v2 workbook + v3 analyses (LOQ background,
+## deconvolution comparison, NEPC/purity reconciliation, external signatures, standR arm).
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages(library(openxlsx))
+wb <- loadWorkbook(file.path(COMP_DIR, "Manuscript_v2", "Supplementary_Tables_v2.xlsx"))
+add <- function(name, file, desc) { df <- read.csv(file); addWorksheet(wb, name); writeData(wb, name, desc, startRow = 1); writeData(wb, name, df, startRow = 3) }
+p <- function(...) file.path(COMP_DIR, ...)
+add("S23_LOQ_summary", p("R1_loq", "loq_filter_summary.csv"), "Table S23. Negative-probe LOQ (geomean x geoSD^2) and gene universes per stratum.")
+add("S24_LOQ_primary_features", p("C13_pseudobulk_LOQ", "feature_tests_pseudobulk.csv"), "Table S24. PRIMARY (v3): patient pseudobulk feature tests on the LOQ gene universe.")
+add("S25_LOQ_paired", p("C13_pseudobulk_LOQ", "paired_induction_apriori_sets.csv"), "Table S25. PRIMARY (v3): paired Screening->Cycle1 programme change, LOQ genes.")
+add("S26_p53_LOQ", p("Manuscript_v3", "p53_core_target_paired_induction_LOQ.csv"), "Table S26. Paired induction of canonical p53 targets, LOQ genes.")
+add("S27_deconv_replicates", p("R2_deconv_compare", "1_control_replicate_consistency.csv"), "Table S27. SpatialDecon vs BayesPrism: technical-replicate consistency.")
+add("S28_deconv_markers", p("R2_deconv_compare", "3_marker_concordance.csv"), "Table S28. SpatialDecon vs BayesPrism: marker concordance.")
+add("S29_deconv_agreement", p("R2_deconv_compare", "4_cross_method_agreement.csv"), "Table S29. SpatialDecon vs BayesPrism: cross-method agreement.")
+add("S30_purity_DE", p("R3_nepc_purity", "B_pseudobulk_de_by_covariates.csv"), "Table S30. Patient-level DE gene counts under covariate sets (none/batch/purity/tumour fraction).")
+add("S31_named_genes", p("R3_nepc_purity", "B_deck_genes_by_covariates.csv"), "Table S31. Earlier named genes under covariate sets.")
+add("S32_permutation", p("R3_nepc_purity", "C_permutation_calibration.csv"), "Table S32. Patient-level permutation calibration of DE counts.")
+add("S33_purity_diag", p("R3_nepc_purity", "D_purity_diagnostics.csv"), "Table S33. ESTIMATE purity diagnostics.")
+add("S34_NEPC_PET", p("R3_nepc_purity", "E_nepc_pet_reproduction.csv"), "Table S34. Reproduction of the NEPC vs PSMA-PET association.")
+add("S35_external_sigs", p("R3_nepc_purity", "external_signatures_tests.csv"), "Table S35. Externally defined NE and AR signatures vs outcomes.")
+add("S36_standR", p("R5_standR", "standR_vs_primary_summary.csv"), "Table S36. standR workflow arm vs patient-level primary.")
+add("S37_standR_perm", p("R5_standR", "standR_permutation_calibration.csv"), "Table S37. standR workflow calibration by patient-label permutation.")
+saveWorkbook(wb, file.path(COMP_DIR, "Manuscript_v3", "Supplementary_Tables_v3.xlsx"), overwrite = TRUE)
+cat("Supplementary_Tables_v3.xlsx written\n")
+```

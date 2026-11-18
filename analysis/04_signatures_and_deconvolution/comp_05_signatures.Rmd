@@ -1,0 +1,235 @@
+---
+title: "Signature and pathway-activity scoring with patient mixed models"
+subtitle: "PRINCE spatial transcriptomics: `comp_05_signatures`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+Within each RUV-4-normalised stratum, every AOI is scored for a broad panel of gene programmes:
+- immune signatures;
+- prostate-lineage programmes (a 13-gene NEPC-up set, a five-gene AR panel, Hallmark androgen response);
+- programmes named in the text of a published bone-metastasis study (CAN-26-2386: IFN-I/STING, HLA class I and II, bone TAM/TIM, DC activation, checkpoints), using only the genes named in that text;
+- bone-remodelling sets (osteoclast, osteoblast, a four-gene remodelling module);
+- MSigDB Hallmark and Reactome senescence sets;
+- PCCAT L3 cell-state markers;
+- PROGENy pathway activities;
+- selected single genes (FOLH1, CD276, B2M, CD274 and others).
+
+Gene sets are scored with singscore as the primary method and with the mean z-score as a check.
+
+Each score is related to outcome by two mixed models: score ~ PSA change (per 50%) + batch + (1 | patient), and score ~ non-responder + batch + (1 | patient) with intermediate patients excluded. FDR is controlled within stratum × collection. An association is called method-concordant when singscore and mean z-score give the same sign with P < 0.05. PSMA⁺ Screening and all Cycle1 strata are flagged as low confidence. The per-AOI scores saved here are reused by the crosstalk, outcome-model and first-set figure scripts.
+
+**Manuscript items supported**
+
+- Supplementary Table 6 (programme score versus outcome, all strata, singscore and z-score), written to the workbook by comp_11
+- Methods: Reconciliation with earlier analyses and the standR workflow (earlier AOI-level programme models)
+- Intermediate results used by comp_07, comp_08, comp_10, comp_11 and later scripts (per-AOI scores)
+
+**Pipeline step:** `./run_pipeline.sh --only 05_signatures`. Approximate runtime: minutes.
+
+**Inputs**
+
+- `results/C2_normalization/normalized_strata.qs`
+- `results/C1_clinical/patient_table.qs`
+- `data/reference/ProstateCancer_GeneSignatures.R`
+- `data/reference/msigdb_gene_sets.rds`
+- `data/reference/celltype_markers_AllLevels.xlsx`
+
+**Outputs**
+
+- `results/C5_signatures/per_AOI_singscores.qs`
+- `results/C5_signatures/signature_associations_all.csv`
+- `results/C5_signatures/focus_programmes_NR_vs_R_heatmap.pdf`
+
+**Depends on**: `comp_01_clinical`, `comp_02_normalize`
+
+## Analysis
+
+Script header: the gene-set collections, the scoring methods, the two outcome models and the concordance rule. CollecTRI transcription-factor activity was not run because it needs online resources.
+
+Sources the shared set-up, loads packages, and reads the normalised strata and the patient table.
+
+```{r comp-05-signatures-01}
+## ============================================================================
+## PRINCE comprehensive analysis -- C5: signature / pathway-activity scoring
+## Per stratum (C2 RUV-4-normalised logCPM), per AOI:
+##   * singscore (primary) and mean-z-score (secondary method) for
+##       - immune_sigs (28 sets, data/reference/ProstateCancer_GeneSignatures.R)
+##       - prostate lineage: NEPC-up, AR panel (phase8_nepc_longitudinal.R)
+##       - CAN-26-2386-derived named-gene programmes (IFN-I/STING, HLA, bone TAM, DC
+##         activation; genes named in that paper's text -- not its full supp. lists)
+##       - bone remodelling (osteoclast / osteoblast / Phase-interaction module)
+##       - MSigDB Hallmark (50) + Reactome senescence / SASP
+##       - PCCAT L3 cell states (top 50 markers each, celltype_markers_AllLevels.xlsx)
+##   * PROGENy pathway activities (14)
+##   * key single genes (FOLH1, CD276, B2M, CD274, ...)
+## Models: score ~ psa_change(per 50%) + study_batch + (1|patient), and
+##         score ~ NR + study_batch + (1|patient) (Intermediate excluded).
+## FDR within stratum x collection x outcome. Concordance = same sign and p<0.05 in
+## both scoring methods. (TF activity via CollecTRI skipped: needs OmnipathR/internet.)
+## ============================================================================
+
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({
+  library(qs); library(dplyr); library(tidyr); library(singscore); library(lmerTest)
+  library(progeny); library(readxl); library(ggplot2)
+})
+setwd(PRINCE_DIR)
+check_ram_or_stop(20)
+
+norm <- qs::qread(out_path("C2_normalization", "normalized_strata.qs"), nthreads = 1)
+pt <- qs::qread(out_path("C1_clinical", "patient_table.qs"))
+
+```
+
+### Gene-set collections
+Loads the curated immune signatures, the MSigDB collections and the top 50 PCCAT L3 markers per cell state. It then assembles the collections described above and the list of single genes to report.
+
+```{r comp-05-signatures-02}
+## ---- gene sets ---------------------------------------------------------------------
+sig_env <- new.env(); sys.source(file.path(PMCC_DIR, "ProstateCancer_GeneSignatures.R"), envir = sig_env)
+msig <- readRDS(file.path(PMCC_DIR, "msigdb_gene_sets.rds"))
+l3 <- read_excel(file.path(PMCC_DIR, "celltype_markers_AllLevels.xlsx"), sheet = "L3")
+pccat_l3 <- lapply(as.list(l3[1:50, -1]), function(g) unique(na.omit(g)))
+
+sets <- list(
+  immune = sig_env$immune_sigs,
+  lineage = list(
+    NEPC_up = c("ASCL1", "SOX2", "NKX2-1", "FOXA2", "INSM1", "CHGA", "CHGB", "SYP", "NCAM1",
+                "EZH2", "AURKA", "MYCN", "PCSK1"),
+    AR_panel = c("AR", "KLK3", "FOLH1", "NKX3-1", "HOXB13"),
+    Hallmark_androgen = msig$H$HALLMARK_ANDROGEN_RESPONSE),
+  paper_CAN26 = list(
+    IFN_I_STING_tumour = c("IRF9", "STAT1", "IRF7", "OAS1", "STING1", "TMEM173", "B2M"),
+    HLA_I = c("HLA-A", "HLA-B", "HLA-C", "B2M"),
+    HLA_II = c("HLA-DRA", "HLA-DRB1", "HLA-DPA1", "HLA-DPB1", "CD74"),
+    Bone_TAM_TIM = c("FOLR2", "SIGLEC1", "LYVE1", "SPP1", "IL4R", "CD200R1", "CD101", "LYZ",
+                     "S100A9", "S100A12", "APOE", "TGFB1", "C1QA", "C1QB", "C1QC", "FN1", "MMP9",
+                     "IL1RN", "CD163", "CLEC7A", "TREM1", "FCN1", "CSTA", "VCAN", "PLAUR"),
+    DC_activation = c("LAMP3", "FSCN1", "CCL19", "CCL21", "IL33", "CD80", "CD40", "CCR7"),
+    Checkpoints_lost_in_bone = c("CD274", "PDCD1", "LAG3", "CTLA4", "TNFRSF9")),
+  bone = list(
+    Osteoclast = c("ACP5", "CTSK", "MMP9", "OSCAR", "CALCR", "TNFRSF11A", "DCSTAMP", "OCSTAMP", "NFATC1"),
+    Osteoblast = c("RUNX2", "SP7", "BGLAP", "ALPL", "COL1A1", "IBSP", "SPP1", "SPARC", "PHEX", "DMP1"),
+    Bone_remodel_module = c("IBSP", "CTSK", "MMP3", "SMAD7")),
+  hallmark = c(msig$H, msig$C2_CP_REAC[grep("SENESCEN", names(msig$C2_CP_REAC))]),
+  pccat_L3 = pccat_l3)
+single_genes <- c("FOLH1", "CD276", "B2M", "CD274", "HLA-A", "STING1", "IRF9", "CHGA", "ERG",
+                  "AR", "KLK3", "SSTR2", "MKI67", "CTSK", "IBSP")
+
+```
+
+### Scoring and models
+`fit_models()` fits score ~ psa + study_batch + (1 | patient) on all patients, and score ~ NR + study_batch + (1 | patient) on responders and non-responders; it returns estimate, s.e. and Satterthwaite P. For each stratum, the RUV-adjusted expression is ranked, and singscore and mean z-scores are computed for every set with at least three genes present. PROGENy activities (top 100 genes) and single-gene expression are added; for these, the two methods share the same value. Per-AOI singscores are stored with patient, response, PSA change, batch and ROI.
+
+```{r comp-05-signatures-03}
+## ---- scoring + models --------------------------------------------------------------
+fit_models <- function(y, d) {
+  d$y <- y
+  co <- function(f, term) if (is.null(f)) rep(NA, 3) else {
+    s <- summary(f)$coefficients
+    if (term %in% rownames(s)) s[term, c("Estimate", "Std. Error", "Pr(>|t|)")] else rep(NA, 3)
+  }
+  f1 <- tryCatch(suppressMessages(lmer(y ~ psa + study_batch + (1 | subject_id), data = d)), error = function(e) NULL)
+  dn <- d[d$response_group_neat %in% c("Responder", "Non_Responder"), ]
+  dn$NR <- as.integer(dn$response_group_neat == "Non_Responder")
+  f2 <- if (length(unique(dn$NR)) == 2)
+    tryCatch(suppressMessages(lmer(y ~ NR + study_batch + (1 | subject_id), data = dn)), error = function(e) NULL) else NULL
+  c(co(f1, "psa"), co(f2, "NR"))
+}
+
+res <- list(); score_store <- list()
+for (sid in names(norm)) {
+  nm <- norm[[sid]]
+  expr <- t(nm$Yadj)                      # genes x AOIs
+  d <- nm$cd %>% mutate(psa = psa_change_capped / 50)
+  if (length(unique(d$study_batch)) < 2) d$study_batch <- "one"
+  cat(sid, ": ", ncol(expr), " AOIs\n", sep = "")
+  rk <- rankGenes(expr)
+  z <- t(scale(t(expr)))
+
+  scores <- list()
+  for (coll in names(sets)) for (sn in names(sets[[coll]])) {
+    g <- intersect(sets[[coll]][[sn]], rownames(expr))
+    if (length(g) < 3) next
+    ss <- tryCatch(simpleScore(rk, upSet = g)$TotalScore, error = function(e) rep(NA, ncol(expr)))
+    scores[[paste(coll, sn, sep = "|")]] <- list(singscore = ss, zmean = colMeans(z[g, , drop = FALSE]), n = length(g))
+  }
+  pg <- tryCatch(progeny(expr, scale = TRUE, organism = "Human", top = 100), error = function(e) NULL)
+  if (!is.null(pg)) for (p in colnames(pg))
+    scores[[paste("progeny", p, sep = "|")]] <- list(singscore = pg[, p], zmean = pg[, p], n = 100)
+  for (g in intersect(single_genes, rownames(expr)))
+    scores[[paste("gene", g, sep = "|")]] <- list(singscore = expr[g, ], zmean = expr[g, ], n = 1)
+
+  score_store[[sid]] <- cbind(nm$cd[, c("subject_id", "response_group_neat", "psa_change_capped",
+                                         "study_batch", "roi_name")],
+                              sapply(scores, `[[`, "singscore"))
+  rows <- lapply(names(scores), function(k) {
+    a <- fit_models(scores[[k]]$singscore, d); b <- fit_models(scores[[k]]$zmean, d)
+    data.frame(stratum = sid, collection = sub("\\|.*", "", k), signature = sub(".*\\|", "", k),
+               n_genes = scores[[k]]$n,
+               beta_psa = a[1], se_psa = a[2], p_psa = a[3], beta_NR = a[4], se_NR = a[5], p_NR = a[6],
+               z_beta_psa = b[1], z_p_psa = b[3], z_beta_NR = b[4], z_p_NR = b[6])
+  })
+  res[[sid]] <- bind_rows(rows)
+}
+
+tab <- bind_rows(res) %>%
+  group_by(stratum, collection) %>%
+  mutate(fdr_psa = p.adjust(p_psa, "BH"), fdr_NR = p.adjust(p_NR, "BH")) %>% ungroup() %>%
+  mutate(concordant_psa = sign(beta_psa) == sign(z_beta_psa) & p_psa < 0.05 & z_p_psa < 0.05,
+         concordant_NR = sign(beta_NR) == sign(z_beta_NR) & p_NR < 0.05 & z_p_NR < 0.05,
+         segment = sub("__.*", "", stratum), timepoint = sub(".*__", "", stratum),
+         low_confidence = stratum %in% c("PSMA__Screening") | grepl("Cycle1", stratum))
+
+options(width = 220)
+cat("\n==== Signatures with FDR < 0.1 (either outcome) and method-concordant ====\n")
+print(as.data.frame(tab %>% filter((fdr_psa < 0.1 & concordant_psa) | (fdr_NR < 0.1 & concordant_NR)) %>%
+  arrange(stratum, pmin(p_psa, p_NR)) %>%
+  select(stratum, collection, signature, beta_psa, fdr_psa, beta_NR, fdr_NR, low_confidence) %>%
+  mutate(across(where(is.numeric), ~signif(.x, 3)))), row.names = FALSE)
+
+```
+
+### Multiple testing and reporting
+Applies BH-FDR within stratum × collection, marks method-concordant associations, and flags the PSMA⁺ Screening and Cycle1 strata as low confidence. Prints FDR < 0.1 concordant hits and nominal results for the hypothesis-driven programmes. Saves a heatmap of signed −log10 P (non-responder versus responder), the per-AOI scores and the full association table.
+
+```{r comp-05-signatures-04}
+cat("\n==== Hypothesis-driven programmes (all strata; nominal p) ====\n")
+focus <- c("IFN_I_STING_tumour", "HLA_I", "HLA_II", "MHC_I", "Bone_TAM_TIM", "DC_activation",
+           "NEPC_up", "AR_panel", "Osteoclast", "Bone_remodel_module", "FOLH1", "CD276", "B2M",
+           "T_exhaustion", "Tcell_inflamed_GEP", "TGFb_response_FTBRS", "Treg", "M2_macrophage")
+print(as.data.frame(tab %>% filter(signature %in% focus, p_psa < 0.05 | p_NR < 0.05) %>%
+  arrange(signature, stratum) %>%
+  select(stratum, signature, beta_psa, p_psa, beta_NR, p_NR, concordant_psa, concordant_NR) %>%
+  mutate(across(where(is.numeric), ~signif(.x, 3)))), row.names = FALSE)
+
+## heatmap of signed -log10 p (NR vs R) for focus programmes across strata
+hm <- tab %>% filter(signature %in% focus) %>%
+  mutate(val = -log10(p_NR) * sign(beta_NR),
+         stratum = factor(stratum, names(norm)))
+p <- ggplot(hm, aes(stratum, signature, fill = pmax(pmin(val, 4), -4))) + geom_tile() +
+  geom_text(aes(label = ifelse(p_NR < 0.05, "*", "")), size = 5) +
+  scale_fill_gradient2(low = "steelblue", high = "firebrick", mid = "white", name = "signed\n-log10 p\n(NR>R red)") +
+  theme_bw() + theme(axis.text.x = element_text(angle = 40, hjust = 1)) +
+  labs(x = "", y = "", title = "Hypothesis-driven programmes: NR vs R (mixed model, patient random effect)")
+ggsave(out_path("C5_signatures", "focus_programmes_NR_vs_R_heatmap.pdf"), p, width = 10, height = 7)
+
+qs::qsave(score_store, out_path("C5_signatures", "per_AOI_singscores.qs"))
+write.csv(tab, out_path("C5_signatures", "signature_associations_all.csv"), row.names = FALSE)
+cat("\nC5 complete.\n")
+```

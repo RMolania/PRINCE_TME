@@ -1,0 +1,476 @@
+---
+title: "Interim figure set v3 from the LOQ-universe analysis, including the deconvolution comparison"
+subtitle: "PRINCE spatial transcriptomics: `comp_21_figures_v3`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+Draws the third (interim) figure set, the first built on the negative-probe gene universe and the LOQ-universe pseudobulk analysis (comp_13b): main Figures 1–4 (design and background, *FOLH1* and AR activity, on-treatment p53 and interferon change, re-evaluation of earlier findings) and Extended Data panels for the deconvolution comparison, background and gene detection, purity, and the low-signal-AOI sensitivity analysis.
+
+Only `ExtendedDataFig2` (SpatialDecon versus BayesPrism) is carried into the final manuscript, as Extended Data Fig. 2 after title removal. The other figures were redrawn in comp_28 and comp_41. The script also writes the LOQ-universe p53 target table, which becomes Supplementary Table 26, and π₁ per stratum. The deconvolution method for the composition panel is read from an optional `decision.txt` and defaults to SpatialDecon, the method chosen in comp_19.
+
+**Manuscript items supported**
+
+- Extended Data Fig. 2a–d (deconvolution comparison; notitle render via comp_44)
+- Supplementary Table 26 (`p53_core_target_paired_induction_LOQ.csv`, via comp_25)
+- Figures 1–4 and Extended Data Figs 3, 4 and 9 of this set: intermediate (assembled by comp_21b; superseded by comp_28/comp_41)
+
+**Pipeline step:** `./run_pipeline.sh --only 21_figures_v3`. Approximate runtime: a few minutes.
+
+**Inputs**
+
+- `data/phase2_se_qc_filtered.qs`
+- `results/C1_clinical/patient_table.qs`
+- `results/R1_loq/loq_gene_universes.qs`
+- `results/R1_loq/gene_detection_rates.csv`
+- `results/R1_loq/loq_filter_summary.csv`
+- `results/C13_pseudobulk_LOQ/*`
+- `results/C13_pseudobulk_LOQ_exclLow/feature_tests_pseudobulk.csv`
+- `results/C3_deconvolution/deconvolution_proportions.qs`
+- `results/R2_deconv_compare/*.csv`
+- `results/R2_deconv_compare/decision.txt (optional)`
+- `results/R3_nepc_purity/*.csv`
+
+**Outputs**
+
+- `results/Manuscript_v3/Figure1-4.{pdf,png}`
+- `results/Manuscript_v3/ExtendedDataFig2.{pdf,png}`
+- `results/Manuscript_v3/ExtendedDataFig3.{pdf,png}`
+- `results/Manuscript_v3/ExtendedDataFig4.{pdf,png}`
+- `results/Manuscript_v3/ExtendedDataFig9.{pdf,png}`
+- `results/Manuscript_v3/p53_core_target_paired_induction_LOQ.csv`
+- `results/Manuscript_v3/pi1_LOQ.csv`
+
+**Depends on**: `comp_13b_pseudobulk_loq`, `comp_16_loq_filter`, `comp_17_bayesprism`, `comp_18_nepc_purity_reconcile`, `comp_19_deconv_compare`, `comp_20_external_ne_signatures`, `comp_03b_deconv`, `comp_01_clinical`
+
+## Analysis
+
+Header listing the figures drawn, their inputs and the output folder.
+
+### Set-up
+Plotting theme, colours and helpers as in the earlier figure scripts; loads the LOQ universes and the comp_13b pseudobulk results, reads the deconvolution decision (default SpatialDecon), and computes π₁ per stratum from the pseudobulk P values (limma `propTrueNull`, local FDR), saved as a table.
+
+```{r comp-21-figures-v3-01}
+## ============================================================================
+## PRINCE manuscript v3 -- figures from the negative-probe-filtered, patient-level analysis
+##   Fig 1  design, background (LOQ) QC, composition, scale of detectable signal
+##   Fig 2  target axis: FOLH1 and AR activity
+##   Fig 3  on-treatment p53 and interferon pharmacodynamics
+##   Fig 4  re-evaluation of earlier hypotheses (purity-adjusted DE, NEPC, bone niche, prediction)
+##   ED2    deconvolution method comparison (SpatialDecon vs BayesPrism)
+##   ED3    negative-probe background and gene detection
+##   ED4    purity and the deck's genes under covariate sets
+##   ED9    low-signal-AOI exclusion sensitivity
+## Inputs: R1_loq, R2_deconv_compare (+ decision.txt), R3_nepc_purity, C13_pseudobulk_LOQ(_exclLow)
+## Output: results/Manuscript_v3/
+## ============================================================================
+
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({
+  library(qs); library(SummarizedExperiment); library(dplyr); library(tidyr); library(ggplot2); library(patchwork)
+  library(ggrepel); library(survival); library(edgeR); library(limma); library(scales); library(ragg)
+})
+setwd(PRINCE_DIR)
+check_ram_or_stop(20)
+fig_dir <- file.path(COMP_DIR, "Manuscript_v3"); dir.create(fig_dir, showWarnings = FALSE)
+C13 <- "C13_pseudobulk_LOQ"
+
+resp_cols <- c(Responder = "#3B6FB6", Intermediate = "#E3A33B", Non_Responder = "#C0392B")
+resp_lab <- c(Responder = "Responder", Intermediate = "Intermediate", Non_Responder = "Non-responder")
+seg_cols <- c("CD45+" = "#7B9E3E", "PSMA+" = "#B5338A", "PanCK+PSMA-" = "#2C8C99")
+seg_lab <- c("CD45+" = "CD45+", "PSMA+" = "PSMA+", "PanCK+PSMA-" = "PanCK+PSMA−")
+code <- c("CD45+" = "CD45", "PSMA+" = "PSMA", "PanCK+PSMA-" = "PanCKPSMA"); seg_from_code <- setNames(names(code), code)
+tp_levels <- c("Archival", "Screening", "Cycle1")
+theme_set(theme_classic(base_size = 7, base_family = "Helvetica") +
+  theme(axis.line = element_line(linewidth = 0.3), axis.ticks = element_line(linewidth = 0.3),
+        strip.background = element_blank(), strip.text = element_text(size = 6.5, face = "bold"),
+        legend.key.size = unit(3, "mm"), legend.text = element_text(size = 6), legend.title = element_text(size = 6.5),
+        plot.title = element_text(size = 6.5), plot.tag = element_text(size = 9, face = "bold")))
+save_fig <- function(p, name, h_mm) {
+  ggsave(file.path(fig_dir, paste0(name, ".pdf")), p, width = 183, height = h_mm, units = "mm", device = cairo_pdf)
+  ggsave(file.path(fig_dir, paste0(name, ".png")), p, width = 183, height = h_mm, units = "mm", dpi = 300, device = agg_png)
+  cat("saved", name, "\n")
+}
+fmt_p <- function(p) ifelse(is.na(p), "NA", ifelse(p < 0.001, formatC(p, format = "e", digits = 1), formatC(p, format = "f", digits = 3)))
+resp_scale <- list(scale_colour_manual(values = resp_cols, labels = resp_lab, name = NULL, drop = FALSE),
+                   scale_fill_manual(values = resp_cols, labels = resp_lab, name = NULL, drop = FALSE))
+strat_cols <- function(df, col = "stratum") df %>% mutate(segment = seg_from_code[sub("__.*", "", .data[[col]])],
+  timepoint = factor(sub(".*__", "", .data[[col]]), tp_levels), seg_label = factor(seg_lab[segment], seg_lab))
+km_df <- function(time, event, group) {
+  f <- survfit(Surv(time, event) ~ group)
+  data.frame(time = f$time, surv = f$surv, n.censor = f$n.censor, strata = sub("group=", "", rep(names(f$strata), f$strata))) %>%
+    group_by(strata) %>% group_modify(~ bind_rows(data.frame(time = 0, surv = 1, n.censor = 0), .x)) %>% ungroup()
+}
+
+pt <- qs::qread(out_path("C1_clinical", "patient_table.qs"))
+se <- qs::qread("phase2_se_qc_filtered.qs"); cd <- as.data.frame(colData(se))
+loq <- qs::qread(file.path(COMP_DIR, "R1_loq", "loq_gene_universes.qs"))
+pbs <- qs::qread(out_path(C13, "pseudobulk_strata.qs"))
+ft <- read.csv(out_path(C13, "feature_tests_pseudobulk.csv")) %>% strat_cols()
+tw_all <- read.csv(out_path(C13, "transcriptome_wide_limma_all_strata.csv")) %>% strat_cols()
+pdl <- read.csv(out_path(C13, "paired_induction_per_patient_deltas.csv"))
+pres <- read.csv(out_path(C13, "paired_induction_apriori_sets.csv"))
+pred <- read.csv(out_path(C13, "PSA50_prediction_cv_permutation.csv"))
+decision <- if (file.exists(file.path(COMP_DIR, "R2_deconv_compare", "decision.txt")))
+  trimws(readLines(file.path(COMP_DIR, "R2_deconv_compare", "decision.txt"))[1]) else "SpatialDecon"
+cat("Deconvolution method used for composition panels:", decision, "\n")
+artefact_re <- "^(USP17L|PRAMEF|NBPF|OR[0-9]+[A-Z]+[0-9]+)"
+pb_val <- function(sid, gene) { p <- pbs[[sid]]
+  data.frame(subject_id = p$meta$subject_id, value = p$lcpm[gene, ]) %>%
+    left_join(pt %>% select(subject_id, response_group_neat, max_psa_change, r_pfstime, r_pfsevent, PSMAPET_vol_change_pct), by = "subject_id") }
+pi1 <- tw_all %>% group_by(stratum, seg_label, timepoint) %>%
+  summarise(pi1 = 1 - propTrueNull(P.Value, method = "lfdr"), n = n(), .groups = "drop")
+write.csv(pi1 %>% select(stratum, pi1, n), file.path(fig_dir, "pi1_LOQ.csv"), row.names = FALSE)
+
+```
+
+### Figure 1 (interim): design, background and signal
+Study schematic with cohort counts, PSA waterfall, detection of selected genes above LOQ per stratum, mean lineage composition by compartment and site, and gene-level P-value histograms annotated with π₁.
+
+```{r comp-21-figures-v3-02}
+## =====================================================================================
+## Figure 1
+## =====================================================================================
+ncd <- cd %>% filter(response_group_neat != "Control", timepoint %in% tp_levels)
+tl <- data.frame(x = c(1, 2.6, 4.2), lab = c("Archival primary\n(diagnosis)", "Screening bone\nmetastasis (pre-treatment)", "On-treatment bone\nmetastasis (weeks 2–4)"))
+roi <- data.frame(seg = names(seg_cols), x = 5.55 + c(-0.42, 0, 0.42))
+p1a <- ggplot() +
+  annotate("segment", x = 0.6, xend = 4.75, y = 0.5, yend = 0.5, linewidth = 0.4, arrow = arrow(length = unit(1.5, "mm"), type = "closed")) +
+  geom_point(data = tl, aes(x, 0.5), size = 3.2, colour = "grey25") + geom_text(data = tl, aes(x, 0.85, label = lab), size = 2.1, lineheight = 0.9) +
+  annotate("rect", xmin = 3.05, xmax = 3.85, ymin = 0.28, ymax = 0.42, fill = "#F2E6C9") +
+  annotate("text", x = 3.45, y = 0.35, label = "Lu-PSMA-617 q6w\n+ pembrolizumab q3w", size = 1.8, lineheight = 0.85) +
+  annotate("text", x = 2.0, y = 0.1, size = 2.1, fontface = "bold", label = sprintf("%d patients · %d ROIs · %d AOIs · GeoMx WTA",
+    length(unique(ncd$subject_id)), nrow(distinct(ncd, subject_id, timepoint, roi_name)), nrow(ncd))) +
+  annotate("rect", xmin = 5.0, xmax = 6.1, ymin = 0.15, ymax = 0.98, fill = NA, colour = "grey55", linewidth = 0.3, linetype = 2) +
+  annotate("text", x = 5.55, y = 0.82, label = "One ROI,\nthree co-located AOIs", size = 1.9, lineheight = 0.85) +
+  geom_tile(data = roi, aes(x, 0.42, fill = seg), width = 0.36, height = 0.4, colour = "white") +
+  geom_text(data = roi, aes(x, 0.42, label = c("CD45+", "PSMA+", "PanCK+\nPSMA−")), size = 1.6, colour = "white", fontface = "bold", lineheight = 0.8) +
+  scale_fill_manual(values = seg_cols, guide = "none") + coord_cartesian(xlim = c(0.4, 6.2), ylim = c(-0.15, 1.05)) +
+  theme_void(base_size = 7) + theme(plot.tag = element_text(size = 9, face = "bold"))
+ord <- pt %>% arrange(max_psa_change) %>% pull(subject_id)
+p1b <- ggplot(pt %>% mutate(subject_id = factor(subject_id, ord)), aes(subject_id, pmin(max_psa_change, 150), fill = response_group_neat)) +
+  geom_col(width = 0.8) + geom_hline(yintercept = c(-50, 0), linetype = c(2, 1), linewidth = 0.25) + resp_scale +
+  labs(x = NULL, y = "Max PSA change (%, capped)") + theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(), legend.position = "top")
+det <- read.csv(file.path(COMP_DIR, "R1_loq", "gene_detection_rates.csv")) %>% strat_cols() %>%
+  filter(gene %in% c("FOLH1", "KLK3", "TMPRSS2", "AR", "SYP", "NEUROD1", "CHGA", "INSM1", "ASCL1", "IBSP", "CTSK", "MDM2", "CDKN1A")) %>%
+  mutate(gene = factor(gene, rev(c("KLK3", "FOLH1", "TMPRSS2", "AR", "SYP", "NEUROD1", "CHGA", "INSM1", "ASCL1", "IBSP", "CTSK", "MDM2", "CDKN1A"))))
+p1c <- ggplot(det, aes(seg_label, gene, fill = detection)) + geom_tile(colour = "white") +
+  geom_text(aes(label = round(100 * detection)), size = 1.7) + facet_grid(~timepoint) +
+  scale_fill_gradient(low = "white", high = "#1F3A5F", labels = percent, limits = c(0, 1), name = "AOIs above\nbackground") +
+  labs(x = NULL, y = NULL, title = "Detection above negative-probe background (LOQ = geomean × geoSD²)") +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1, size = 5.5), axis.line = element_blank(), axis.ticks = element_blank())
+dec <- qs::qread(out_path("C3_deconvolution", "deconvolution_proportions.qs"))
+if (decision == "BayesPrism") {
+  bpp <- qs::qread(file.path(COMP_DIR, "R2_deconv_compare", "bayesprism_primary.qs"))$theta
+  bpb <- qs::qread(file.path(COMP_DIR, "R2_deconv_compare", "bayesprism_bone.qs"))$theta
+  Pp <- bpp; Pb <- bpb
+} else { Pp <- dec$prop_primary; Pb <- dec$prop_bone }
+lin_p <- c(Luminal = "Tumour", Basal = "Tumour", Club = "Tumour", Hillock = "Tumour", LPCs = "Tumour", NE = "Tumour", CD4T = "T/NK", CD8T = "T/NK",
+  NK = "T/NK", T_MKI67 = "T/NK", B = "B/plasma", Plasma_B = "B/plasma", Mph = "Myeloid", Mono = "Myeloid", DCs = "Myeloid", Neutrophils = "Myeloid",
+  Mye_cycling = "Myeloid", Mast = "Myeloid", CAFs = "Stroma", Mural = "Stroma", Pericytes = "Stroma", Endo = "Endothelial")
+lin_b <- function(t) case_when(grepl("^Tumour", t) ~ "Tumour", grepl("CD4|CD8|CTL|NK|Th|Treg", t) ~ "T/NK",
+  grepl("^B|B$|Bcell|B cells|Plasma|Pro-B|Pre-B|Mature B|Immature B", t) ~ "B/plasma", grepl("Mono|TAM|TIM|DC|Neutro|Mast|Macro", t) ~ "Myeloid",
+  grepl("Osteo", t) ~ "Bone cells", grepl("Erythro|Progen", t) ~ "Erythroid/progenitor", grepl("Endo", t) ~ "Endothelial",
+  grepl("Peri|Fibro|MSC|Stromal", t) ~ "Stroma", TRUE ~ "Other")
+coarse <- function(P, f) { m <- if (is.function(f)) f(colnames(P)) else f[colnames(P)]; m[is.na(m)] <- "Other"
+  sapply(split(colnames(P), m), function(cc) rowSums(P[, cc, drop = FALSE])) }
+comp <- bind_rows(data.frame(coarse(Pp, lin_p), aoi = rownames(Pp), site = "Primary tumour", check.names = FALSE),
+                  data.frame(coarse(Pb, lin_b), aoi = rownames(Pb), site = "Bone metastasis", check.names = FALSE)) %>%
+  pivot_longer(-c(aoi, site), names_to = "lineage", values_to = "prop") %>% filter(!is.na(prop)) %>%
+  mutate(segment = cd[aoi, "segment_name"], resp = cd[aoi, "response_group_neat"], tp = cd[aoi, "timepoint"]) %>%
+  filter(resp != "Control", tp %in% tp_levels) %>% group_by(site, segment, lineage) %>% summarise(prop = mean(prop), .groups = "drop") %>%
+  group_by(site, segment) %>% mutate(prop = prop / sum(prop)) %>% ungroup() %>%
+  mutate(site = factor(site, c("Primary tumour", "Bone metastasis")), segment = factor(seg_lab[segment], seg_lab),
+         lineage = factor(lineage, c("Tumour", "T/NK", "B/plasma", "Myeloid", "Stroma", "Endothelial", "Bone cells", "Erythroid/progenitor", "Other")))
+lin_cols <- c("Tumour" = "#8C6D9E", "T/NK" = "#4C9F70", "B/plasma" = "#A3C586", "Myeloid" = "#E39B3C", "Stroma" = "#B07A5A",
+              "Endothelial" = "#D35F5F", "Bone cells" = "#6A8EAE", "Erythroid/progenitor" = "#C9A3B8", "Other" = "grey75")
+p1d <- ggplot(comp, aes(segment, prop, fill = lineage)) + geom_col(width = 0.75) + facet_wrap(~site) +
+  scale_fill_manual(values = lin_cols, name = NULL) + scale_y_continuous(labels = percent) +
+  labs(x = NULL, y = "Mean fraction", title = paste0("Composition (", decision, ", tissue-matched references)")) +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+p1e <- ggplot(tw_all, aes(P.Value)) + geom_histogram(breaks = seq(0, 1, 0.05), fill = "grey55", colour = "white", linewidth = 0.1) +
+  geom_text(data = pi1, aes(x = 0.5, y = Inf, label = sprintf("π₁ = %.0f%%", 100 * pmax(pi1, 0))), vjust = 1.3, size = 1.7, inherit.aes = FALSE) +
+  facet_grid(seg_label ~ timepoint, scales = "free_y") + scale_x_continuous(breaks = c(0, 0.5, 1)) +
+  labs(x = "P value, gene vs PSA change (patient pseudobulk, batch-adjusted)", y = "Genes",
+       title = "0–1 genes at FDR < 0.1 per stratum; π₁ = estimated fraction of associated genes") +
+  theme(strip.text.y = element_text(angle = 0, size = 5.5))
+fig1 <- (p1a / p1b / (p1c + p1d + plot_layout(widths = c(1, 1))) / p1e) + plot_layout(heights = c(0.75, 0.7, 1.3, 1.2)) + plot_annotation(tag_levels = "a")
+save_fig(fig1, "Figure1", 240)
+
+```
+
+### Figure 2 (interim): *FOLH1* and AR activity
+*FOLH1*–PSA Spearman ρ (Fisher-z 95% CI) per stratum, pre-treatment PanCK⁺PSMA⁻ *FOLH1* versus PSA change, primary versus bone *FOLH1*, AR-signature ρ with PSA change by timepoint (comp_20), on-treatment PSMA⁺ Hallmark androgen singscore versus PSMA-PET volume change, and rPFS by median-split on-treatment PSMA⁺ *FOLH1*.
+
+```{r comp-21-figures-v3-03}
+## =====================================================================================
+## Figure 2 -- target axis (FOLH1, AR)
+## =====================================================================================
+fol <- ft %>% filter(feature == "FOLH1") %>% arrange(timepoint, match(segment, names(seg_cols))) %>%
+  mutate(lab = factor(paste(timepoint, seg_label, sep = " · "), rev(paste(timepoint, seg_label, sep = " · "))),
+         lo = tanh(atanh(rho) - 1.96 / sqrt(n - 3)), hi = tanh(atanh(rho) + 1.96 / sqrt(n - 3)))
+p2a <- ggplot(fol, aes(rho, lab, colour = segment)) + geom_vline(xintercept = 0, linetype = 2, linewidth = 0.25, colour = "grey50") +
+  geom_errorbar(aes(xmin = lo, xmax = hi), width = 0, linewidth = 0.4, orientation = "y") + geom_point(size = 1.4) +
+  geom_text(aes(x = 0.42, label = sprintf("P %s | adj. %s", fmt_p(p_rho), fmt_p(p_psa))), colour = "grey20", size = 1.75, hjust = 0) +
+  scale_colour_manual(values = seg_cols, guide = "none") + coord_cartesian(xlim = c(-1, 1.2)) +
+  labs(x = "Spearman ρ, FOLH1 vs max PSA change (95% CI)", y = NULL, title = "FOLH1, patient pseudobulk (unadjusted P | batch-adjusted P)")
+d2b <- pb_val("PanCKPSMA__Screening", "FOLH1"); r2b <- cor.test(d2b$value, d2b$max_psa_change, method = "spearman", exact = FALSE)
+p2b <- ggplot(d2b, aes(value, pmin(max_psa_change, 150), colour = response_group_neat)) + geom_hline(yintercept = -50, linetype = 2, linewidth = 0.25) +
+  geom_point(size = 1.4) + resp_scale + theme(legend.position = "none") +
+  labs(x = "FOLH1, PanCK+PSMA− pre-treatment (log2 CPM)", y = "Max PSA change (%, capped)", title = sprintf("ρ = %.2f, P = %s (n = %d)", r2b$estimate, fmt_p(r2b$p.value), nrow(d2b)))
+conc <- bind_rows(lapply(names(code), function(sg) {
+  a <- pb_val(paste0(code[sg], "__Archival"), "FOLH1"); s <- pb_val(paste0(code[sg], "__Screening"), "FOLH1")
+  inner_join(a %>% select(subject_id, prim = value, response_group_neat), s %>% select(subject_id, met = value), by = "subject_id") %>% mutate(segment = factor(seg_lab[sg], seg_lab)) }))
+cl <- read.csv(out_path(C13, "FOLH1_primary_met_concordance.csv")) %>% mutate(segment = factor(seg_lab[segment], seg_lab), txt = sprintf("ρ = %.2f, P = %s", rho, fmt_p(p)))
+p2c <- ggplot(conc, aes(prim, met, colour = response_group_neat)) + geom_point(size = 1.1) + facet_wrap(~segment, scales = "free") + resp_scale +
+  geom_text(data = cl, aes(x = -Inf, y = Inf, label = txt), hjust = -0.05, vjust = 1.3, size = 1.8, inherit.aes = FALSE) +
+  labs(x = "FOLH1, primary tumour", y = "FOLH1, bone metastasis", title = "Primary tumour predicts metastatic FOLH1") + theme(legend.position = "none")
+ar <- read.csv(file.path(COMP_DIR, "R3_nepc_purity", "external_signatures_tests.csv")) %>% filter(grepl("^AR_", signature)) %>% strat_cols() %>%
+  mutate(sig = recode(signature, AR_Hallmark = "Hallmark androgen", AR_Nelson_up = "Nelson AR-up", AR_panel5 = "AR 5-gene panel"))
+p2d <- ggplot(ar, aes(timepoint, rho_psa, colour = seg_label, shape = sig)) + geom_hline(yintercept = 0, linetype = 2, linewidth = 0.25) +
+  geom_point(aes(alpha = p_psa < 0.05), size = 1.6, position = position_dodge(0.55)) + scale_alpha_manual(values = c(`FALSE` = 0.35, `TRUE` = 1), guide = "none") +
+  scale_colour_manual(values = setNames(seg_cols, seg_lab), name = NULL) + scale_shape_manual(values = c(16, 17, 15), name = NULL) +
+  labs(x = NULL, y = "Spearman ρ with PSA change", title = "AR activity: lower with worse response only on treatment (solid: P < 0.05)") + theme(legend.position = "right")
+sc <- read.csv(file.path(COMP_DIR, "R3_nepc_purity", "external_signatures_scores.csv")) %>% filter(stratum == "PSMA__Cycle1", signature == "AR_Hallmark") %>%
+  left_join(pt, by = "subject_id")
+r2e <- cor.test(sc$singscore, sc$PSMAPET_vol_change_pct, method = "spearman", exact = FALSE)
+p2e <- ggplot(sc, aes(singscore, PSMAPET_vol_change_pct, colour = response_group_neat)) + geom_point(size = 1.4) + resp_scale +
+  scale_y_continuous(trans = pseudo_log_trans(sigma = 10), breaks = c(-100, -10, 0, 10, 100, 1000)) + theme(legend.position = "none") +
+  labs(x = "Hallmark androgen score, on-treatment PSMA+", y = "PSMA-PET volume change to cycle 5 (%)",
+       title = sprintf("ρ = %.2f, P = %s (n = %d)", r2e$estimate, fmt_p(r2e$p.value), sum(complete.cases(sc$singscore, sc$PSMAPET_vol_change_pct))))
+d2f <- pb_val("PSMA__Cycle1", "FOLH1") %>% filter(!is.na(r_pfstime)) %>% mutate(group = ifelse(value >= median(value), "FOLH1 high", "FOLH1 low"))
+lr <- survdiff(Surv(r_pfstime, r_pfsevent) ~ group, d2f)
+fhr <- ft %>% filter(feature == "FOLH1", stratum == "PSMA__Cycle1")
+p2f <- ggplot(km_df(d2f$r_pfstime, d2f$r_pfsevent, d2f$group), aes(time, surv, colour = strata)) + geom_step(linewidth = 0.5) +
+  geom_point(data = ~ filter(.x, n.censor > 0), shape = 3, size = 0.9) +
+  scale_colour_manual(values = c("FOLH1 high" = "#3B6FB6", "FOLH1 low" = "#C0392B"), name = NULL) + scale_y_continuous(labels = percent, limits = c(0, 1)) +
+  labs(x = "Months", y = "rPFS", title = sprintf("On-treatment PSMA+ FOLH1 (n = %d): HR %.2f per s.d., log-rank P = %s", nrow(d2f), fhr$HR, fmt_p(1 - pchisq(lr$chisq, 1)))) +
+  theme(legend.position = c(0.8, 0.8))
+fig2 <- (p2a | p2b) / p2c / (p2d | p2e) / p2f + plot_layout(heights = c(1.15, 0.8, 1, 0.85)) + plot_annotation(tag_levels = "a")
+save_fig(fig2, "Figure2", 245)
+
+```
+
+### Figure 3 (interim): on-treatment p53 and interferon
+Paired pseudobulk over the union of the two bone timepoints' LOQ universes: change in ten canonical p53 targets per gene (Wilcoxon signed-rank, BH within compartment; saved as the LOQ p53 table), detection of p53 and interferon genes by timepoint, median change of pre-specified programmes, and Hallmark IFN-α change versus PSA change.
+
+```{r comp-21-figures-v3-04}
+## =====================================================================================
+## Figure 3 -- on-treatment pharmacodynamics
+## =====================================================================================
+p53_core <- c("CDKN1A", "MDM2", "DDB2", "PHLDA3", "GDF15", "TNFRSF10B", "SESN1", "ZMAT3", "RRM2B", "TP53I3")
+paired <- list()
+for (sg in names(seg_cols)) {
+  idx <- which(cd$segment_name == sg & cd$timepoint %in% c("Screening", "Cycle1") & cd$response_group_neat != "Control"); d <- cd[idx, ]
+  key <- paste(d$subject_id, d$timepoint, sep = "|"); cc <- assay(se, "all_count")[, idx]
+  g_pair <- union(loq$universes[[paste0(code[sg], "__Screening")]]$g10, loq$universes[[paste0(code[sg], "__Cycle1")]]$g10)
+  m <- sapply(split(seq_along(key), key), function(i) rowSums(cc[g_pair, i, drop = FALSE]))
+  sid <- sub("\\|.*", "", colnames(m)); both <- names(which(table(sid) == 2)); m <- m[, sid %in% both]
+  lc <- cpm(calcNormFactors(DGEList(m)), log = TRUE, prior.count = 1); g <- intersect(p53_core, rownames(lc))
+  paired[[sg]] <- data.frame(t(lc[g, , drop = FALSE]), key = colnames(lc), check.names = FALSE) %>%
+    mutate(subject_id = sub("\\|.*", "", key), timepoint = sub(".*\\|", "", key)) %>% select(-key) %>%
+    pivot_longer(-c(subject_id, timepoint), names_to = "gene", values_to = "v") %>% pivot_wider(names_from = timepoint, values_from = v) %>%
+    mutate(delta = Cycle1 - Screening, segment = sg)
+}
+paired <- bind_rows(paired) %>% left_join(pt %>% select(subject_id, response_group_neat, max_psa_change), by = "subject_id")
+p53_tab <- paired %>% group_by(segment, gene) %>% summarise(n = n(), n_up = sum(delta > 0), med = median(delta),
+  p = wilcox.test(delta, exact = FALSE)$p.value, .groups = "drop") %>% group_by(segment) %>% mutate(fdr = p.adjust(p, "BH")) %>% ungroup()
+write.csv(p53_tab, file.path(fig_dir, "p53_core_target_paired_induction_LOQ.csv"), row.names = FALSE)
+p3a <- ggplot(paired %>% filter(segment == "PanCK+PSMA-") %>% mutate(response_group_neat = factor(response_group_neat, names(resp_cols))), aes(gene, delta)) +
+  geom_hline(yintercept = 0, linewidth = 0.25) + geom_boxplot(outlier.shape = NA, width = 0.55, linewidth = 0.25, colour = "grey40") +
+  geom_point(aes(colour = response_group_neat), position = position_jitter(width = 0.15, seed = 1), size = 0.9) + resp_scale +
+  geom_text(data = p53_tab %>% filter(segment == "PanCK+PSMA-"), aes(gene, Inf, label = sprintf("%d/%d\n%s", n_up, n, fmt_p(fdr))), vjust = 1.1, size = 1.6, lineheight = 0.85, inherit.aes = FALSE) +
+  scale_y_continuous(expand = expansion(mult = c(0.05, 0.25))) + labs(x = NULL, y = "Δ log2 CPM (on − pre-treatment)",
+  title = "Canonical p53 targets, paired PanCK+PSMA− pseudobulk (patients up / pairs; FDR)") +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1), legend.position = "top")
+detr <- read.csv(file.path(COMP_DIR, "R1_loq", "gene_detection_rates.csv")) %>% strat_cols() %>%
+  filter(gene %in% c("MDM2", "CDKN1A", "PHLDA3", "GDF15", "ISG15", "STAT1"), timepoint %in% c("Screening", "Cycle1"))
+p3b <- ggplot(detr, aes(timepoint, detection, group = interaction(gene, seg_label), colour = seg_label)) + geom_line(linewidth = 0.4) + geom_point(size = 1) +
+  facet_wrap(~gene, nrow = 1) + scale_colour_manual(values = setNames(seg_cols, seg_lab), name = NULL) + scale_y_continuous(labels = percent) +
+  labs(x = NULL, y = "AOIs above background", title = "Detection above negative-probe background rises on treatment") + theme(legend.position = "bottom")
+pres2 <- pres %>% mutate(segment = factor(seg_lab[segment], seg_lab), programme = recode(programme, Hallmark_P53 = "Hallmark p53", Hallmark_IFNa = "Hallmark IFN-α",
+  IFN_I = "Type-I IFN", IFN_I_STING_tumour = "IFN-I/STING", MHC_I = "MHC-I", MHC_II = "MHC-II"))
+p3c <- ggplot(pres2, aes(median_delta, programme, colour = segment)) + geom_vline(xintercept = 0, linetype = 2, linewidth = 0.25) +
+  geom_point(aes(shape = p_induction < 0.05), size = 1.6, position = position_dodge(0.5)) + scale_shape_manual(values = c(`FALSE` = 1, `TRUE` = 16), name = "P < 0.05") +
+  scale_colour_manual(values = setNames(seg_cols, seg_lab), name = NULL) + labs(x = "Median paired change (z-score)", y = NULL, title = "Pre-specified programmes")
+dd <- pdl %>% filter(programme == "Hallmark_IFNa", segment %in% c("CD45+", "PSMA+", "PanCK+PSMA-")) %>% mutate(segment = factor(seg_lab[segment], seg_lab))
+dl_lab <- pres %>% filter(programme == "Hallmark_IFNa") %>% mutate(segment = factor(seg_lab[segment], seg_lab), txt = sprintf("ρ = %.2f, P = %s", rho_delta_psa, fmt_p(p_rho_delta_psa)))
+p3d <- ggplot(dd, aes(pmin(max_psa_change, 150), delta, colour = response_group_neat)) + geom_hline(yintercept = 0, linetype = 2, linewidth = 0.25) +
+  geom_point(size = 1.2) + facet_wrap(~segment) + resp_scale +
+  geom_text(data = dl_lab, aes(x = Inf, y = Inf, label = txt), hjust = 1.05, vjust = 1.3, size = 1.7, inherit.aes = FALSE) +
+  labs(x = "Max PSA change (%, capped)", y = "Δ Hallmark IFN-α", title = "IFN induction vs PSA response") + theme(legend.position = "none")
+fig3 <- p3a / p3b / (p3c | p3d + plot_layout(widths = c(1, 1.6))) + plot_layout(heights = c(1, 0.6, 1)) + plot_annotation(tag_levels = "a")
+save_fig(fig3, "Figure3", 215)
+
+```
+
+### Figure 4 (interim): re-evaluation of earlier findings
+Genes at FDR < 0.05 for non-responders versus responders in earlier AOI-level models and in patient pseudobulk under covariate sets (comp_18), external neuroendocrine signatures versus the circular earlier genes (comp_20), P values of post hoc bone-niche features under four tests, and cross-validated PSA50 AUC against the permutation null.
+
+```{r comp-21-figures-v3-05}
+## =====================================================================================
+## Figure 4 -- re-evaluation of earlier hypotheses
+## =====================================================================================
+old <- read.csv(file.path(COMP_DIR, "R3_nepc_purity", "A_earlier_aoi_level_counts.csv")) %>% filter(grepl("Screening", stratum))
+newde <- read.csv(file.path(COMP_DIR, "R3_nepc_purity", "B_pseudobulk_de_by_covariates.csv")) %>% filter(contrast == "NR", grepl("Screening", stratum))
+perm <- read.csv(file.path(COMP_DIR, "R3_nepc_purity", "C_permutation_calibration.csv")) %>% filter(grepl("Screening", stratum))
+cmp <- bind_rows(old %>% transmute(stratum, model = "AOI-level, RUV", n = aoi_RUV_fdr05),
+                 old %>% transmute(stratum, model = "AOI-level, RUV + purity", n = aoi_RUV_purity_fdr05),
+                 newde %>% filter(covariates %in% c("batch", "batch_purity", "batch_tumourfrac")) %>%
+                   transmute(stratum, model = recode(covariates, batch = "Patient-level, batch", batch_purity = "Patient-level, batch + purity",
+                                                     batch_tumourfrac = "Patient-level, batch + tumour fraction"), n = fdr05)) %>%
+  strat_cols() %>% mutate(model = factor(model, c("AOI-level, RUV", "AOI-level, RUV + purity", "Patient-level, batch", "Patient-level, batch + purity", "Patient-level, batch + tumour fraction")))
+p4a <- ggplot(cmp, aes(seg_label, n + 0.5, fill = model)) + geom_col(position = position_dodge(0.85), width = 0.8) +
+  geom_text(aes(label = n), position = position_dodge(0.85), vjust = -0.3, size = 1.7) + scale_y_log10() +
+  scale_fill_manual(values = c("#C9A3B8", "#8E4A79", "#9DB4D3", "#3B6FB6", "#1F3A5F"), name = NULL) +
+  labs(x = NULL, y = "Genes at FDR < 0.05 (+0.5, log)", title = "Non-responder vs responder, pre-treatment metastases: AOI-level vs patient-level") +
+  theme(legend.position = "right")
+ext <- read.csv(file.path(COMP_DIR, "R3_nepc_purity", "external_signatures_tests.csv")) %>% filter(grepl("^NE_|^CIRCULAR", signature), grepl("Screening|Archival", stratum)) %>%
+  strat_cols() %>% mutate(sig = recode(signature, NE_Nouruzi_ASCL1_targets = "Nouruzi ASCL1 targets (ext.)", NE_PCCAT_NE_cell_markers = "PCCAT NE cell markers (ext.)",
+    NE_PCCAT_NEPC_vs_CRPC = "PCCAT NEPC vs CRPC (ext.)", NE_Beltran13 = "13-gene NEPC (ext.)", CIRCULAR_deck_NE = "Earlier NE genes (selected on these data)"),
+    lo = tanh(atanh(rho_psa) - 1.96 / sqrt(n - 3)), hi = tanh(atanh(rho_psa) + 1.96 / sqrt(n - 3)))
+p4b <- ggplot(ext, aes(rho_psa, sig, colour = grepl("selected", sig))) + geom_vline(xintercept = 0, linetype = 2, linewidth = 0.25) +
+  geom_errorbar(aes(xmin = lo, xmax = hi), width = 0, linewidth = 0.35, orientation = "y") + geom_point(size = 1.2) +
+  facet_grid(timepoint ~ seg_label) + scale_colour_manual(values = c(`FALSE` = "#3B6FB6", `TRUE` = "grey60"), guide = "none") +
+  labs(x = "Spearman ρ with PSA change (95% CI)", y = NULL, title = "Neuroendocrine programmes: externally defined signatures vs genes selected on these data") +
+  theme(axis.text.y = element_text(size = 5.3), strip.text.y = element_text(angle = 0))
+expl <- ft %>% filter(grepl("Screening", stratum), feature %in% c("CHGA", "IBSP", "Osteoclast", "Bone_remodel_module")) %>%
+  select(seg_label, feature, p_wilcox, p_psa, p_psa_no_b3, lopo_max_p) %>% pivot_longer(c(p_wilcox, p_psa, p_psa_no_b3, lopo_max_p), names_to = "test", values_to = "p") %>%
+  mutate(test = factor(recode(test, p_wilcox = "NR vs R", p_psa = "PSA, batch-adj.", p_psa_no_b3 = "excl. batch_3", lopo_max_p = "worst LOO"),
+                       c("NR vs R", "PSA, batch-adj.", "excl. batch_3", "worst LOO")), feature = gsub("_", " ", feature))
+p4c <- ggplot(expl, aes(test, feature, fill = -log10(p))) + geom_tile(colour = "white") + geom_text(aes(label = fmt_p(p)), size = 1.5) + facet_wrap(~seg_label) +
+  scale_fill_gradient(low = "white", high = "#C0392B", limits = c(0, 3), oob = squish, name = "−log10 P") +
+  labs(x = NULL, y = NULL, title = "Bone-niche genes (post-hoc) across sensitivity analyses") +
+  theme(axis.text.x = element_text(size = 5, angle = 30, hjust = 1), axis.line = element_blank(), axis.ticks = element_blank())
+p4d <- ggplot(pred %>% mutate(block = factor(block, rev(block))), aes(y = block)) + geom_vline(xintercept = 0.5, linetype = 2, linewidth = 0.25) +
+  geom_point(aes(x = perm_mean), shape = 4, size = 2, colour = "grey50") + geom_point(aes(x = cv_auc), size = 1.8, colour = "#3B6FB6") +
+  geom_text(aes(x = 0.72, label = sprintf("AUC %.2f; perm. P = %s", cv_auc, fmt_p(perm_p))), size = 1.8, hjust = 0) + coord_cartesian(xlim = c(0.25, 1.05)) +
+  labs(x = "PSA50 AUC: repeated stratified CV (dot) vs permuted (cross)", y = NULL, title = "No feature set predicts PSA50")
+fig4 <- p4a / p4b / p4c / p4d + plot_layout(heights = c(0.9, 1.5, 0.75, 0.4)) + plot_annotation(tag_levels = "a")
+save_fig(fig4, "Figure4", 247)
+
+```
+
+### Deconvolution comparison (final Extended Data Fig. 2)
+From the comp_19 tables: (a) between-batch share of variance in control-tissue lineage fractions per method; (b) percentage of co-located ROIs with the expected compartment ordering; (c) Spearman correlation of each cell-type fraction with canonical markers, per reference; (d) SpatialDecon–BayesPrism agreement per cell type. Cell-type codes are mapped to readable labels. The figure is drawn only when the comp_19 output exists.
+
+```{r comp-21-figures-v3-06}
+## =====================================================================================
+## ED2 -- deconvolution comparison
+## =====================================================================================
+if (file.exists(file.path(COMP_DIR, "R2_deconv_compare", "1_control_replicate_consistency.csv"))) {
+  r1 <- read.csv(file.path(COMP_DIR, "R2_deconv_compare", "1_control_replicate_consistency.csv"))
+  r2 <- read.csv(file.path(COMP_DIR, "R2_deconv_compare", "2_within_roi_ordering.csv"))
+  r3 <- read.csv(file.path(COMP_DIR, "R2_deconv_compare", "3_marker_concordance.csv"))
+  r4 <- read.csv(file.path(COMP_DIR, "R2_deconv_compare", "4_cross_method_agreement.csv"))
+  e2a <- ggplot(r1 %>% filter(!is.na(batch_share)), aes(lineage, batch_share, fill = method)) + geom_col(position = position_dodge(0.8), width = 0.75) +
+    facet_wrap(~segment, labeller = as_labeller(function(x) sub("PSMA-$", "PSMA−", x))) + scale_fill_manual(values = c(SpatialDecon = "#9DB4D3", BayesPrism = "#1F3A5F"), name = NULL) +
+    labs(x = NULL, y = "Between-batch share of variance", title = "Technical-replicate control tissue: lower = more batch-robust") +
+    theme(axis.text.x = element_text(angle = 30, hjust = 1))
+  e2b <- ggplot(r2 %>% pivot_longer(c(immune_CD45_gt_PSMA, tumour_PSMA_gt_CD45)) %>%
+                  mutate(name = recode(name, immune_CD45_gt_PSMA = "Immune: CD45+ > PSMA+", tumour_PSMA_gt_CD45 = "Tumour: PSMA+ > CD45+")),
+                aes(name, value, fill = method)) + geom_col(position = position_dodge(0.8), width = 0.7) +
+    geom_text(aes(label = percent(value, 1)), position = position_dodge(0.8), vjust = -0.3, size = 1.8) +
+    scale_fill_manual(values = c(SpatialDecon = "#9DB4D3", BayesPrism = "#1F3A5F"), name = NULL) + scale_y_continuous(labels = percent, limits = c(0, 1.08)) +
+    labs(x = NULL, y = "Co-located ROIs with expected ordering", title = "Within-ROI compartment ordering")
+  ct_read <- function(x) { m <- c(Plasma_B = "Plasma cells", Tumour_AR = "Tumour (AR+)", Tumour_NE = "Tumour (NE)", Mye_cycling = "Cycling myeloid",
+      T_MKI67 = "Cycling T cells", memBcell = "Memory B cells", Mph = "Macrophages", Endo = "Endothelial", CAFs = "CAFs", LPCs = "Luminal progenitors",
+      NE = "NE cells", Mono = "Monocytes", DCs = "Dendritic cells", NK = "NK cells", B = "B cells", Mast = "Mast cells", `Monocyte prog` = "Monocyte progenitors", CD4T = "CD4 T cells", CD8T = "CD8 T cells", TAM = "TAMs", TIM = "TIMs")
+    ifelse(x %in% names(m), m[x], gsub("_", " ", x)) }
+  r3$cell_type <- ct_read(r3$cell_type); r4$cell_type <- ct_read(r4$cell_type)
+  e2c <- ggplot(r3, aes(reorder(paste(cell_type, reference, sep = " · "), spearman), spearman, fill = method)) + geom_col(position = position_dodge(0.8), width = 0.75) +
+    coord_flip() + scale_fill_manual(values = c(SpatialDecon = "#9DB4D3", BayesPrism = "#1F3A5F"), name = NULL) +
+    labs(x = NULL, y = "Spearman ρ, fraction vs canonical markers", title = "Marker concordance") + theme(axis.text.y = element_text(size = 5))
+  e2d <- ggplot(r4 %>% filter(!is.na(spearman)), aes(reorder(paste(cell_type, reference, sep = " · "), spearman), spearman)) + geom_col(fill = "grey55", width = 0.7) +
+    coord_flip() + labs(x = NULL, y = "Spearman ρ, SpatialDecon vs BayesPrism", title = "Cross-method agreement") + theme(axis.text.y = element_text(size = 5))
+  e2c <- e2c + scale_y_continuous(breaks = c(0, 0.5, 1)); e2d <- e2d + scale_y_continuous(breaks = c(-0.5, 0, 0.5, 1))
+  save_fig(((e2a | e2b) / (e2c | e2d) + plot_layout(heights = c(1, 1.6), guides = "collect")) +
+             plot_annotation(tag_levels = "a") & theme(legend.position = "bottom"), "ExtendedDataFig2", 235)
+}
+
+```
+
+### Background and gene detection (interim)
+Per-AOI standard versus earlier LOQ, percentage of genes above LOQ by timepoint and compartment with the 5% low-signal line, and gene-universe size under each detection threshold.
+
+```{r comp-21-figures-v3-07}
+## =====================================================================================
+## ED3 -- negative-probe background
+## =====================================================================================
+aoi <- loq$aoi; aoi$segment <- cd[rownames(aoi), "segment_name"]; aoi$timepoint <- cd[rownames(aoi), "timepoint"]; aoi$resp <- cd[rownames(aoi), "response_group_neat"]
+aoi <- aoi[aoi$resp != "Control" & aoi$timepoint %in% tp_levels, ]
+e3a <- ggplot(aoi, aes(LOQ, LOQ_std, colour = segment)) + geom_abline(linetype = 3, linewidth = 0.25) + geom_point(size = 0.5, alpha = 0.6) +
+  scale_x_log10() + scale_y_log10() + scale_colour_manual(values = seg_cols, labels = seg_lab, name = NULL) +
+  labs(x = "Earlier LOQ (2 × negative-probe geomean)", y = "Standard LOQ (geomean × geoSD²)", title = "Per-AOI background")
+e3b <- ggplot(aoi, aes(factor(timepoint, tp_levels), pct_above_LOQ_std, fill = segment)) + geom_boxplot(outlier.size = 0.3, linewidth = 0.25) +
+  geom_hline(yintercept = 5, linetype = 2, linewidth = 0.25) + scale_y_log10() + scale_fill_manual(values = seg_cols, labels = seg_lab, name = NULL) +
+  labs(x = NULL, y = "% genes above standard LOQ", title = sprintf("%d AOIs below 5%% (dashed) analysed in sensitivity", sum(aoi$pct_above_LOQ_std < 5)))
+gs <- read.csv(file.path(COMP_DIR, "R1_loq", "loq_filter_summary.csv")) %>% strat_cols() %>%
+  pivot_longer(c(genes_det05, genes_det10, genes_det20, genes_det10_phase2LOQ)) %>%
+  mutate(name = recode(name, genes_det05 = "≥5% AOIs", genes_det10 = "≥10% AOIs (used)", genes_det20 = "≥20% AOIs", genes_det10_phase2LOQ = "≥10%, earlier LOQ"))
+e3c <- ggplot(gs, aes(seg_label, value, fill = name)) + geom_col(position = position_dodge(0.85), width = 0.8) + facet_wrap(~timepoint) +
+  scale_fill_manual(values = c("#D9E2EC", "#3B6FB6", "#1F3A5F", "grey70"), name = NULL) +
+  labs(x = NULL, y = "Genes retained", title = "Gene universe by detection threshold") + theme(axis.text.x = element_text(angle = 30, hjust = 1))
+save_fig((e3a | e3b) / e3c + plot_annotation(tag_levels = "a"), "ExtendedDataFig3", 150)
+
+```
+
+### Purity and earlier named genes (interim)
+ESTIMATE purity versus deconvolved tumour fraction, purity by response, and earlier named genes in pre-treatment PanCK⁺PSMA⁻ AOIs under the four covariate sets (comp_18).
+
+```{r comp-21-figures-v3-08}
+## =====================================================================================
+## ED4 -- purity and the earlier named genes
+## =====================================================================================
+pur <- read.csv(file.path(COMP_DIR, "R3_nepc_purity", "D_purity_diagnostics.csv")) %>% strat_cols()
+e4a <- ggplot(pur, aes(seg_label, rho_purity_vs_decon, fill = timepoint)) + geom_col(position = position_dodge(0.8), width = 0.75) +
+  scale_fill_manual(values = c("#D9E2EC", "#9DB4D3", "#1F3A5F"), name = NULL) +
+  labs(x = NULL, y = "Spearman ρ, ESTIMATE purity vs deconvolved tumour fraction", title = "ESTIMATE purity is an expression-derived composition proxy")
+e4b <- ggplot(pur, aes(seg_label, -log10(p_purity_NR_vs_R), fill = timepoint)) + geom_col(position = position_dodge(0.8), width = 0.75) +
+  geom_hline(yintercept = -log10(0.05), linetype = 2, linewidth = 0.25) + scale_fill_manual(values = c("#D9E2EC", "#9DB4D3", "#1F3A5F"), name = NULL) +
+  labs(x = NULL, y = "−log10 P, purity NR vs R (patient level)", title = "Purity does not differ by response at patient level")
+gt <- read.csv(file.path(COMP_DIR, "R3_nepc_purity", "B_deck_genes_by_covariates.csv")) %>% filter(contrast == "NR", stratum == "PanCKPSMA__Screening") %>%
+  mutate(covariates = factor(covariates, c("none", "batch", "batch_purity", "batch_tumourfrac")))
+e4c <- ggplot(gt, aes(covariates, gene, fill = -log10(P))) + geom_tile(colour = "white") + geom_text(aes(label = sprintf("%.1f", logFC)), size = 1.6) +
+  scale_fill_gradient(low = "white", high = "#C0392B", limits = c(0, 4), oob = squish, name = "−log10 P") +
+  labs(x = "Covariates (patient pseudobulk, NR vs R)", y = NULL, title = "Earlier named genes, PanCK+PSMA− pre-treatment (label = log2FC; no gene FDR < 0.05)") +
+  theme(axis.line = element_blank(), axis.ticks = element_blank(), axis.text.x = element_text(angle = 20, hjust = 1))
+rep8 <- read.csv(file.path(COMP_DIR, "R3_nepc_purity", "E_nepc_pet_reproduction.csv"))
+save_fig((e4a | e4b) / e4c + plot_layout(heights = c(0.8, 1.4)) + plot_annotation(tag_levels = "a"), "ExtendedDataFig4", 190)
+
+```
+
+### Low-signal-AOI sensitivity (interim)
+Spearman ρ with PSA change for key features using all AOIs versus the `EXCL_LOW=1` run of comp_13b, drawn when that run exists.
+
+```{r comp-21-figures-v3-09}
+## =====================================================================================
+## ED9 -- low-signal AOI exclusion sensitivity
+## =====================================================================================
+f_ex <- file.path(COMP_DIR, "C13_pseudobulk_LOQ_exclLow", "feature_tests_pseudobulk.csv")
+if (file.exists(f_ex)) {
+  fx <- read.csv(f_ex) %>% filter(feature %in% c("FOLH1", "IFN_I", "MHC_I", "NEPC_up", "IBSP", "CHGA")) %>% transmute(stratum, feature, rho_ex = rho)
+  fa <- ft %>% filter(feature %in% c("FOLH1", "IFN_I", "MHC_I", "NEPC_up", "IBSP", "CHGA")) %>% transmute(stratum, feature, rho_all = rho, seg_label, timepoint)
+  e9 <- ggplot(inner_join(fa, fx, by = c("stratum", "feature")), aes(rho_all, rho_ex, colour = seg_label, shape = timepoint)) +
+    geom_abline(linetype = 3, linewidth = 0.25) + geom_point(size = 1.3) + facet_wrap(~feature) +
+    scale_colour_manual(values = setNames(seg_cols, seg_lab), name = NULL) +
+    labs(x = "Spearman ρ with PSA change, all AOIs", y = "… excluding AOIs with < 5% genes above LOQ",
+         title = "Key associations are robust to excluding low-signal AOIs")
+  save_fig(e9, "ExtendedDataFig9", 110)
+}
+cat("v3 figures complete.\n")
+```

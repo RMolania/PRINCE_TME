@@ -1,0 +1,76 @@
+---
+title: "Re-render a figure script without panel titles and subtitles"
+subtitle: "PRINCE spatial transcriptomics: `comp_44_run_notitle`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+Utility for the journal figure style, in which panel titles and subtitles are carried by the legends rather than the figure. It runs any figure script with three changes. Every line-initial `fig_dir <- ...` assignment is redirected to a chosen output folder. `labs()` and `ggtitle()` are masked so that titles and subtitles are dropped, and each dropped text is recorded in `dropped_titles_<script>.tsv` so its content can be moved into the legends. `ggsave()` is masked to blank `plot.title` and `plot.subtitle` on every patchwork panel. For `comp_41_figures_v5`, which rebuilds v4 panels by evaluating `comp_28_figures_v4`, the inner scratch folder is redirected to `<out_dir>/v4`. This is why several final Extended Data figures are taken from `Manuscript_v5/v4/`. The analysis code itself is not changed.
+
+**Manuscript items supported**
+
+- Produces the title-free files used for Figs 1–6 and Extended Data Figs 1 and 3–9 (via `comp_41_figures_v5`), Extended Data Fig. 2 (via `comp_21_figures_v3`) and Extended Data Fig. 10 (via `comp_24_ed_standR`), as copied by `tools/assemble_figures.sh`
+
+**Pipeline step:** not run on its own; used by other scripts (see Overview). Approximate runtime: as for the wrapped script.
+
+**Inputs**
+
+- `a figure script (e.g. .build/comp_41_figures_v5.R) and its inputs`
+
+**Outputs**
+
+- `<out_dir>/<figure files>`
+- `<out_dir>/v4/ (for comp_41)`
+- `<out_dir>/dropped_titles_<script>.tsv`
+
+**Depends on**: `comp_41_figures_v5`, `comp_21_figures_v3`, `comp_24_ed_standR`
+
+## Analysis
+
+Header: usage (`Rscript comp_44_run_notitle.R <script.R> <out_dir>`) and the three changes made to the wrapped script.
+
+Define masking versions of `labs`, `ggtitle` and `ggsave` in the global environment. The first two record and discard title and subtitle; `ggsave` adds a theme that blanks titles on ggplot and patchwork objects. Read the target script, require at least one line-initial `fig_dir` assignment and redirect it to `out_dir`, and redirect a line-initial `scratch <-` assignment to `out_dir/v4`. Evaluate the modified source in the global environment, then write the unique dropped titles to a TSV file.
+
+```{r comp-44-run-notitle-01}
+## ============================================================================
+## PRINCE manuscript v5 -- re-render a figure script without panel titles/subtitles.
+## Usage: Rscript comp_44_run_notitle.R <script.R> <out_dir>
+##   * every `fig_dir <- ...` assignment at line start is redirected to <out_dir>
+##   * labs()/ggtitle() drop title and subtitle (recorded to <out_dir>/dropped_titles_<script>.tsv
+##     so that information carried by titles can be moved into the figure legends)
+##   * ggsave() additionally blanks plot.title/plot.subtitle on every (patchwork) panel
+## ============================================================================
+args <- commandArgs(trailingOnly = TRUE); script <- args[1]; dir.create(args[2], showWarnings = FALSE, recursive = TRUE)
+out_dir <- normalizePath(args[2])   # absolute path: some scripts change the working directory
+suppressMessages({ library(ggplot2); library(patchwork) })
+.dropped <- character()
+.rec <- function(x) if (!is.null(x)) .dropped <<- c(.dropped, paste(as.character(x), collapse = " "))
+labs <- function(..., title = NULL, subtitle = NULL) { .rec(title); .rec(subtitle); ggplot2::labs(...) }
+ggtitle <- function(label, subtitle = NULL) { .rec(label); .rec(subtitle); ggplot2::labs() }
+.blank <- theme(plot.title = element_blank(), plot.subtitle = element_blank())
+ggsave <- function(filename, plot = ggplot2::last_plot(), ...) {
+  plot <- if (inherits(plot, "patchwork")) plot & .blank else if (inherits(plot, "ggplot")) plot + .blank else plot
+  ggplot2::ggsave(filename, plot, ...) }
+src <- readLines(script)
+i <- grep("^fig_dir <- ", src); stopifnot(length(i) >= 1)
+src[i] <- sub("^fig_dir <- [^;]*", sprintf('fig_dir <- "%s"', out_dir), src[i])
+## comp_41 rebuilds v4 panels by evaluating comp_28 -- keep that inner redirect but point it at out_dir/v4
+src <- sub('^scratch <- .*', sprintf('scratch <- "%s"', file.path(out_dir, "v4")), src)
+eval(parse(text = src), envir = globalenv())
+writeLines(unique(.dropped), file.path(out_dir, paste0("dropped_titles_", sub("\\.R$", "", basename(script)), ".tsv")))
+cat("notitle render complete:", script, "\n")
+```

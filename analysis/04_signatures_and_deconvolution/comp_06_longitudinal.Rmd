@@ -1,0 +1,248 @@
+---
+title: "Longitudinal programme change, variance partition and the treatment-induced PanCK⁺PSMA⁻ programme"
+subtitle: "PRINCE spatial transcriptomics: `comp_06_longitudinal`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+Programmes are compared across timepoints, so the scores must be on a common scale. For each compartment, all patient AOIs from Archival, Screening and Cycle1 are therefore TMM-normalised together; artefact probes are removed, and control and progression AOIs are excluded. Programmes are scored with singscore, which is rank-based and so insensitive to per-AOI library scaling, and batch enters as a covariate. The script then runs four analyses:
+1. Variance partition on the 3,000 most variable genes, with patient, timepoint, batch and response group as random effects.
+2. Programme change on each leg (Archival → Screening, primary to metastasis; Screening → Cycle1, on treatment) in matched patients, with the AOI-level model score ~ post × PSA change + batch + (1 | patient).
+3. Primary-to-metastasis concordance: Spearman correlation of patient-mean Archival and Screening scores.
+4. The PanCK⁺PSMA⁻ programme induced between Screening and Cycle1, from paired limma-voom with patient blocking (duplicateCorrelation). Its score is tested against PSA change at each timepoint, to ask whether any link with response is already present before treatment (selection) or appears only after it (adaptation).
+
+The matched-patient counts in the script header predate the bone-only restriction. The bone-only counts are in `results/C1_clinical/matched_sample_availability.csv`.
+
+**Manuscript items supported**
+
+- Supplementary Fig. 3 (programme change in matched patients and primary–metastasis concordance; drawn by comp_11)
+- Supplementary Table 10 (programme change per leg) and Supplementary Table 11 (treatment-induced PanCK⁺PSMA⁻ genes, FDR < 0.05), written to the workbook by comp_11
+- Intermediate results used by comp_10 (first-draft main figures)
+
+**Pipeline step:** `./run_pipeline.sh --only 06_longitudinal`. Approximate runtime: minutes (variancePartition parallel over PRINCE_MAX_WORKERS).
+
+**Inputs**
+
+- `data/phase2_se_qc_filtered.qs`
+- `results/C1_clinical/patient_table.qs`
+- `data/reference/ProstateCancer_GeneSignatures.R`
+
+**Outputs**
+
+- `results/C6_longitudinal/variance_partition_by_segment.csv`
+- `results/C6_longitudinal/programme_change_per_leg.csv`
+- `results/C6_longitudinal/primary_met_concordance.csv`
+- `results/C6_longitudinal/PanCKPSMAneg_Screening_to_Cycle1_paired_DE.csv`
+- `results/C6_longitudinal/escape_programme_selection_vs_adaptation.csv`
+- `results/C6_longitudinal/common_scale_scores.qs`
+
+**Depends on**: `comp_00b_bone_cohort`, `comp_01_clinical`
+
+## Analysis
+
+Script header: the common-scale scoring design and the four analyses. The matched-patient numbers quoted in the header come from the earlier all-site cohort.
+
+### Set-up and programmes
+Reads the QC-filtered object and the patient table, and defines the programmes scored: selected curated immune signatures, NEPC-up, AR panel, IFN-I/STING, HLA-I, bone TAM/TIM, osteoclast and bone-remodelling sets, plus five single genes (FOLH1, CHGA, IBSP, CD276, B2M). Only patient AOIs from the three main timepoints are kept.
+
+```{r comp-06-longitudinal-01}
+## ============================================================================
+## PRINCE comprehensive analysis -- C6: longitudinal / treatment-effect analyses
+## Matched patients per compartment are counted and printed below (bone-only cohort).
+## Scores here are recomputed per segment on one common TMM logCPM across timepoints
+## (singscore is rank-based, so per-AOI library scaling does not matter); batch is a
+## covariate. Artefact probes removed; Control / DiseaseProgression excluded.
+##  (1) variancePartition per segment (top 3000 variable genes):
+##      patient, timepoint, study_batch, response group
+##  (2) programme change per leg (Arch->Scr = metastasis/site; Scr->C1 = treatment):
+##      AOI-level score ~ timepoint * psa + study_batch + (1|patient), matched pts only
+##  (3) primary -> metastasis concordance: patient-mean Archival vs Screening scores
+##  (4) PSMA- escape: treatment-induced PanCK+PSMA- programme (Scr->C1, paired limma
+##      with patient blocking); is it already higher pre-treatment in poor responders
+##      (selection) or only after treatment (adaptation)?
+## ============================================================================
+
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({
+  library(qs); library(SummarizedExperiment); library(dplyr); library(tidyr); library(edgeR)
+  library(limma); library(variancePartition); library(BiocParallel); library(singscore)
+  library(lmerTest); library(ggplot2)
+})
+setwd(PRINCE_DIR)
+check_ram_or_stop(20)
+bp <- SnowParam(workers = MAX_WORKERS, progressbar = FALSE)
+
+se <- qs::qread("phase2_se_qc_filtered.qs")
+cd <- as.data.frame(colData(se))
+pt <- qs::qread(out_path("C1_clinical", "patient_table.qs"))
+sig_env <- new.env(); sys.source(file.path(PMCC_DIR, "ProstateCancer_GeneSignatures.R"), envir = sig_env)
+artefact_re <- "^(USP17L|PRAMEF|NBPF|OR[0-9]+[A-Z]+[0-9]+)"
+progs <- c(sig_env$immune_sigs[c("Tcell_inflamed_GEP", "MHC_I", "MHC_II", "IFN_I", "T_exhaustion",
+                                 "Cytotoxic_effector", "Treg", "M2_macrophage", "TGFb_response_FTBRS")],
+  list(NEPC_up = c("ASCL1", "SOX2", "NKX2-1", "FOXA2", "INSM1", "CHGA", "CHGB", "SYP", "NCAM1",
+                   "EZH2", "AURKA", "MYCN", "PCSK1"),
+       AR_panel = c("AR", "KLK3", "FOLH1", "NKX3-1", "HOXB13"),
+       IFN_I_STING_tumour = c("IRF9", "STAT1", "IRF7", "OAS1", "STING1", "TMEM173", "B2M"),
+       HLA_I = c("HLA-A", "HLA-B", "HLA-C", "B2M"),
+       Bone_TAM_TIM = c("FOLR2", "SIGLEC1", "LYVE1", "SPP1", "IL4R", "CD200R1", "CD101", "LYZ", "S100A9",
+                        "S100A12", "APOE", "TGFB1", "C1QA", "C1QB", "C1QC", "FN1", "MMP9", "IL1RN",
+                        "CD163", "CLEC7A", "TREM1", "FCN1", "CSTA", "VCAN", "PLAUR"),
+       Osteoclast = c("ACP5", "CTSK", "MMP9", "OSCAR", "CALCR", "TNFRSF11A", "DCSTAMP", "OCSTAMP", "NFATC1"),
+       Bone_remodel_module = c("IBSP", "CTSK", "MMP3", "SMAD7")))
+genes1 <- c("FOLH1", "CHGA", "IBSP", "CD276", "B2M")
+
+keep_aoi <- cd$response_group_neat != "Control" & cd$timepoint %in% c("Archival", "Screening", "Cycle1")
+vp_rows <- list(); leg_rows <- list(); conc_rows <- list(); scores_all <- list()
+
+```
+
+### Per-compartment analyses
+For each compartment:
+- filters genes (≥ 10% of AOIs above LOQ, artefact families removed) and computes TMM logCPM across all three timepoints;
+- runs variancePartition on the 3,000 most variable genes with (1|patient) + (1|timepoint) + (1|batch) + (1|response group);
+- computes singscores and single-gene logCPM per AOI;
+- for each leg, restricts to patients with AOIs at both timepoints and fits the standardised score ~ post × psa + study_batch + (1 | patient), recording the mean change and the change × PSA interaction;
+- correlates patient-mean Archival and Screening scores (Spearman; at least eight patients).
+
+```{r comp-06-longitudinal-02}
+for (seg in c("CD45+", "PSMA+", "PanCK+PSMA-")) {
+  cat("\n==========", seg, "==========\n")
+  idx <- keep_aoi & cd$segment_name == seg
+  counts <- assay(se, "all_count")[, idx]; d <- cd[idx, ]
+  keep <- rowMeans(sweep(counts, 2, d$LOQ, `>`)) >= 0.10 & !grepl(artefact_re, rownames(counts))
+  dge <- calcNormFactors(DGEList(counts[keep, ]))
+  lc <- cpm(dge, log = TRUE, prior.count = 0.5)
+  d <- d %>% mutate(aoi = colnames(lc)) %>%
+    left_join(pt[, c("subject_id", "psa_change_capped")], by = "subject_id") %>%
+    mutate(psa = psa_change_capped / 50, timepoint = factor(timepoint, c("Archival", "Screening", "Cycle1")))
+  rownames(d) <- d$aoi
+
+  ## (1) variance partition
+  hv <- names(sort(apply(lc, 1, var), decreasing = TRUE))[1:3000]
+  vp <- fitExtractVarPartModel(lc[hv, ], ~ (1|subject_id) + (1|timepoint) + (1|study_batch) +
+                                 (1|response_group_neat), d, BPPARAM = bp)
+  vp_rows[[seg]] <- data.frame(segment = seg, component = colnames(vp), median_frac = apply(vp, 2, median),
+                               mean_frac = colMeans(vp))
+  print(vp_rows[[seg]], row.names = FALSE)
+
+  ## scores
+  rk <- rankGenes(lc)
+  S <- sapply(progs, function(g) { g <- intersect(g, rownames(lc)); if (length(g) >= 3) simpleScore(rk, upSet = g)$TotalScore else NA })
+  S <- cbind(S, t(lc[intersect(genes1, rownames(lc)), , drop = FALSE]))
+  rownames(S) <- colnames(lc)
+  scores_all[[seg]] <- cbind(d[, c("subject_id", "timepoint", "response_group_neat", "psa_change_capped", "study_batch", "roi_name")], S)
+
+  ## (2) per-leg change x outcome (matched patients)
+  for (leg in list(c("Archival", "Screening"), c("Screening", "Cycle1"))) {
+    pts <- intersect(d$subject_id[d$timepoint == leg[1]], d$subject_id[d$timepoint == leg[2]])
+    dd <- d[d$timepoint %in% leg & d$subject_id %in% pts, ] %>% mutate(post = as.integer(timepoint == leg[2]))
+    for (p in colnames(S)) {
+      dd$y <- as.numeric(scale(S[rownames(dd), p]))
+      f <- tryCatch(suppressMessages(lmer(y ~ post * psa + study_batch + (1 | subject_id), data = dd)), error = function(e) NULL)
+      if (is.null(f)) next
+      s <- summary(f)$coefficients
+      g <- function(t, k) if (t %in% rownames(s)) s[t, k] else NA
+      leg_rows[[paste(seg, leg[1], p)]] <- data.frame(
+        segment = seg, leg = paste(leg, collapse = "->"), programme = p, n_patients = length(pts),
+        n_NR = length(unique(dd$subject_id[dd$response_group_neat == "Non_Responder"])),
+        change_at_mean_psa = g("post", "Estimate"), p_change = g("post", "Pr(>|t|)"),
+        change_x_psa = g("post:psa", "Estimate"), p_change_x_psa = g("post:psa", "Pr(>|t|)"))
+    }
+  }
+
+  ## (3) primary -> met concordance (patient means)
+  pm <- data.frame(subject_id = d$subject_id, timepoint = d$timepoint, S, check.names = FALSE) %>%
+    group_by(subject_id, timepoint) %>% summarise(across(everything(), mean), .groups = "drop")
+  for (p in colnames(S)) {
+    w <- pm %>% select(subject_id, timepoint, v = all_of(p)) %>% pivot_wider(names_from = timepoint, values_from = v)
+    if (!all(c("Archival", "Screening") %in% names(w))) next
+    ok <- complete.cases(w$Archival, w$Screening)
+    if (sum(ok) < 8) next
+    ct <- cor.test(w$Archival[ok], w$Screening[ok], method = "spearman", exact = FALSE)
+    conc_rows[[paste(seg, p)]] <- data.frame(segment = seg, programme = p, n_patients = sum(ok),
+                                             rho_archival_vs_screening = unname(ct$estimate), p = ct$p.value)
+  }
+}
+
+```
+
+### Treatment-induced PanCK⁺PSMA⁻ programme
+In PanCK⁺PSMA⁻ AOIs of patients with both Screening and Cycle1 tissue, fits paired limma-voom (~ timepoint + batch, two-pass duplicateCorrelation with patient blocking). Up to 100 genes up-regulated on treatment at FDR < 0.05 form the programme. If at least ten genes qualify, the programme is scored at every timepoint and tested as score ~ psa + study_batch + (1 | patient), with responder and non-responder means.
+
+```{r comp-06-longitudinal-03}
+## ---- (4) PSMA- escape programme: selection vs adaptation -------------------------------
+cat("\n========== PSMA- escape programme ==========\n")
+idx <- keep_aoi & cd$segment_name == "PanCK+PSMA-"
+counts <- assay(se, "all_count")[, idx]; d <- cd[idx, ]
+pts <- intersect(d$subject_id[d$timepoint == "Screening"], d$subject_id[d$timepoint == "Cycle1"])
+sel <- d$timepoint %in% c("Screening", "Cycle1") & d$subject_id %in% pts
+cc <- counts[, sel]; dd <- d[sel, ]
+keep <- rowMeans(sweep(cc, 2, dd$LOQ, `>`)) >= 0.10 & !grepl(artefact_re, rownames(cc))
+dge <- calcNormFactors(DGEList(cc[keep, ]))
+X <- model.matrix(~ factor(timepoint, c("Screening", "Cycle1")) + study_batch, dd)
+colnames(X)[2] <- "post"
+X <- X[, qr(X)$pivot[seq_len(qr(X)$rank)], drop = FALSE]
+v <- voom(dge, X); dc <- duplicateCorrelation(v, X, block = dd$subject_id)
+v <- voom(dge, X, block = dd$subject_id, correlation = dc$consensus)
+dc <- duplicateCorrelation(v, X, block = dd$subject_id)
+fit <- eBayes(lmFit(v, X, block = dd$subject_id, correlation = dc$consensus))
+tt <- topTable(fit, coef = "post", number = Inf)
+escape_up <- head(rownames(tt)[tt$logFC > 0 & tt$adj.P.Val < 0.05], 100)
+cat("Treatment-induced PanCK+PSMA- genes (FDR<0.05, up, top <=100):", length(escape_up), "\n")
+cat(head(escape_up, 40), "\n")
+esc <- NULL
+if (length(escape_up) >= 10) {
+  sc_pan <- scores_all[["PanCK+PSMA-"]]
+  lc_all <- cpm(calcNormFactors(DGEList(counts)), log = TRUE, prior.count = 0.5)
+  sc_pan$escape <- simpleScore(rankGenes(lc_all[, rownames(sc_pan)]), upSet = intersect(escape_up, rownames(lc_all)))$TotalScore
+  esc <- bind_rows(lapply(c("Archival", "Screening", "Cycle1"), function(tp) {
+    x <- sc_pan %>% filter(timepoint == tp) %>% mutate(psa = psa_change_capped / 50, y = as.numeric(scale(escape)))
+    f <- suppressMessages(lmer(y ~ psa + study_batch + (1 | subject_id), data = x))
+    s <- summary(f)$coefficients["psa", ]
+    data.frame(timepoint = tp, n_aoi = nrow(x), beta_psa = s["Estimate"], p = s["Pr(>|t|)"],
+               mean_R = mean(x$escape[x$response_group_neat == "Responder"]),
+               mean_NR = mean(x$escape[x$response_group_neat == "Non_Responder"]))
+  }))
+  cat("Escape-programme score vs PSA change by timepoint (selection if already positive pre-treatment):\n")
+  print(esc, row.names = FALSE)
+}
+
+```
+
+### Report and save
+Applies BH-FDR within compartment × leg for change and change × PSA, and across programmes for concordance. Prints the main results and writes the variance-partition, per-leg change, concordance, paired DE and programme tables, plus the common-scale per-AOI scores.
+
+```{r comp-06-longitudinal-04}
+## ---- report + save -------------------------------------------------------------------
+vp_tab <- bind_rows(vp_rows); leg_tab <- bind_rows(leg_rows) %>% group_by(segment, leg) %>%
+  mutate(fdr_change = p.adjust(p_change, "BH"), fdr_change_x_psa = p.adjust(p_change_x_psa, "BH")) %>% ungroup()
+conc_tab <- bind_rows(conc_rows) %>% mutate(fdr = p.adjust(p, "BH"))
+options(width = 220)
+fmt <- function(x) as.data.frame(x %>% mutate(across(where(is.numeric), ~signif(.x, 3))))
+cat("\n==== Programme change per leg (FDR < 0.1 for change or change x PSA) ====\n")
+print(fmt(leg_tab %>% filter(fdr_change < 0.1 | fdr_change_x_psa < 0.1) %>% arrange(segment, leg, p_change)), row.names = FALSE)
+cat("\n==== Primary -> metastasis concordance of programmes ====\n")
+print(fmt(conc_tab %>% arrange(p)), row.names = FALSE)
+
+write.csv(vp_tab, out_path("C6_longitudinal", "variance_partition_by_segment.csv"), row.names = FALSE)
+write.csv(leg_tab, out_path("C6_longitudinal", "programme_change_per_leg.csv"), row.names = FALSE)
+write.csv(conc_tab, out_path("C6_longitudinal", "primary_met_concordance.csv"), row.names = FALSE)
+write.csv(tt, out_path("C6_longitudinal", "PanCKPSMAneg_Screening_to_Cycle1_paired_DE.csv"))
+if (!is.null(esc)) write.csv(esc, out_path("C6_longitudinal", "escape_programme_selection_vs_adaptation.csv"), row.names = FALSE)
+qs::qsave(scores_all, out_path("C6_longitudinal", "common_scale_scores.qs"))
+cat("\nC6 complete.\n")
+```

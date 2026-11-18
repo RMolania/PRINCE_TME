@@ -1,0 +1,226 @@
+---
+title: "Legacy: SpatialDecon (safeTME) deconvolution and CD45⁺ composition"
+subtitle: "PRINCE spatial transcriptomics: `phase6_spatialdecon`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "results_legacy"))
+```
+
+## Overview
+
+This is a legacy script from the earlier all-site analysis (primary tumours plus metastatic biopsies from bone, lymph node and soft tissue). It is included for transparency and is not part of the bone-only pipeline. It ran SpatialDecon with the generic safeTME immune and stromal reference on all QC-passed, non-control AOIs at every timepoint. The aims were to check the segmentation masks (CD45⁺ immune-dominant, tumour segments tumour-dominant) and to describe CD45⁺ immune composition by response group and timepoint. No per-probe negative-control matrix was available, so each AOI's negative-probe geometric mean was used as a uniform background. Counts were Q3-normalised. Tumour AOIs with ESTIMATE purity above 0.9 served as anchors, from which SpatialDecon estimated tumour profiles.
+
+No output of this script is used in the current analysis. The manuscript's deconvolution uses tissue-matched references (PCCAT; GSE143791 plus PCCAT tumour profiles) in comp_03b, comp_17 and comp_19. phase6b corrects how the proportions were computed here.
+
+**Manuscript items supported**
+
+- Not used by the manuscript (legacy; superseded by the tissue-matched deconvolution of comp_03b/comp_17/comp_19)
+
+**Pipeline step:** `./run_pipeline.sh --legacy` (optional; not needed to reproduce the manuscript, whose frozen inputs are in `data/previous_analysis/`). Approximate runtime: a few minutes.
+
+**Inputs**
+
+- `data/interim/phase2_se_with_qc_metrics.qs`
+
+**Outputs**
+
+- `results_legacy/phase6_spatialdecon_results.rds`
+- `results_legacy/Results/Phase6_SpatialDecon/mask_validation.pdf`
+- `results_legacy/Results/Phase6_SpatialDecon/CD45_celltype_proportions.csv`
+- `results_legacy/Results/Phase6_SpatialDecon/CD45_celltype_vs_response.csv`
+- `results_legacy/Results/Phase6_SpatialDecon/CD45_celltype_vs_timepoint.csv`
+- `results_legacy/Results/Phase6_SpatialDecon/CD45_composition_stacked.pdf`
+
+**Depends on**: `comp_00a`
+
+## Analysis
+
+### Legacy SpatialDecon run
+
+The header gives the scope, the background approximation and the normalisation.
+
+Selects QC-passed, non-control AOIs with a background estimate. The script Q3-normalises the counts, builds a uniform per-AOI background matrix, marks high-purity tumour AOIs as anchors, and runs `spatialdecon` with safeTME and its cell-type merges. The result object is saved.
+
+```{r phase6-spatialdecon-01}
+## ============================================================================
+## PRINCE Trial GeoMx DSP -- Phase 6: SpatialDecon (safeTME) cell-type deconvolution
+##
+## Runs across all QC-passed, non-Control AOIs (Archival/Screening/Cycle1/
+## DiseaseProgression, all 3 segments) to (a) validate segment masks (CD45+
+## should be immune-dominant, PSMA+/PanCK+PSMA- tumour-dominant) and (b)
+## characterise immune-cell composition within CD45+ specifically by response
+## group and timepoint.
+##
+## Background: no per-probe negative-control matrix is available (stripped
+## from the main SE -- see Phase 1/2 notes), so the validated per-AOI
+## negative-probe geometric mean already reconstructed in Phase 2
+## (colData$neg_probe_geomean) is used as a uniform per-AOI background level,
+## a standard simplification when per-probe background isn't available.
+## Normalization: upper-quartile (Q3), the standard approach for GeoMx counts
+## ahead of spatialdecon.
+## ============================================================================
+
+suppressMessages({
+  library(qs); library(SummarizedExperiment); library(dplyr); library(tidyr)
+  library(SpatialDecon); library(ggplot2)
+})
+
+PRINCE_ROOT <- normalizePath(Sys.getenv("PRINCE_ROOT", "."))
+RAW_DIR <- file.path(PRINCE_ROOT, "data", "interim")     # all-site QC'd objects written by comp_00a_qc
+dir.create(file.path(PRINCE_ROOT, "results_legacy"), showWarnings = FALSE)
+setwd(file.path(PRINCE_ROOT, "results_legacy"))           # legacy outputs; frozen copies used downstream are in data/previous_analysis
+dir.create("Results/Phase6_SpatialDecon", showWarnings = FALSE, recursive = TRUE)
+
+se <- qs::qread(file.path(RAW_DIR, "phase2_se_with_qc_metrics.qs"))
+cd <- as.data.frame(colData(se))
+idx <- cd$qc_status == "PASS" & cd$response_group_neat != "Control" & !is.na(cd$neg_probe_geomean)
+se <- se[, idx]
+cd <- droplevels(as.data.frame(colData(se)))
+cat("N AOIs for deconvolution:", ncol(se), "\n")
+
+raw <- assay(se, "all_count")
+raw <- as.matrix(raw)
+
+## Q3 (upper-quartile) normalization -- standard for GeoMx ahead of spatialdecon
+q3 <- apply(raw, 2, function(x) quantile(x[x > 0], 0.75))
+norm <- sweep(raw, 2, q3, "/") * mean(q3)
+
+## background: uniform per-AOI negative-probe geomean (validated in Phase 2)
+bg <- matrix(rep(cd$neg_probe_geomean, each = nrow(raw)), nrow = nrow(raw),
+             dimnames = dimnames(raw))
+
+## mark high-purity PSMA+/PanCK+ AOIs as pure-tumour anchors so spatialdecon
+## can estimate an empirical tumour profile (safeTME itself has no tumour
+## reference, by design)
+is_pure_tumor <- cd$segment_name %in% c("PSMA+", "PanCK+PSMA-") & cd$tumour.purity.estimate > 0.9
+cat("N AOIs marked as pure-tumour anchors:", sum(is_pure_tumor), "\n")
+
+data("safeTME")
+data("safeTME.matches")
+
+cat("\nRunning spatialdecon (this may take a few minutes)...\n")
+res <- spatialdecon(norm = norm, bg = bg, X = safeTME, raw = raw,
+                     is_pure_tumor = is_pure_tumor, cellmerges = safeTME.matches)
+
+saveRDS(res, "phase6_spatialdecon_results.rds")
+cat("Saved raw spatialdecon result object.\n")
+
+```
+
+### Mask validation
+
+Sums the non-tumour proportions per AOI and summarises them by compartment. A boxplot is saved.
+
+```{r phase6-spatialdecon-02}
+## ---------------------------------------------------------------------------
+## Step 1: Mask validation -- non-tumour (immune+stroma) fraction by segment
+## ---------------------------------------------------------------------------
+prop_all <- res$prop_of_all  # cell types x AOIs, proportions including tumour cluster
+cell_types <- rownames(prop_all)
+immune_types <- setdiff(cell_types, c("tumor", grep("^tumor", cell_types, value = TRUE)))
+cat("\nCell type rows returned:", paste(cell_types, collapse = ", "), "\n")
+
+nontumor_frac <- colSums(prop_all[rownames(prop_all) != "tumor", , drop = FALSE])
+cd$nontumor_fraction <- nontumor_frac[colnames(se)]
+
+cat("\n================ MASK VALIDATION: non-tumour fraction by segment ================\n")
+print(cd %>% group_by(segment_name) %>%
+        summarise(n = n(), median_nontumor = median(nontumor_fraction),
+                  mean_nontumor = mean(nontumor_fraction)))
+
+p_mask <- ggplot(cd, aes(segment_name, nontumor_fraction, fill = segment_name)) +
+  geom_boxplot(outlier.size = 0.6) + theme_bw() +
+  labs(title = "SpatialDecon mask validation", subtitle = "Non-tumour (immune+stromal) fraction by segment",
+       x = NULL, y = "Non-tumour fraction") + theme(legend.position = "none")
+ggsave("Results/Phase6_SpatialDecon/mask_validation.pdf", p_mask, width = 6, height = 5)
+
+```
+
+### CD45⁺ composition
+
+Within CD45⁺ AOIs, the script tests each cell-type proportion of the non-tumour compartment against response group (archival and pre-treatment AOIs) and against timepoint. These are AOI-level linear models without patient blocking. It also prints macrophage fractions by response and timepoint and saves a stacked composition plot.
+
+```{r phase6-spatialdecon-03}
+## ---------------------------------------------------------------------------
+## Step 2: Within CD45+, per-celltype proportions (of non-tumour compartment)
+## ---------------------------------------------------------------------------
+cd45_idx <- which(cd$segment_name == "CD45+")
+prop_nontumor <- res$prop_of_nontumor  # already renormalised excluding tumour cluster
+celltype_mat <- t(prop_nontumor[, colnames(se)[cd45_idx], drop = FALSE])
+celltype_df <- as.data.frame(celltype_mat)
+celltype_df$subject_id <- cd$subject_id[cd45_idx]
+celltype_df$timepoint <- cd$timepoint[cd45_idx]
+celltype_df$response_group_neat <- cd$response_group_neat[cd45_idx]
+
+write.csv(celltype_df, "Results/Phase6_SpatialDecon/CD45_celltype_proportions.csv", row.names = FALSE)
+
+cat("\n================ CD45+ CELL TYPE COMPOSITION: mean proportion overall ================\n")
+mean_props <- sort(colMeans(celltype_mat), decreasing = TRUE)
+print(round(mean_props, 4))
+
+## Test each cell type for response-group association, within Archival+Screening (baseline)
+cat("\n================ CD45+ CELL TYPE vs RESPONSE GROUP (Archival+Screening) ================\n")
+sub <- celltype_df %>% filter(timepoint %in% c("Archival", "Screening"))
+test_rows <- list()
+for (ct in colnames(celltype_mat)) {
+  fit <- lm(sub[[ct]] ~ sub$response_group_neat)
+  pval <- tryCatch(anova(fit)$`Pr(>F)`[1], error = function(e) NA)
+  r2 <- summary(fit)$r.squared
+  means <- tapply(sub[[ct]], sub$response_group_neat, mean)
+  test_rows[[ct]] <- data.frame(celltype = ct, R2 = r2, pval = pval,
+                                 mean_Intermediate = means["Intermediate"],
+                                 mean_NonResponder = means["Non_Responder"],
+                                 mean_Responder = means["Responder"])
+}
+test_tab <- bind_rows(test_rows) %>% arrange(pval)
+print(test_tab, row.names = FALSE)
+write.csv(test_tab, "Results/Phase6_SpatialDecon/CD45_celltype_vs_response.csv", row.names = FALSE)
+
+## Test each cell type across timepoints (pooled response groups) -- does
+## composition change over the treatment course?
+cat("\n================ CD45+ CELL TYPE vs TIMEPOINT (all patients) ================\n")
+test_rows_tp <- list()
+for (ct in colnames(celltype_mat)) {
+  fit <- lm(celltype_df[[ct]] ~ celltype_df$timepoint)
+  pval <- tryCatch(anova(fit)$`Pr(>F)`[1], error = function(e) NA)
+  means <- tapply(celltype_df[[ct]], celltype_df$timepoint, mean)
+  test_rows_tp[[ct]] <- data.frame(celltype = ct, pval = pval,
+                                    Archival = means["Archival"], Screening = means["Screening"],
+                                    Cycle1 = means["Cycle1"], DiseaseProgression = means["DiseaseProgression"])
+}
+test_tab_tp <- bind_rows(test_rows_tp) %>% arrange(pval)
+print(test_tab_tp, row.names = FALSE)
+write.csv(test_tab_tp, "Results/Phase6_SpatialDecon/CD45_celltype_vs_timepoint.csv", row.names = FALSE)
+
+## Macrophage fraction specifically (bone-niche / osteoclast hypothesis check)
+cat("\n================ MACROPHAGE FRACTION: response x timepoint ================\n")
+print(celltype_df %>% group_by(timepoint, response_group_neat) %>%
+        summarise(n = n(), mean_macrophage = mean(macrophages), .groups = "drop"))
+
+## stacked composition plot
+long <- celltype_df %>% pivot_longer(-c(subject_id, timepoint, response_group_neat),
+                                      names_to = "celltype", values_to = "prop")
+top_types <- names(sort(colMeans(celltype_mat), decreasing = TRUE))[1:8]
+long$celltype_grp <- ifelse(long$celltype %in% top_types, long$celltype, "other")
+p_stack <- ggplot(long %>% filter(timepoint %in% c("Archival","Screening","Cycle1")),
+                   aes(x = response_group_neat, y = prop, fill = celltype_grp)) +
+  stat_summary(fun = mean, geom = "bar", position = "stack") +
+  facet_wrap(~timepoint) + theme_bw() +
+  labs(title = "CD45+ estimated immune composition (mean proportion of non-tumour)", x = NULL, y = "Mean proportion", fill = "Cell type") +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+ggsave("Results/Phase6_SpatialDecon/CD45_composition_stacked.pdf", p_stack, width = 10, height = 6)
+
+cat("\nSaved all Phase 6 outputs under Results/Phase6_SpatialDecon/\n")
+cat("Phase 6 script complete.\n")
+```

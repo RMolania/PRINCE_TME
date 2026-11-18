@@ -1,0 +1,253 @@
+---
+title: "Legacy: why PSMA⁺ strata appeared to resist batch correction"
+subtitle: "PRINCE spatial transcriptomics: `phase3d_psma_rootcause`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "results_legacy"))
+```
+
+## Overview
+
+This is a legacy script from the earlier all-site analysis (primary tumours plus metastatic biopsies from bone, lymph node and soft tissue). It is included for transparency and is not part of the bone-only pipeline. In the earlier analysis, the relative batch metric rose after RUV in PSMA⁺ strata, and positive-control F statistics inflated. This script tested the explanation that the relative metric (maximum batch R² over the top five PCs) can rise when correction removes large non-batch variation, even though the batch effect itself shrinks.
+
+For the six archival and pre-treatment strata, with the same filtering and RUV-4 setup as phase3, it compares the relative metric with an absolute measure (gene-wise between-batch sum of squares) for k = 0–5. It also identifies technical and biological drivers of the raw PCs, decomposes the change in positive-control F into numerator and denominator, measures the batch effect in control technical-replicate tissue, and flags AOI outliers by RLE. Of its outputs, only `batch_metrics_relative_vs_absolute.csv` is used in the current analysis, as a frozen input.
+
+**Manuscript items supported**
+
+- Supplementary Fig. 5a (relative versus absolute batch variance across RUV-4 k), plotted by comp_11 (its ExtendedDataFig1) from the frozen `data/previous_analysis/Phase3d_PSMA_RootCause/batch_metrics_relative_vs_absolute.csv`
+- Results: re-evaluation of earlier findings (RUV normalisation, Supplementary Fig. 5)
+
+**Pipeline step:** `./run_pipeline.sh --legacy` (optional; not needed to reproduce the manuscript, whose frozen inputs are in `data/previous_analysis/`). Approximate runtime: minutes.
+
+**Inputs**
+
+- `data/interim/phase2_se_qc_filtered.qs`
+
+**Outputs**
+
+- `results_legacy/Results/Phase3d_PSMA_RootCause/batch_metrics_relative_vs_absolute.csv (frozen copy in data/previous_analysis/Phase3d_PSMA_RootCause/)`
+- `results_legacy/Results/Phase3d_PSMA_RootCause/raw_pc_drivers.csv`
+- `results_legacy/Results/Phase3d_PSMA_RootCause/posctrl_F_decomposition.csv`
+- `results_legacy/Results/Phase3d_PSMA_RootCause/control_tissue_batch_effect.csv`
+- `results_legacy/Results/Phase3d_PSMA_RootCause/aoi_outlier_metrics.csv`
+
+**Depends on**: `comp_00a`
+
+## Analysis
+
+### Legacy PSMA⁺ normalisation diagnostics
+
+The header states the open question and the five diagnostics. The script writes only to its own output folder.
+
+Sets the working directory to `results_legacy/` and loads the all-site QC-filtered object, the stable genes and the positive-control markers. Defines `group_ss()`, a vectorised one-way ANOVA giving gene-wise between-batch and total sums of squares, and the same 10%-above-LOQ log-CPM preparation as phase3.
+
+```{r phase3d-psma-rootcause-01}
+## ============================================================================
+## PRINCE Trial GeoMx DSP -- Phase 3d: PSMA+ normalization root-cause diagnostics
+##
+## Open question from Phase 3/3b: in PSMA+ (Archival, Screening) the technical
+## R2 metric ROSE after RUV-4 and RUV-III-PRPS, and FOLH1/KLK3/AR F-stats
+## inflated. Note the PSMA+ raw tech_R2 (0.26 / 0.13) is already the lowest of
+## all six pre-treatment strata (others 0.47-0.78). The Phase 3 metric is
+## RELATIVE (max batch R2 over the top-5 PCs), so it can rise when a correction
+## removes large non-batch variation even if the batch effect itself shrinks.
+##
+## This script tests that against alternatives, for all 6 pre-treatment strata
+## (same filtering/logCPM/RUV-4 setup as phase3_normalization.R):
+##   1. relative vs ABSOLUTE batch effect (gene-wise between-batch SS, log-CPM)
+##      at RUV-4 k = 0..5
+##   2. drivers of raw PC1-5 (library size, purity, neg probes, saturation,
+##      %genes>LOQ, batch, DSP experiment, patient, response)
+##   3. positive-control F inflation: numerator (response SS) vs denominator
+##      (residual SS) change
+##   4. Control-tissue AOIs (technical replicates; QC use only, per memory
+##      prince-control-samples-role): gene-wise batch R2 per segment
+##   5. per-AOI outliers (RLE median/IQR) and extreme purity in PSMA+
+## Read-only with respect to existing results; writes only Results/Phase3d_*.
+## ============================================================================
+
+suppressMessages({
+  library(qs); library(SummarizedExperiment); library(dplyr)
+  library(ruv); library(edgeR); library(singscore)
+})
+
+PRINCE_ROOT <- normalizePath(Sys.getenv("PRINCE_ROOT", "."))
+RAW_DIR <- file.path(PRINCE_ROOT, "data", "interim")     # all-site QC'd objects written by comp_00a_qc
+dir.create(file.path(PRINCE_ROOT, "results_legacy"), showWarnings = FALSE)
+setwd(file.path(PRINCE_ROOT, "results_legacy"))           # legacy outputs; frozen copies used downstream are in data/previous_analysis
+out_dir <- "Results/Phase3d_PSMA_RootCause"
+dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+se <- qs::qread(file.path(RAW_DIR, "phase2_se_qc_filtered.qs"))
+cd_full <- as.data.frame(colData(se))
+stable_genes <- singscore::getStableGenes(n_stable = 2000)
+pos_ctrl_markers <- list(
+  "CD45+"       = c("PTPRC", "CD3D", "CD8A", "CD68"),
+  "PSMA+"       = c("FOLH1", "KLK3", "AR"),
+  "PanCK+PSMA-" = c("KRT8", "KRT18", "EPCAM", "KRT19")
+)
+
+r2 <- function(y, var) {
+  ok <- !is.na(var)
+  if (length(unique(var[ok])) < 2) return(NA_real_)
+  summary(lm(y[ok] ~ var[ok]))$r.squared
+}
+tech_R2 <- function(pca_x, batch_var, npc = 5) {
+  max(sapply(seq_len(min(npc, ncol(pca_x))), function(i) r2(pca_x[, i], batch_var)))
+}
+# gene-wise between-group SS for an AOIs x genes matrix (vectorised one-way ANOVA)
+group_ss <- function(mat, g) {
+  g <- factor(g)
+  mu <- colMeans(mat)
+  gm <- rowsum(mat, g) / as.vector(table(g))
+  ss_between <- colSums(sweep(sweep(gm, 2, mu)^2, 1, as.vector(table(g)), `*`))
+  ss_total <- colSums(sweep(mat, 2, mu)^2)
+  list(between = ss_between, total = ss_total, r2 = ss_between / ss_total)
+}
+prep_logcpm <- function(sub_se) {
+  sub_cd <- as.data.frame(colData(sub_se))
+  counts <- assay(sub_se, "all_count")
+  keep <- rowMeans(sweep(counts, 2, sub_cd$LOQ, `>`)) >= 0.10
+  t(edgeR::cpm(counts[keep, ], log = TRUE, prior.count = 0.5))
+}
+
+strata <- expand.grid(segment = c("CD45+", "PSMA+", "PanCK+PSMA-"),
+                      timepoint = c("Archival", "Screening"), stringsAsFactors = FALSE)
+sweep_rows <- list(); driver_rows <- list(); posctrl_rows <- list(); aoi_rows <- list()
+
+```
+
+### Per-stratum diagnostics
+
+For each stratum the script:
+- computes the R² of each raw PC (1–5) with library size, ESTIMATE purity, negative-probe background, % genes above LOQ, saturation, batch, DSP experiment, patient and response;
+- fits RUV-4 for k = 0–5 and records the relative metric, absolute between-batch variance, batch share of total variance, median gene-wise batch R² and PC1 variance;
+- splits each positive-control marker's ANOVA into response and residual sums of squares;
+- records per-AOI RLE median and IQR.
+
+```{r phase3d-psma-rootcause-02}
+for (s in seq_len(nrow(strata))) {
+  seg <- strata$segment[s]; tp <- strata$timepoint[s]
+  sid <- paste0(gsub("[^A-Za-z0-9]", "", seg), "__", tp)
+  idx <- cd_full$segment_name == seg & cd_full$timepoint == tp &
+    cd_full$response_group_neat != "Control"
+  sub_se <- se[, idx]
+  sub_cd <- droplevels(as.data.frame(colData(sub_se)))
+  logcpm <- prep_logcpm(sub_se)
+  ctl <- colnames(logcpm) %in% stable_genes
+  resp <- droplevels(factor(sub_cd$response_group_neat))
+  X <- model.matrix(~resp)[, -1, drop = FALSE]
+  batch <- sub_cd$study_batch
+  markers <- intersect(pos_ctrl_markers[[seg]], colnames(logcpm))
+
+  ## 2. raw PC drivers
+  pca_raw <- prcomp(logcpm, center = TRUE)
+  ve <- pca_raw$sdev^2 / sum(pca_raw$sdev^2)
+  drivers <- list(
+    log_libsize = log(sub_cd$library_size), purity = sub_cd$tumour.purity.estimate,
+    neg_probe = log(sub_cd$neg_probe_geomean), pct_above_LOQ = sub_cd$pct_genes_above_LOQ,
+    saturation = sub_cd$sequencing_saturation, study_batch = factor(batch),
+    dsp_experiment = factor(sub_cd$dsp_experiment), patient = factor(sub_cd$subject_id),
+    response = resp)
+  for (pc in 1:5) {
+    driver_rows[[paste(sid, pc)]] <- data.frame(
+      stratum = sid, PC = pc, var_expl = round(ve[pc], 3),
+      t(sapply(drivers, function(v) round(r2(pca_raw$x[, pc], v), 3))))
+  }
+
+  ## 1 + 3. RUV-4 k sweep: relative vs absolute batch metrics; pos-ctrl decomposition
+  for (k in 0:5) {
+    if (k == 0) {
+      Yadj <- logcpm
+    } else {
+      fit <- tryCatch(ruv::RUV4(Y = logcpm, X = X, ctl = ctl, k = k), error = function(e) NULL)
+      if (is.null(fit)) next
+      Yadj <- logcpm - fit$W %*% fit$alpha
+    }
+    pca <- if (k == 0) pca_raw else prcomp(Yadj, center = TRUE)
+    gb <- group_ss(Yadj, batch)
+    sweep_rows[[paste(sid, k)]] <- data.frame(
+      stratum = sid, k = k,
+      rel_tech_R2_top5PC = round(tech_R2(pca$x, batch), 3),
+      total_var = round(sum(gb$total) / (nrow(Yadj) - 1), 1),
+      abs_batch_var = round(sum(gb$between) / (nrow(Yadj) - 1), 1),
+      batch_share_total = round(sum(gb$between) / sum(gb$total), 4),
+      median_gene_batch_R2 = round(median(gb$r2, na.rm = TRUE), 4),
+      pc1_var_expl = round((pca$sdev[1]^2) / sum(pca$sdev^2), 3))
+    for (g in markers) {
+      a <- summary(aov(Yadj[, g] ~ resp))[[1]]
+      posctrl_rows[[paste(sid, k, g)]] <- data.frame(
+        stratum = sid, k = k, gene = g, ss_response = round(a[1, "Sum Sq"], 2),
+        ss_resid = round(a[2, "Sum Sq"], 2), F = round(a[1, "F value"], 2))
+    }
+  }
+
+  ## 5. per-AOI outlier metrics
+  rle <- sweep(logcpm, 2, apply(logcpm, 2, median))
+  aoi_rows[[sid]] <- data.frame(
+    stratum = sid, aoi = rownames(logcpm), subject = sub_cd$subject_id, batch = batch,
+    response = resp, purity = sub_cd$tumour.purity.estimate,
+    log_libsize = log(sub_cd$library_size),
+    rle_median = apply(rle, 1, median), rle_iqr = apply(rle, 1, IQR),
+    PC1 = pca_raw$x[, 1], PC2 = pca_raw$x[, 2])
+}
+
+```
+
+### Control tissue and outputs
+
+Control tissue-microarray AOIs are technical replicates, so any between-batch variance in them is purely technical. Their gene-wise batch R² is computed per compartment. AOIs with RLE median or IQR more than 3 MADs from the stratum median are flagged as outliers. All tables are printed and written; the relative-versus-absolute table is the one frozen for later use.
+
+```{r phase3d-psma-rootcause-03}
+## 4. Control-tissue technical replicates: batch effect per segment
+ctrl_rows <- list()
+for (seg in names(pos_ctrl_markers)) {
+  idx <- cd_full$segment_name == seg & cd_full$response_group_neat == "Control"
+  csub <- se[, idx]; ccd <- as.data.frame(colData(csub))
+  lc <- prep_logcpm(csub)
+  gb <- group_ss(lc, ccd$study_batch)
+  ctrl_rows[[seg]] <- data.frame(
+    segment = seg, n_aoi = ncol(csub), n_batches = length(unique(ccd$study_batch)),
+    median_gene_batch_R2 = round(median(gb$r2, na.rm = TRUE), 3),
+    batch_share_total = round(sum(gb$between) / sum(gb$total), 3),
+    abs_batch_var = round(sum(gb$between) / (nrow(lc) - 1), 1),
+    total_var = round(sum(gb$total) / (nrow(lc) - 1), 1))
+}
+
+sweep_tab <- bind_rows(sweep_rows); driver_tab <- bind_rows(driver_rows)
+posctrl_tab <- bind_rows(posctrl_rows); aoi_tab <- bind_rows(aoi_rows)
+ctrl_tab <- bind_rows(ctrl_rows)
+
+aoi_tab <- aoi_tab %>% group_by(stratum) %>%
+  mutate(rle_iqr_z = (rle_iqr - median(rle_iqr)) / mad(rle_iqr),
+         rle_med_z = (rle_median - median(rle_median)) / mad(rle_median),
+         outlier = abs(rle_iqr_z) > 3 | abs(rle_med_z) > 3) %>% ungroup()
+
+options(width = 200)
+cat("\n==== 1. Relative vs absolute batch metrics across RUV-4 k ====\n"); print(as.data.frame(sweep_tab), row.names = FALSE)
+cat("\n==== 2. Raw PC drivers (R2) ====\n"); print(as.data.frame(driver_tab), row.names = FALSE)
+cat("\n==== 3. Positive-control F decomposition ====\n"); print(as.data.frame(posctrl_tab), row.names = FALSE)
+cat("\n==== 4. Control-tissue replicates: batch effect by segment ====\n"); print(as.data.frame(ctrl_tab), row.names = FALSE)
+cat("\n==== 5. AOI outliers per stratum ====\n")
+print(as.data.frame(aoi_tab %>% group_by(stratum) %>%
+  summarise(n = n(), n_outlier = sum(outlier),
+            outlier_batches = paste(unique(batch[outlier]), collapse = ","))), row.names = FALSE)
+
+write.csv(sweep_tab, file.path(out_dir, "batch_metrics_relative_vs_absolute.csv"), row.names = FALSE)
+write.csv(driver_tab, file.path(out_dir, "raw_pc_drivers.csv"), row.names = FALSE)
+write.csv(posctrl_tab, file.path(out_dir, "posctrl_F_decomposition.csv"), row.names = FALSE)
+write.csv(ctrl_tab, file.path(out_dir, "control_tissue_batch_effect.csv"), row.names = FALSE)
+write.csv(aoi_tab, file.path(out_dir, "aoi_outlier_metrics.csv"), row.names = FALSE)
+cat("\nPhase 3d complete; tables in", out_dir, "\n")
+```

@@ -1,0 +1,217 @@
+---
+title: "Legacy: exploratory NEPC and AR scores and longitudinal trajectories"
+subtitle: "PRINCE spatial transcriptomics: `phase8_nepc_longitudinal`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "results_legacy"))
+```
+
+## Overview
+
+This is a legacy script from the earlier all-site analysis (primary tumours plus metastatic biopsies from bone, lymph node and soft tissue). It is included for transparency and is not part of the bone-only pipeline. It was an exploratory pass over all four timepoints (archival, pre-treatment, on-treatment, progression). It used TMM log-CPM without RUV, because the on-treatment and progression timepoints were never taken through the RUV pipeline. With singscore it scored a 13-gene NEPC panel adapted from Beltran et al., a five-gene AR-pathway panel, and the Hallmark androgen response, MYC targets and IFN-γ response sets. It related the NEPC score to response group in tumour segments, correlated NEPC with AR scores in PSMA⁺ AOIs, and plotted patient-level trajectories.
+
+The per-AOI scores (`data/previous_analysis/Phase8_NEPC_Longitudinal/all_scores_per_AOI.csv`, frozen) are read by comp_18. comp_18 tests whether the earlier reported correlation of the NEPC score with PSMA-PET tumour growth holds with AOIs or patients as observations. All tests in this script are at AOI level and do not account for repeated AOIs per patient.
+
+**Manuscript items supported**
+
+- Results: Re-evaluation of earlier neuroendocrine findings (NEPC score versus PSMA-PET tumour growth at AOI versus patient level), via comp_18 reading the frozen `data/previous_analysis/Phase8_NEPC_Longitudinal/all_scores_per_AOI.csv`
+- Supports the reconciliation shown in Extended Data Fig. 8 (comp_18)
+
+**Pipeline step:** `./run_pipeline.sh --legacy` (optional; not needed to reproduce the manuscript, whose frozen inputs are in `data/previous_analysis/`). Approximate runtime: a few minutes.
+
+**Inputs**
+
+- `data/interim/phase2_se_qc_filtered.qs`
+
+**Outputs**
+
+- `results_legacy/previous_analysis/Phase8_NEPC_Longitudinal/all_scores_per_AOI.csv (frozen copy in data/previous_analysis/Phase8_NEPC_Longitudinal/)`
+- `results_legacy/phase8_nepc_longitudinal_results.rds`
+- `results_legacy/Results/Phase8_NEPC_Longitudinal/NEPC_vs_AR_scatter.pdf`
+- `results_legacy/Results/Phase8_NEPC_Longitudinal/traj_{NEPC,AR,MYC,IFN,FOLH1}.pdf`
+
+**Depends on**: `comp_00a`
+
+## Analysis
+
+### Legacy exploratory NEPC and longitudinal analysis
+
+The header gives the scope caveat (no RUV; hypothesis-generating) and the NEPC and AR panels.
+
+Loads the all-site QC-filtered object without control AOIs and computes TMM log-CPM over all genes. AOIs are scored with singscore `simpleScore` (up-set only) for the NEPC panel, the AR panel and Hallmark androgen, MYC and IFN-γ sets, and *FOLH1* and *AR* expression is stored.
+
+```{r phase8-nepc-longitudinal-01}
+## ============================================================================
+## PRINCE Trial GeoMx DSP -- Exploratory: NEPC signal + longitudinal trajectories
+##
+## Exploratory analyses: (1) longitudinal differences across all 4
+## timepoints (Archival/Screening/Cycle1/DiseaseProgression), (2) exploration
+## of neuroendocrine prostate cancer (NEPC) transdifferentiation as a candidate
+## resistance mechanism and its relationship to response.
+##
+## SCOPE CAVEAT (stated explicitly, not buried): Cycle1 and DiseaseProgression
+## were never taken through the full Phase 3 RUV-4/RUV-III-PRPS pipeline (that
+## was scoped to Archival+Screening only, for Q1). This script uses simple
+## TMM+log2CPM normalization (no RUV) across all 4 timepoints so trajectories
+## can be shown -- it is an EXPLORATORY, lighter-weight pass, not a Phase-4-grade
+## DE result. Treat patterns here as hypothesis-generating even more so than the
+## Phase 4/5 findings.
+##
+## NEPC marker panel: adapted from the classic Beltran et al. (2016, Nat Med)
+## NEPC signature -- up in NEPC: ASCL1, SOX2, NKX2-1, FOXA2, INSM1, CHGA, CHGB,
+## SYP, NCAM1, EZH2, AURKA, MYCN, PCSK1; down in NEPC (AR-pathway): AR, KLK3,
+## FOLH1 (=PSMA -- directly relevant, since PSMA loss undermines the trial's
+## own drug target), NKX3-1, HOXB13. This is a curated literature panel, not a
+## validated deconvolution reference -- treated as a score, not a diagnosis.
+## ============================================================================
+
+suppressMessages({
+  library(qs); library(SummarizedExperiment); library(dplyr); library(tidyr)
+  library(edgeR); library(singscore); library(ggplot2); library(GSEABase)
+})
+
+PRINCE_ROOT <- normalizePath(Sys.getenv("PRINCE_ROOT", "."))
+RAW_DIR <- file.path(PRINCE_ROOT, "data", "interim")     # all-site QC'd objects written by comp_00a_qc
+dir.create(file.path(PRINCE_ROOT, "results_legacy"), showWarnings = FALSE)
+setwd(file.path(PRINCE_ROOT, "results_legacy"))           # legacy outputs; frozen copies used downstream are in data/previous_analysis
+dir.create("Results/Phase8_NEPC_Longitudinal", showWarnings = FALSE, recursive = TRUE)
+
+se <- qs::qread(file.path(RAW_DIR, "phase2_se_qc_filtered.qs"))
+cd <- as.data.frame(colData(se))
+idx <- cd$response_group_neat != "Control"
+se <- se[, idx]
+cd <- droplevels(as.data.frame(colData(se)))
+cd$timepoint <- factor(cd$timepoint, levels = c("Archival", "Screening", "Cycle1", "DiseaseProgression"))
+
+counts <- assay(se, "all_count")
+dge <- DGEList(counts); dge <- calcNormFactors(dge, method = "TMM")
+logcpm <- edgeR::cpm(dge, log = TRUE, prior.count = 0.5)  # genes x AOIs
+
+nepc_up <- c("ASCL1","SOX2","NKX2-1","FOXA2","INSM1","CHGA","CHGB","SYP","NCAM1","EZH2","AURKA","MYCN","PCSK1")
+ar_down_in_nepc <- c("AR","KLK3","FOLH1","NKX3-1","HOXB13")
+nepc_up <- intersect(nepc_up, rownames(logcpm))
+ar_down_in_nepc <- intersect(ar_down_in_nepc, rownames(logcpm))
+cat("NEPC-up genes available:", paste(nepc_up, collapse=", "), "\n")
+cat("AR-pathway (down-in-NEPC) genes available:", paste(ar_down_in_nepc, collapse=", "), "\n")
+
+hallmark <- msigdbr::msigdbr(species = "Homo sapiens", collection = "H")
+ar_hallmark <- intersect(hallmark$gene_symbol[hallmark$gs_name == "HALLMARK_ANDROGEN_RESPONSE"], rownames(logcpm))
+myc_hallmark <- intersect(hallmark$gene_symbol[hallmark$gs_name == "HALLMARK_MYC_TARGETS_V1"], rownames(logcpm))
+ifn_hallmark <- intersect(hallmark$gene_symbol[hallmark$gs_name == "HALLMARK_INTERFERON_GAMMA_RESPONSE"], rownames(logcpm))
+
+rank_data <- rankGenes(logcpm)
+score_nepc <- simpleScore(rank_data, upSet = nepc_up)$TotalScore
+score_ar_small <- simpleScore(rank_data, upSet = ar_down_in_nepc)$TotalScore
+score_ar_hallmark <- simpleScore(rank_data, upSet = ar_hallmark)$TotalScore
+score_myc <- simpleScore(rank_data, upSet = myc_hallmark)$TotalScore
+score_ifn <- simpleScore(rank_data, upSet = ifn_hallmark)$TotalScore
+
+cd$score_nepc <- score_nepc
+cd$score_ar_pathway_genes <- score_ar_small
+cd$score_ar_hallmark <- score_ar_hallmark
+cd$score_myc_proliferation <- score_myc
+cd$score_ifn_gamma <- score_ifn
+cd$FOLH1_logcpm <- logcpm["FOLH1", ]
+cd$AR_logcpm <- if ("AR" %in% rownames(logcpm)) logcpm["AR", ] else NA
+
+```
+
+### NEPC versus response and AR
+
+In PSMA⁺ and PanCK⁺PSMA⁻ AOIs at the archival and pre-treatment timepoints, the script fits `NEPC score ~ response group` at AOI level. It reports the correlations of NEPC with Hallmark AR, *FOLH1* and *AR* in PSMA⁺ AOIs and saves a scatter plot.
+
+```{r phase8-nepc-longitudinal-02}
+## ---------------------------------------------------------------------------
+## NEPC vs response (cross-sectional, tumour segments), and NEPC vs AR correlation
+## ---------------------------------------------------------------------------
+cat("\n================ NEPC SCORE vs RESPONSE GROUP (tumour segments) ================\n")
+for (seg in c("PSMA+", "PanCK+PSMA-")) {
+  for (tp in c("Archival", "Screening")) {
+    sub <- cd %>% filter(segment_name == seg, timepoint == tp)
+    fit <- lm(score_nepc ~ response_group_neat, data = sub)
+    r2 <- summary(fit)$r.squared
+    pval <- tryCatch(anova(fit)$`Pr(>F)`[1], error = function(e) NA)
+    means <- tapply(sub$score_nepc, sub$response_group_neat, mean)
+    cat(sprintf("%-12s / %-10s  R2=%.3f p=%.4f  means: %s\n", seg, tp, r2, pval,
+                paste(names(means), round(means,4), sep="=", collapse=", ")))
+  }
+}
+
+cat("\n================ NEPC vs AR-PATHWAY CORRELATION (PSMA+ segment, all timepoints) ================\n")
+sub_psma <- cd %>% filter(segment_name == "PSMA+")
+cat("cor(NEPC score, AR-hallmark score):", round(cor(sub_psma$score_nepc, sub_psma$score_ar_hallmark), 3), "\n")
+cat("cor(NEPC score, FOLH1 logCPM):", round(cor(sub_psma$score_nepc, sub_psma$FOLH1_logcpm), 3), "\n")
+cat("cor(NEPC score, AR logCPM):", round(cor(sub_psma$score_nepc, sub_psma$AR_logcpm, use="complete.obs"), 3), "\n")
+
+p_cor <- ggplot(sub_psma, aes(score_ar_hallmark, score_nepc, color = response_group_neat)) +
+  geom_point(alpha = 0.7) + geom_smooth(method = "lm", se = FALSE, color = "black", linewidth = 0.5) +
+  theme_bw() + labs(title = "NEPC score vs AR-pathway (Hallmark) score, PSMA+ segment",
+                     x = "AR pathway score", y = "NEPC score")
+ggsave("Results/Phase8_NEPC_Longitudinal/NEPC_vs_AR_scatter.pdf", p_cor, width = 6, height = 5)
+
+```
+
+### Longitudinal trajectories
+
+Averaged per patient and timepoint in PSMA⁺ AOIs, the scores are plotted as individual trajectories with response-group means. Progression tissue exists only for responders. The script summarises the paired archival → on-treatment change by response group and writes the per-AOI score table that comp_18 later reads.
+
+```{r phase8-nepc-longitudinal-03}
+## ---------------------------------------------------------------------------
+## Longitudinal trajectories (patient-level mean per timepoint x segment)
+## ---------------------------------------------------------------------------
+cat("\n================ LONGITUDINAL: PATIENTS PER TIMEPOINT (PSMA+ segment) ================\n")
+traj <- cd %>% filter(segment_name == "PSMA+") %>%
+  group_by(subject_id, timepoint, response_group_neat) %>%
+  summarise(nepc = mean(score_nepc), ar = mean(score_ar_hallmark),
+            myc = mean(score_myc_proliferation), ifn = mean(score_ifn_gamma),
+            folh1 = mean(FOLH1_logcpm), .groups = "drop")
+print(as.data.frame(table(traj$timepoint, traj$response_group_neat)))
+
+plot_traj <- function(df, yvar, ylab) {
+  ggplot(df, aes(x = timepoint, y = .data[[yvar]], group = subject_id, color = response_group_neat)) +
+    geom_line(alpha = 0.4) + geom_point(alpha = 0.6) +
+    stat_summary(aes(group = response_group_neat), fun = mean, geom = "line", linewidth = 1.4) +
+    theme_bw() + labs(title = paste(ylab, "over treatment course (PSMA+ segment)"),
+                       subtitle = "Thin lines = individual patients; thick lines = group mean. DiseaseProgression tissue exists only for Responders (attrition).",
+                       y = ylab, x = "Timepoint", color = "Response")
+}
+ggsave("Results/Phase8_NEPC_Longitudinal/traj_NEPC.pdf", plot_traj(traj, "nepc", "NEPC score"), width = 8, height = 5)
+ggsave("Results/Phase8_NEPC_Longitudinal/traj_AR.pdf", plot_traj(traj, "ar", "AR pathway score"), width = 8, height = 5)
+ggsave("Results/Phase8_NEPC_Longitudinal/traj_MYC.pdf", plot_traj(traj, "myc", "MYC/proliferation score"), width = 8, height = 5)
+ggsave("Results/Phase8_NEPC_Longitudinal/traj_IFN.pdf", plot_traj(traj, "ifn", "IFN-gamma score"), width = 8, height = 5)
+ggsave("Results/Phase8_NEPC_Longitudinal/traj_FOLH1.pdf", plot_traj(traj, "folh1", "FOLH1 (PSMA) log2CPM"), width = 8, height = 5)
+
+## simple mixed-effect-ish test: does score change Archival->Cycle1 within patient (paired), by response
+cat("\n================ PAIRED WITHIN-PATIENT CHANGE: Archival -> Cycle1 (PSMA+) ================\n")
+wide <- traj %>% dplyr::select(subject_id, timepoint, response_group_neat, nepc, ar) %>%
+  pivot_wider(names_from = timepoint, values_from = c(nepc, ar), names_sep = "_")
+paired <- wide %>% filter(!is.na(nepc_Archival), !is.na(nepc_Cycle1))
+cat("N patients with both Archival and Cycle1 (PSMA+):", nrow(paired), "\n")
+if (nrow(paired) >= 3) {
+  paired$d_nepc <- paired$nepc_Cycle1 - paired$nepc_Archival
+  paired$d_ar <- paired$ar_Cycle1 - paired$ar_Archival
+  print(paired %>% group_by(response_group_neat) %>%
+          summarise(n = n(), mean_d_nepc = mean(d_nepc), mean_d_ar = mean(d_ar)))
+}
+
+write.csv(cd %>% dplyr::select(subject_id, timepoint, segment_name, response_group_neat,
+                         score_nepc, score_ar_hallmark, score_ar_pathway_genes,
+                         score_myc_proliferation, score_ifn_gamma, FOLH1_logcpm, AR_logcpm),
+          "Results/Phase8_NEPC_Longitudinal/all_scores_per_AOI.csv", row.names = FALSE)
+saveRDS(list(cd = cd, traj = traj), "phase8_nepc_longitudinal_results.rds")
+
+cat("\nSaved phase8_nepc_longitudinal_results.rds, all_scores_per_AOI.csv, and trajectory/scatter plots",
+    "under Results/Phase8_NEPC_Longitudinal/\n")
+cat("Phase 8 (exploratory NEPC + longitudinal) script complete.\n")
+```

@@ -1,0 +1,388 @@
+---
+title: "Patient-level pseudobulk analysis (filterByExpr gene set; superseded by the LOQ-universe version)"
+subtitle: "PRINCE spatial transcriptomics: `comp_13_pseudobulk_primary`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+First implementation of the patient-level pseudobulk analysis, adopted after an internal methods review found that RUV-adjusted AOI-level mixed models gave stronger associations than the unadjusted data, partly because the RUV factors correlated with PSA change. Counts are summed over each patient's AOIs within each compartment × timepoint stratum, so that the patient, not the AOI, is the unit of inference; sequencing batch is a covariate.
+
+The script tests pre-specified genes (*FOLH1*, *B2M*, *CD276*) and literature programmes against PSA change, response group and rPFS, with exclusion of batch 3 (which holds all intermediate patients) and leave-one-patient-out refits; genes selected in earlier analyses of the same data (*CHGA*, *IBSP*, *CTSK*, bone-remodelling module) form a separate, explicitly exploratory family. It also runs transcriptome-wide limma-voom, paired pre- to on-treatment change, primary–metastasis *FOLH1* concordance, within-lesion *FOLH1* heterogeneity and an elastic-net PSA50 prediction with permutation calibration.
+
+Genes here are filtered with edgeR `filterByExpr`. The analysis reported in the manuscript is the identical code run on the negative-probe (LOQ) gene universe in `comp_13b_pseudobulk_loq`; the outputs of this script feed only the interim figure and table sets (comp_14, comp_15) and the interim π₁ table of comp_13c.
+
+**Manuscript items supported**
+
+- Intermediate results used by comp_13c, comp_14 and comp_15; superseded in the final Supplementary Tables (S15–S21 are rebuilt from comp_13b by comp_47)
+- Supplementary Fig. 6 (via comp_14: batch-adjusted pseudobulk feature tests compared with AOI-level RUV mixed models)
+- Methods: Primary analysis: patient-level pseudobulk (same design, earlier gene filter)
+
+**Pipeline step:** `./run_pipeline.sh --only 13_pseudobulk_primary`. Approximate runtime: tens of minutes (dominated by the cross-validated PSA50 prediction with 100 label permutations).
+
+**Inputs**
+
+- `data/phase2_se_qc_filtered.qs`
+- `results/C1_clinical/patient_table.qs`
+- `data/reference/msigdb_gene_sets.rds`
+- `data/reference/ProstateCancer_GeneSignatures.R`
+
+**Outputs**
+
+- `results/C13_pseudobulk/feature_tests_pseudobulk.csv`
+- `results/C13_pseudobulk/transcriptome_wide_summary.csv`
+- `results/C13_pseudobulk/transcriptome_wide_limma_all_strata.csv`
+- `results/C13_pseudobulk/paired_induction_apriori_sets.csv`
+- `results/C13_pseudobulk/paired_induction_per_patient_deltas.csv`
+- `results/C13_pseudobulk/paired_Screening_Cycle1_limma.csv`
+- `results/C13_pseudobulk/FOLH1_primary_met_concordance.csv`
+- `results/C13_pseudobulk/FOLH1_roi_heterogeneity.csv`
+- `results/C13_pseudobulk/PSA50_prediction_cv_permutation.csv`
+- `results/C13_pseudobulk/pseudobulk_strata.qs`
+
+**Depends on**: `comp_00b_bone_cohort`, `comp_01_clinical`
+
+## Analysis
+
+Header summarising the rationale (patient-level inference after the internal methods review) and the six analysis sections A–F.
+
+### Set-up and feature definitions
+Loads the bone-only AOI object, the patient clinical table and the reference gene sets, and fixes the random seed. Defines the artefact-prone probe families removed throughout (*USP17L*, *PRAMEF*, *NBPF*, olfactory receptors), the a priori genes, the post hoc genes and the literature programmes (NEPC, AR, interferon, HLA, T-cell, TGF-β, bone-macrophage, osteoclast, osteoblast, Hallmark p53 and IFN-α); the bone-remodelling module is kept in its own post hoc list.
+
+```{r comp-13-pseudobulk-primary-01}
+## ============================================================================
+## PRINCE comprehensive analysis -- C13: patient-level pseudobulk PRIMARY analysis
+## Adopted after the 2026-10-25 internal methods review: RUV-adjusted mixed models gave
+## stronger associations than raw data (RUV W partly correlated with PSA change),
+## so the primary inference is now patient-level pseudobulk with study_batch as a
+## covariate; the RUV-based C4/C5 results are sensitivity analyses.
+##   A. pseudobulk per patient x segment x timepoint (sum counts; TMM; artefact
+##      probes removed; Control / DiseaseProgression excluded)
+##   B. features: a-priori genes (FOLH1, B2M, CD276) and literature programmes;
+##      post-hoc genes (CHGA, IBSP, CTSK, bone-remodel module -- selected from
+##      earlier DE on these data) kept in a separate, explicitly exploratory family
+##      tests: lm(feature ~ PSA change + batch); NR vs R (lm + batch, Wilcoxon);
+##      Cox rPFS (plain and batch-stratified); sensitivity excluding batch_3;
+##      leave-one-patient-out (LOPO) sign stability and max p
+##   C. transcriptome-wide pseudobulk limma-voom (~ PSA change + batch)
+##   D. paired Screening -> Cycle1 induction with a-priori sets (Hallmark P53,
+##      Hallmark IFN-alpha, IFN-I); per-patient deltas vs response (descriptive)
+##   E. primary -> metastasis FOLH1 concordance; FOLH1 ROI heterogeneity (raw logCPM)
+##   F. PSA50 prediction: repeated stratified 5-fold CV elastic net + permutation p
+##      (PSA50 re-derived from max PSA change; PMC-005 corrected)
+## ============================================================================
+
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({
+  library(qs); library(SummarizedExperiment); library(dplyr); library(tidyr); library(edgeR)
+  library(limma); library(survival); library(glmnet); library(pROC)
+})
+setwd(PRINCE_DIR)
+check_ram_or_stop(20)
+set.seed(2026)
+
+se <- qs::qread("phase2_se_qc_filtered.qs")
+cd <- as.data.frame(colData(se))
+pt <- qs::qread(out_path("C1_clinical", "patient_table.qs"))
+msig <- readRDS(file.path(PMCC_DIR, "msigdb_gene_sets.rds"))
+sig_env <- new.env(); sys.source(file.path(PMCC_DIR, "ProstateCancer_GeneSignatures.R"), envir = sig_env)
+artefact_re <- "^(USP17L|PRAMEF|NBPF|OR[0-9]+[A-Z]+[0-9]+)"
+tp_levels <- c("Archival", "Screening", "Cycle1")
+segs <- c("CD45+", "PSMA+", "PanCK+PSMA-")
+code <- c("CD45+" = "CD45", "PSMA+" = "PSMA", "PanCK+PSMA-" = "PanCKPSMA")
+
+apriori_genes <- c("FOLH1", "B2M", "CD276")
+posthoc_genes <- c("CHGA", "IBSP", "CTSK")
+programmes <- list(
+  NEPC_up = c("ASCL1", "SOX2", "NKX2-1", "FOXA2", "INSM1", "CHGA", "CHGB", "SYP", "NCAM1", "EZH2", "AURKA", "MYCN", "PCSK1"),
+  AR_panel = c("AR", "KLK3", "FOLH1", "NKX3-1", "HOXB13"),
+  Hallmark_androgen = msig$H$HALLMARK_ANDROGEN_RESPONSE,
+  IFN_I = sig_env$immune_sigs$IFN_I,
+  IFN_I_STING_tumour = c("IRF9", "STAT1", "IRF7", "OAS1", "STING1", "TMEM173", "B2M"),
+  MHC_I = sig_env$immune_sigs$MHC_I, MHC_II = sig_env$immune_sigs$MHC_II,
+  Tcell_inflamed_GEP = sig_env$immune_sigs$Tcell_inflamed_GEP,
+  T_exhaustion = sig_env$immune_sigs$T_exhaustion, Treg = sig_env$immune_sigs$Treg,
+  Cytotoxic_effector = sig_env$immune_sigs$Cytotoxic_effector,
+  TGFb_response = sig_env$immune_sigs$TGFb_response_FTBRS,
+  Bone_TAM_TIM = c("FOLR2", "SIGLEC1", "LYVE1", "SPP1", "IL4R", "CD200R1", "CD101", "LYZ", "S100A9", "S100A12",
+                   "APOE", "TGFB1", "C1QA", "C1QB", "C1QC", "FN1", "MMP9", "IL1RN", "CD163", "CLEC7A", "TREM1",
+                   "FCN1", "CSTA", "VCAN", "PLAUR"),
+  Osteoclast = c("ACP5", "CTSK", "MMP9", "OSCAR", "CALCR", "TNFRSF11A", "DCSTAMP", "OCSTAMP", "NFATC1"),
+  Osteoblast = c("RUNX2", "SP7", "BGLAP", "ALPL", "COL1A1", "IBSP", "SPP1", "SPARC", "PHEX", "DMP1"),
+  Hallmark_P53 = msig$H$HALLMARK_P53_PATHWAY,
+  Hallmark_IFNa = msig$H$HALLMARK_INTERFERON_ALPHA_RESPONSE)
+posthoc_programmes <- list(Bone_remodel_module = c("IBSP", "CTSK", "MMP3", "SMAD7"))
+
+```
+
+### A. Pseudobulk construction
+Excludes control-tissue AOIs and non-study timepoints, then sums raw counts over each patient's AOIs within each of the nine compartment × timepoint strata; the check that each patient-stratum comes from a single sequencing batch makes batch a patient-level covariate. Genes are filtered with `filterByExpr` (min.count 5, min.prop 0.3) and TMM-normalised. Features are log-CPM for single genes and mean z-scored log-CPM for programmes with at least three detected genes; `family_of` labels each feature as a priori gene, a priori programme or post hoc (exploratory).
+
+```{r comp-13-pseudobulk-primary-02}
+## ---- A. pseudobulk ---------------------------------------------------------------------
+keep_aoi <- cd$response_group_neat != "Control" & cd$timepoint %in% tp_levels
+counts_all <- assay(se, "all_count")
+counts_all <- counts_all[!grepl(artefact_re, rownames(counts_all)), ]
+pb_make <- function(idx) {
+  d <- cd[idx, ]
+  grp <- paste(d$subject_id, d$timepoint, sep = "|")
+  m <- sapply(split(seq_len(nrow(d)), grp), function(i) rowSums(counts_all[, rownames(d)[i], drop = FALSE]))
+  meta <- d %>% mutate(key = grp) %>% group_by(key) %>%
+    summarise(subject_id = first(subject_id), timepoint = first(timepoint), n_aoi = n(),
+              study_batch = first(study_batch), n_batches = n_distinct(study_batch), .groups = "drop")
+  meta <- meta[match(colnames(m), meta$key), ] %>%
+    left_join(pt %>% select(subject_id, response_group_neat, max_psa_change, psa_change_capped,
+                            r_pfstime, r_pfsevent, PSA50), by = "subject_id")
+  stopifnot(all(meta$n_batches == 1))
+  list(counts = m, meta = as.data.frame(meta))
+}
+pbs <- list()
+for (sg in segs) for (tp in tp_levels) {
+  p <- pb_make(which(keep_aoi & cd$segment_name == sg & cd$timepoint == tp))
+  dge <- DGEList(p$counts)
+  keep <- filterByExpr(dge, min.count = 5, min.prop = 0.3)
+  dge <- calcNormFactors(dge[keep, , keep.lib.sizes = FALSE])
+  p$lcpm <- cpm(dge, log = TRUE, prior.count = 1); p$dge <- dge
+  p$meta$log_lib <- log10(colSums(p$counts))
+  pbs[[paste0(code[sg], "__", tp)]] <- p
+}
+cat("Pseudobulk strata (patients):\n"); print(sapply(pbs, function(p) ncol(p$lcpm)))
+
+feat_matrix <- function(p) {
+  z <- t(scale(t(p$lcpm)))
+  gene_f <- t(p$lcpm[intersect(c(apriori_genes, posthoc_genes), rownames(p$lcpm)), , drop = FALSE])
+  prog_f <- sapply(c(programmes, posthoc_programmes), function(g) {
+    g <- intersect(g, rownames(z)); if (length(g) >= 3) colMeans(z[g, , drop = FALSE]) else rep(NA, ncol(z)) })
+  cbind(gene_f, prog_f)
+}
+family_of <- function(f) ifelse(f %in% c(posthoc_genes, names(posthoc_programmes)), "post-hoc (exploratory)",
+                          ifelse(f %in% apriori_genes, "a-priori gene", "a-priori programme"))
+
+```
+
+### B. Pre-specified feature tests
+For each stratum and feature: linear model feature ~ PSA change (per 50%) + batch; Spearman correlation with maximal PSA change; non-responder versus responder by linear model with batch and by Wilcoxon test (intermediate patients excluded); Cox regression for rPFS per s.d., unstratified and batch-stratified; refit excluding batch 3; and leave-one-patient-out refits, summarised as sign stability and the largest P. BH-FDR is applied within stratum and feature family, so exploratory features do not dilute the a priori family.
+
+```{r comp-13-pseudobulk-primary-03}
+## ---- B. feature tests ----------------------------------------------------------------------
+fit_lm <- function(y, x, batch) {
+  ok <- complete.cases(y, x)
+  b <- factor(batch[ok])
+  f <- if (nlevels(droplevels(b)) > 1) lm(y[ok] ~ x[ok] + b) else lm(y[ok] ~ x[ok])
+  s <- summary(f)$coefficients; c(s[2, 1], s[2, 4])
+}
+cox_p <- function(time, event, x, strata = NULL) {
+  ok <- complete.cases(time, event, x)
+  if (sum(event[ok]) < 3) return(c(NA, NA, NA, NA))
+  f <- if (is.null(strata)) coxph(Surv(time[ok], event[ok]) ~ scale(x[ok])) else
+    coxph(Surv(time[ok], event[ok]) ~ scale(x[ok]) + strata(strata[ok]))
+  ci <- exp(confint(f)); c(exp(coef(f))[1], ci[1, 1], ci[1, 2], summary(f)$coefficients[1, "Pr(>|z|)"])
+}
+res <- list()
+for (sid in names(pbs)) {
+  p <- pbs[[sid]]; m <- p$meta; F <- feat_matrix(p)
+  psa <- m$psa_change_capped / 50
+  nr <- ifelse(m$response_group_neat == "Non_Responder", 1, ifelse(m$response_group_neat == "Responder", 0, NA))
+  for (f in colnames(F)) {
+    y <- F[, f]; if (all(is.na(y))) next
+    a <- fit_lm(y, psa, m$study_batch)
+    sp <- suppressWarnings(cor.test(y, m$max_psa_change, method = "spearman", exact = FALSE))
+    b <- fit_lm(y, nr, m$study_batch)
+    w <- tryCatch(wilcox.test(y[nr == 1], y[nr == 0], exact = FALSE)$p.value, error = function(e) NA)
+    cx <- cox_p(m$r_pfstime, m$r_pfsevent, y); cxs <- cox_p(m$r_pfstime, m$r_pfsevent, y, m$study_batch)
+    nb3 <- m$study_batch != "batch_3"
+    a3 <- fit_lm(y[nb3], psa[nb3], m$study_batch[nb3])
+    lopo <- sapply(seq_len(nrow(m)), function(i) fit_lm(y[-i], psa[-i], m$study_batch[-i]))
+    res[[paste(sid, f)]] <- data.frame(
+      stratum = sid, feature = f, family = family_of(f), n = sum(!is.na(y)),
+      n_NR = sum(nr == 1, na.rm = TRUE), n_R = sum(nr == 0, na.rm = TRUE),
+      beta_psa = a[1], p_psa = a[2], rho = unname(sp$estimate), p_rho = sp$p.value,
+      beta_NR = b[1], p_NR = b[2], p_wilcox = w,
+      HR = cx[1], HR_lo = cx[2], HR_hi = cx[3], p_cox = cx[4], HR_strat = cxs[1], p_cox_strat = cxs[4],
+      beta_psa_no_b3 = a3[1], p_psa_no_b3 = a3[2],
+      lopo_sign_stable = mean(sign(lopo[1, ]) == sign(a[1])), lopo_max_p = max(lopo[2, ]))
+  }
+}
+res <- bind_rows(res) %>% group_by(stratum, family) %>%
+  mutate(fdr_psa = p.adjust(p_psa, "BH"), fdr_NR = p.adjust(p_NR, "BH"), fdr_cox = p.adjust(p_cox, "BH")) %>% ungroup()
+
+```
+
+### C. Transcriptome-wide pseudobulk limma
+limma-voom with robust empirical Bayes per stratum, design ~ PSA change (per 50%) + batch (batch dropped when constant). Records the number of genes at FDR < 0.1 and < 0.05 and looks up selected genes (*FOLH1*, *IBSP*, *CHGA*, *CD276*).
+
+```{r comp-13-pseudobulk-primary-04}
+## ---- C. transcriptome-wide pseudobulk limma ------------------------------------------------
+tw <- list(); tw_genes <- list()
+for (sid in names(pbs)) {
+  p <- pbs[[sid]]; m <- p$meta
+  X <- if (length(unique(m$study_batch)) > 1) model.matrix(~ I(psa_change_capped / 50) + study_batch, m) else
+    model.matrix(~ I(psa_change_capped / 50), m)
+  colnames(X)[2] <- "psa"
+  fit <- eBayes(lmFit(voom(p$dge, X), X), robust = TRUE)
+  tt <- topTable(fit, coef = "psa", number = Inf)
+  tw_genes[[sid]] <- tt %>% mutate(gene = rownames(tt), stratum = sid)
+  look <- function(g) if (g %in% rownames(tt)) sprintf("%.3g (P %.2g)", tt[g, "adj.P.Val"], tt[g, "P.Value"]) else NA
+  tw[[sid]] <- data.frame(stratum = sid, n_patients = ncol(p$lcpm), n_genes = nrow(tt),
+                          fdr10 = sum(tt$adj.P.Val < 0.1), fdr05 = sum(tt$adj.P.Val < 0.05),
+                          FOLH1 = look("FOLH1"), IBSP = look("IBSP"), CHGA = look("CHGA"), CD276 = look("CD276"))
+}
+tw <- bind_rows(tw)
+
+```
+
+### D. Paired pre- to on-treatment change
+For each compartment, patients with tissue at both bone timepoints are pseudobulked jointly and fitted with ~ patient + timepoint (limma-voom, robust). Pre-specified programmes (Hallmark p53, Hallmark IFN-α, IFN-I, IFN-I/STING, HLA class I and II) are scored per sample; per-patient change is tested by Wilcoxon signed-rank test, compared between response groups and correlated with PSA change (descriptive).
+
+```{r comp-13-pseudobulk-primary-05}
+## ---- D. paired Screening -> Cycle1 induction ----------------------------------------------
+pair_res <- list(); pair_delta <- list(); pair_genes <- list()
+for (sg in segs) {
+  idx <- which(keep_aoi & cd$segment_name == sg & cd$timepoint %in% c("Screening", "Cycle1"))
+  p <- pb_make(idx); m <- p$meta
+  both <- names(which(table(m$subject_id) == 2))
+  sel <- m$subject_id %in% both
+  dge <- DGEList(p$counts[, sel]); m <- m[sel, ]
+  dge <- calcNormFactors(dge[filterByExpr(dge, min.count = 5, min.prop = 0.3), , keep.lib.sizes = FALSE])
+  m$post <- as.integer(m$timepoint == "Cycle1")
+  X <- model.matrix(~ factor(subject_id) + post, m)
+  fit <- eBayes(lmFit(voom(dge, X), X), robust = TRUE)
+  tt <- topTable(fit, coef = "post", number = Inf)
+  pair_genes[[sg]] <- tt %>% mutate(gene = rownames(tt), segment = sg)
+  lc <- cpm(dge, log = TRUE, prior.count = 1); z <- t(scale(t(lc)))
+  for (s in c("Hallmark_P53", "Hallmark_IFNa", "IFN_I", "IFN_I_STING_tumour", "MHC_I", "MHC_II")) {
+    g <- intersect(programmes[[s]], rownames(z)); sc <- colMeans(z[g, , drop = FALSE])
+    dl <- data.frame(subject_id = m$subject_id, post = m$post, sc = sc) %>%
+      pivot_wider(names_from = post, values_from = sc) %>% mutate(delta = `1` - `0`) %>%
+      left_join(pt %>% select(subject_id, response_group_neat, max_psa_change), by = "subject_id")
+    pair_delta[[paste(sg, s)]] <- dl %>% mutate(segment = sg, programme = s)
+    r <- dl$response_group_neat
+    pair_res[[paste(sg, s)]] <- data.frame(
+      segment = sg, programme = s, n_pairs = nrow(dl), n_NR = sum(r == "Non_Responder"),
+      n_up = sum(dl$delta > 0), median_delta = median(dl$delta),
+      p_induction = wilcox.test(dl$delta, exact = FALSE)$p.value,
+      median_delta_R = median(dl$delta[r == "Responder"]), median_delta_NR = median(dl$delta[r == "Non_Responder"]),
+      p_R_vs_NR = tryCatch(wilcox.test(dl$delta[r == "Non_Responder"], dl$delta[r == "Responder"], exact = FALSE)$p.value, error = function(e) NA),
+      rho_delta_psa = cor(dl$delta, dl$max_psa_change, method = "spearman"),
+      p_rho_delta_psa = cor.test(dl$delta, dl$max_psa_change, method = "spearman", exact = FALSE)$p.value)
+  }
+}
+pair_res <- bind_rows(pair_res); pair_delta <- bind_rows(pair_delta)
+
+```
+
+### E. Primary–metastasis concordance and within-lesion heterogeneity
+Spearman correlation of pseudobulk *FOLH1* between the archival primary and the pre-treatment bone metastasis in matched patients, per compartment. Heterogeneity is the s.d. of AOI-level *FOLH1* (TMM log-CPM on all genes) across ROIs in patients with at least three pre-treatment ROIs, correlated with PSA change.
+
+```{r comp-13-pseudobulk-primary-06}
+## ---- E. concordance + heterogeneity (raw logCPM) ------------------------------------------
+conc <- bind_rows(lapply(names(code), function(sg) {
+  a <- pbs[[paste0(code[sg], "__Archival")]]; s <- pbs[[paste0(code[sg], "__Screening")]]
+  ia <- setNames(a$lcpm["FOLH1", ], a$meta$subject_id); is <- setNames(s$lcpm["FOLH1", ], s$meta$subject_id)
+  k <- intersect(names(ia), names(is))
+  ct <- cor.test(ia[k], is[k], method = "spearman", exact = FALSE)
+  data.frame(segment = sg, n = length(k), rho = unname(ct$estimate), p = ct$p.value)
+}))
+het <- bind_rows(lapply(names(code), function(sg) {
+  idx <- which(keep_aoi & cd$segment_name == sg & cd$timepoint == "Screening")
+  lc <- cpm(calcNormFactors(DGEList(counts_all[, idx])), log = TRUE, prior.count = 1)
+  d <- data.frame(subject_id = cd$subject_id[idx], v = lc["FOLH1", ]) %>% group_by(subject_id) %>%
+    filter(n() >= 3) %>% summarise(sd = sd(v), n_roi = n(), .groups = "drop") %>%
+    left_join(pt %>% select(subject_id, max_psa_change, response_group_neat), by = "subject_id")
+  ct <- cor.test(d$sd, d$max_psa_change, method = "spearman", exact = FALSE)
+  data.frame(segment = sg, n = nrow(d), n_NR = sum(d$response_group_neat == "Non_Responder"),
+             rho = unname(ct$estimate), p = ct$p.value)
+}))
+
+```
+
+### F. PSA50 prediction
+Elastic-net logistic regression (α = 0.5, λ chosen by inner three-fold CV) evaluated by 20 repeats of stratified five-fold cross-validation, with training-fold median imputation. Three predictor blocks are compared: pre-treatment bone a priori features across compartments, clinical features (ctDNA alterations and fraction, ALP, PSMA-PET SUVmean and volume, age), and both. Calibration uses 100 label permutations (each with five CV repeats); permutation P = (1 + #null ≥ observed)/(1 + 100). PSA50 is the corrected coding derived from maximal PSA change.
+
+```{r comp-13-pseudobulk-primary-07}
+## ---- F. PSA50 prediction: repeated stratified CV + permutation ------------------------------
+cv_auc <- function(X, y, reps = 20, k = 5) {
+  aucs <- replicate(reps, {
+    folds <- integer(length(y))
+    for (cl in unique(y)) { i <- which(y == cl); folds[i] <- sample(rep_len(seq_len(k), length(i))) }
+    pred <- numeric(length(y))
+    for (f in seq_len(k)) {
+      tr <- folds != f
+      med <- apply(X[tr, , drop = FALSE], 2, median, na.rm = TRUE)
+      imp <- function(M) { for (j in seq_len(ncol(M))) M[is.na(M[, j]), j] <- med[j]; M }
+      Xtr <- imp(X[tr, , drop = FALSE]); Xte <- imp(X[!tr, , drop = FALSE])
+      ok <- apply(Xtr, 2, sd) > 0
+      fit <- tryCatch(cv.glmnet(Xtr[, ok], y[tr], family = "binomial", alpha = 0.5, nfolds = 3), error = function(e) NULL)
+      pred[!tr] <- if (is.null(fit)) mean(y[tr]) else predict(fit, Xte[, ok, drop = FALSE], s = "lambda.1se", type = "response")
+    }
+    as.numeric(auc(roc(y, pred, quiet = TRUE, direction = "<")))
+  })
+  mean(aucs)
+}
+scr_feats <- Reduce(function(a, b) full_join(a, b, by = "subject_id"), lapply(names(code), function(sg) {
+  p <- pbs[[paste0(code[sg], "__Screening")]]
+  F <- feat_matrix(p)[, c(apriori_genes, names(programmes)), drop = FALSE]
+  F <- F[, colSums(!is.na(F)) > 0, drop = FALSE]
+  colnames(F) <- paste(code[sg], colnames(F), sep = ":")
+  data.frame(subject_id = p$meta$subject_id, F, check.names = FALSE)
+}))
+clin <- pt %>% transmute(subject_id, alt_TSG_alt, alt_TP53, alt_PTEN, ctDNA_BL = log1p(ctDNA_BL),
+                         ALP = log(lborres_alp), PSMAPET_BL_SUVmean, PSMAPET_BL_vol = log(PSMAPET_BL_vol), age)
+blocks <- list(Screening = scr_feats, Clinical = clin, `Screening+Clinical` = inner_join(scr_feats, clin, by = "subject_id"))
+pred <- bind_rows(lapply(names(blocks), function(b) {
+  d <- inner_join(blocks[[b]], pt %>% select(subject_id, PSA50), by = "subject_id")
+  X <- as.matrix(d %>% select(-subject_id, -PSA50)); X <- X[, colMeans(is.na(X)) < 0.3, drop = FALSE]; y <- d$PSA50
+  obs <- cv_auc(X, y)
+  perm <- replicate(100, cv_auc(X, sample(y), reps = 5))
+  data.frame(block = b, n = length(y), n_nonPSA50 = sum(y == 0), n_features = ncol(X), cv_auc = obs,
+             perm_mean = mean(perm), perm_p = (1 + sum(perm >= obs)) / (1 + length(perm)))
+}))
+
+```
+
+Prints the key summaries to the log and writes all result tables and the pseudobulk object for the interim figure and table scripts.
+
+```{r comp-13-pseudobulk-primary-08}
+## ---- report + save ----------------------------------------------------------------------------
+options(width = 230)
+fmt <- function(x) as.data.frame(x %>% mutate(across(where(is.numeric), ~signif(.x, 3))))
+cat("\n==== B. Key features, Screening (patient-level pseudobulk) ====\n")
+print(fmt(res %>% filter(grepl("Screening", stratum), feature %in% c(apriori_genes, posthoc_genes, "NEPC_up", "AR_panel",
+  "Bone_remodel_module", "Osteoclast", "IFN_I", "MHC_I")) %>%
+  select(stratum, feature, family, n, n_NR, beta_psa, p_psa, fdr_psa, rho, p_NR, p_wilcox, HR, p_cox, p_cox_strat, p_psa_no_b3, lopo_max_p)), row.names = FALSE)
+cat("\n==== B. All strata, FOLH1 ====\n")
+print(fmt(res %>% filter(feature == "FOLH1") %>% select(stratum, n, beta_psa, p_psa, rho, p_rho, HR, p_cox, p_cox_strat, p_psa_no_b3, lopo_sign_stable, lopo_max_p)), row.names = FALSE)
+cat("\n==== B. Any feature with FDR < 0.1 (psa or NR) ====\n")
+print(fmt(res %>% filter(fdr_psa < 0.1 | fdr_NR < 0.1) %>% arrange(stratum, p_psa) %>%
+  select(stratum, feature, family, n_NR, beta_psa, fdr_psa, beta_NR, fdr_NR, p_psa_no_b3, lopo_max_p)), row.names = FALSE)
+cat("\n==== C. Transcriptome-wide pseudobulk limma ====\n"); print(tw, row.names = FALSE)
+cat("\n==== D. Paired Screening -> Cycle1 (a-priori sets) ====\n"); print(fmt(pair_res), row.names = FALSE)
+cat("\n==== E. FOLH1 primary-metastasis concordance ====\n"); print(fmt(conc), row.names = FALSE)
+cat("\n==== E. FOLH1 ROI heterogeneity (Screening) ====\n"); print(fmt(het), row.names = FALSE)
+cat("\n==== F. PSA50 prediction (repeated stratified 5-fold CV, permutation p) ====\n"); print(fmt(pred), row.names = FALSE)
+
+write.csv(res, out_path("C13_pseudobulk", "feature_tests_pseudobulk.csv"), row.names = FALSE)
+write.csv(tw, out_path("C13_pseudobulk", "transcriptome_wide_summary.csv"), row.names = FALSE)
+write.csv(bind_rows(tw_genes), out_path("C13_pseudobulk", "transcriptome_wide_limma_all_strata.csv"), row.names = FALSE)
+write.csv(pair_res, out_path("C13_pseudobulk", "paired_induction_apriori_sets.csv"), row.names = FALSE)
+write.csv(pair_delta, out_path("C13_pseudobulk", "paired_induction_per_patient_deltas.csv"), row.names = FALSE)
+write.csv(bind_rows(pair_genes), out_path("C13_pseudobulk", "paired_Screening_Cycle1_limma.csv"), row.names = FALSE)
+write.csv(conc, out_path("C13_pseudobulk", "FOLH1_primary_met_concordance.csv"), row.names = FALSE)
+write.csv(het, out_path("C13_pseudobulk", "FOLH1_roi_heterogeneity.csv"), row.names = FALSE)
+write.csv(pred, out_path("C13_pseudobulk", "PSA50_prediction_cv_permutation.csv"), row.names = FALSE)
+qs::qsave(pbs, out_path("C13_pseudobulk", "pseudobulk_strata.qs"))
+cat("\nC13 complete.\n")
+```

@@ -1,0 +1,175 @@
+---
+title: "Tissue transcriptome versus PSMA/FDG-PET and liquid biopsy"
+subtitle: "PRINCE spatial transcriptomics: `comp_30_tissue_pet_ctdna`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+Links patient-level tissue features with the imaging and ctDNA data of the companion PRINCE ctDNA/CTC/PET analysis (Tolmeijer et al., J Nucl Med 2026). The features are *FOLH1* (log2 CPM) and the mean z-score of the Hallmark androgen, IFN-I/STING, HLA class I, Hallmark IFN-α and p53-core programmes. They are computed on the patient pseudobulk of each stratum (`comp_13b_pseudobulk_loq`), so the patient is the unit throughout.
+
+The questions are: (A) does tissue *FOLH1* or AR activity track whole-body PSMA-PET avidity, FDG-PET and baseline ctDNA fraction? On-treatment tissue is compared with cycle-5 PSMA SUVmean. (B) Does tissue *FOLH1* add to PSMA-PET SUVmean in explaining PSA change (nested linear models, F-test)? (C) Do tissue features differ by ctDNA *TP53*/*PTEN*/*RB1* status? (D) Do on-treatment tissue features differ by 12-week RECIP response or by detectable (≥ 1%) week-12 ctDNA? (E) Where do *ATM*-, *SPOP*- and MMRd-altered patients fall within each stratum's distribution of tissue programmes?
+
+**Manuscript items supported**
+
+- Extended Data Fig. 5a (tissue *FOLH1*/AR vs PET and ctDNA), 5b (R² of PSA change, SUVmean ± tissue *FOLH1*) and 5c (percentiles in *ATM*/*SPOP*/MMRd-altered patients), drawn by `comp_28_figures_v4` and assembled in `comp_41_figures_v5`
+- Fig. 4f (Wilcoxon P for on-treatment tissue scores by week-12 ctDNA detection), via `comp_28` panel `e3c`
+- Supplementary Tables 50–54 (S50_tissue_PET_ctDNA to S54_ATM_SPOP_MMRd), via `comp_29_supp_tables_v4`
+- Methods: Tissue, PET and liquid-biopsy integration
+
+**Pipeline step:** `./run_pipeline.sh --only 30_tissue_pet_ctdna`. Approximate runtime: seconds.
+
+**Inputs**
+
+- `results/C1_clinical/patient_table.qs`
+- `results/C13_pseudobulk_LOQ/pseudobulk_strata.qs`
+- `data/reference/msigdb_gene_sets.rds`
+
+**Outputs**
+
+- `results/R8_tissue_pet_ctdna/A_tissue_vs_PET_ctDNA.csv`
+- `results/R8_tissue_pet_ctdna/B_FOLH1_beyond_PET.csv`
+- `results/R8_tissue_pet_ctdna/C_tissue_by_TSG_status.csv`
+- `results/R8_tissue_pet_ctdna/D_on_treatment_tissue_vs_RECIP_ctDNA.csv`
+- `results/R8_tissue_pet_ctdna/E_ATM_SPOP_MMRd_programme_percentiles.csv`
+
+**Depends on**: `comp_01_clinical`, `comp_13b_pseudobulk_loq`
+
+## Analysis
+
+### Tissue, PET and ctDNA
+The header lists the five questions (A–E) and the patient-pseudobulk features used.
+
+Load the clinical table (PET, ctDNA, RECIP and genomic alterations) and the patient pseudobulk strata. For every stratum, compute *FOLH1* and the five programme scores (mean z-score over at least three detected genes), reshape them to long format and join the clinical variables. `sp` returns Spearman ρ, P and n, and requires at least six complete pairs.
+
+```{r comp-30-tissue-pet-ctdna-01}
+## ============================================================================
+## PRINCE -- R8: tissue transcriptome vs PSMA/FDG-PET and liquid biopsy (bridge to the
+## companion PRINCE ctDNA/CTC/PET study, Tolmeijer et al., J Nucl Med 2026).
+## Patient pseudobulk (C13_pseudobulk_LOQ) features: FOLH1, Hallmark androgen, IFN-I/STING,
+## HLA class I, Hallmark IFN-alpha, p53 core.
+##  A. Tissue FOLH1 / AR vs whole-body PSMA-PET avidity (baseline SUVmean, SUVmax; C5D1 SUVmean
+##     for on-treatment tissue), FDG-PET (SUVmean, MTV) and baseline ctDNA fraction (Spearman).
+##  B. Does tissue FOLH1 add to PSMA-PET SUVmean for PSA response? lm(PSA ~ SUVmean [+ FOLH1]).
+##  C. Tissue features by ctDNA TP53/PTEN/RB1 status (Wilcoxon; Hodges-Lehmann shift).
+##  D. On-treatment tissue features vs 12-week RECIP (PD vs PR/SD) and detectable ctDNA at C5D1.
+##  E. ATM / SPOP-altered patients (all responders): on-treatment IFN / HLA programme ranks.
+## Outputs: results/R8_tissue_pet_ctdna/
+## ============================================================================
+
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({ library(qs); library(dplyr); library(tidyr) })
+setwd(PRINCE_DIR)
+out_dir <- file.path(COMP_DIR, "R8_tissue_pet_ctdna"); dir.create(out_dir, showWarnings = FALSE)
+pt <- qs::qread(out_path("C1_clinical", "patient_table.qs"))
+pbs <- qs::qread(out_path("C13_pseudobulk_LOQ", "pseudobulk_strata.qs"))
+msig <- readRDS(file.path(PMCC_DIR, "msigdb_gene_sets.rds"))
+progs <- list(AR_Hallmark = msig$H$HALLMARK_ANDROGEN_RESPONSE, Hallmark_IFNa = msig$H$HALLMARK_INTERFERON_ALPHA_RESPONSE,
+  IFN_I_STING = c("IRF9", "STAT1", "IRF7", "OAS1", "STING1", "TMEM173", "B2M"), HLA_I = c("HLA-A", "HLA-B", "HLA-C", "B2M", "TAP1", "TAP2", "TAPBP"),
+  P53_core = c("CDKN1A", "MDM2", "DDB2", "PHLDA3", "GDF15", "TNFRSF10B", "SESN1", "ZMAT3", "RRM2B", "TP53I3"))
+
+feat <- bind_rows(lapply(names(pbs), function(sid) { p <- pbs[[sid]]; z <- t(scale(t(p$lcpm)))
+  P <- sapply(progs, function(g) { g <- intersect(g, rownames(z)); if (length(g) >= 3) colMeans(z[g, , drop = FALSE]) else NA })
+  data.frame(stratum = sid, subject_id = p$meta$subject_id, FOLH1 = p$lcpm["FOLH1", ], P, check.names = FALSE) })) %>%
+  pivot_longer(-c(stratum, subject_id), names_to = "feature", values_to = "value") %>% filter(!is.na(value)) %>%
+  left_join(pt, by = "subject_id") %>% mutate(timepoint = sub(".*__", "", stratum))
+sp <- function(x, y) { ok <- complete.cases(x, y); if (sum(ok) < 6) return(c(NA, NA, sum(ok)))
+  ct <- suppressWarnings(cor.test(x[ok], y[ok], method = "spearman", exact = FALSE)); c(unname(ct$estimate), ct$p.value, sum(ok)) }
+
+```
+
+### A. Tissue vs PET and ctDNA
+Spearman correlation of *FOLH1* and Hallmark androgen score with PSMA SUVmean (baseline; cycle 5 for on-treatment tissue), baseline PSMA SUVmax and total tumour volume, FDG SUVmean and metabolic tumour volume, and baseline ctDNA fraction, per stratum.
+
+```{r comp-30-tissue-pet-ctdna-02}
+## A. tissue vs PET / ctDNA
+a <- feat %>% filter(feature %in% c("FOLH1", "AR_Hallmark")) %>% group_by(stratum, timepoint, feature) %>% group_modify(~ {
+  pet <- if (.y$timepoint[1] == "Cycle1") .x$PSMAPET_C5D1_SUVmean else .x$PSMAPET_BL_SUVmean
+  bind_rows(lapply(list(PSMA_SUVmean = pet, PSMA_SUVmax_BL = .x$PSMAPET_BL_SUVmax, PSMA_TTV_BL = .x$PSMAPET_BL_vol,
+                        FDG_SUVmean_BL = .x$fdg_suvmean_trorres, FDG_MTV_BL = .x$fdg_vol_trorres, ctDNA_fraction_BL = .x$ctDNA_BL), function(v) {
+    r <- sp(.x$value, v); data.frame(rho = r[1], p = r[2], n = r[3]) }), .id = "variable") }) %>% ungroup()
+write.csv(a, file.path(out_dir, "A_tissue_vs_PET_ctDNA.csv"), row.names = FALSE)
+
+```
+
+### B. Does tissue *FOLH1* add to PSMA-PET?
+Per stratum, compare lm(PSA change/50 ~ SUVmean) with lm(PSA change/50 ~ SUVmean + *FOLH1*), both predictors standardised. Reports each coefficient adjusted for the other, the R² of both models and the F-test P for the added *FOLH1* term.
+
+```{r comp-30-tissue-pet-ctdna-03}
+## B. tissue FOLH1 beyond PET SUVmean
+b <- feat %>% filter(feature == "FOLH1") %>% group_by(stratum) %>% group_modify(~ {
+  d <- .x %>% transmute(psa = psa_change_capped / 50, f = as.numeric(scale(value)), s = as.numeric(scale(if (grepl("Cycle1", .y$stratum)) PSMAPET_C5D1_SUVmean else PSMAPET_BL_SUVmean))) %>% na.omit()
+  m0 <- lm(psa ~ s, d); m1 <- lm(psa ~ s + f, d); cf <- summary(m1)$coefficients
+  data.frame(n = nrow(d), beta_FOLH1_adj_SUV = cf["f", 1], p_FOLH1_adj_SUV = cf["f", 4], beta_SUV_adj_FOLH1 = cf["s", 1], p_SUV_adj_FOLH1 = cf["s", 4],
+             r2_SUV = summary(m0)$r.squared, r2_SUV_FOLH1 = summary(m1)$r.squared, p_LRT = anova(m0, m1)[2, "Pr(>F)"]) }) %>% ungroup()
+write.csv(b, file.path(out_dir, "B_FOLH1_beyond_PET.csv"), row.names = FALSE)
+
+```
+
+### C. ctDNA tumour-suppressor status
+Wilcoxon rank-sum test with Hodges–Lehmann shift for each tissue feature between patients with and without a ctDNA *TP53*/*PTEN*/*RB1* alteration (at least three patients per group), with BH-FDR within stratum.
+
+```{r comp-30-tissue-pet-ctdna-04}
+## C. tissue features by ctDNA TSG status
+c_tab <- feat %>% filter(!is.na(alt_TSG_alt)) %>% group_by(stratum, feature) %>% group_modify(~ {
+  x1 <- .x$value[.x$alt_TSG_alt == 1]; x0 <- .x$value[.x$alt_TSG_alt == 0]
+  if (length(x1) < 3 || length(x0) < 3) return(data.frame())
+  w <- suppressWarnings(wilcox.test(x1, x0, conf.int = TRUE, exact = FALSE))
+  data.frame(n_TSG = length(x1), n_noTSG = length(x0), shift_HL = unname(w$estimate), p = w$p.value) }) %>% ungroup() %>%
+  group_by(stratum) %>% mutate(fdr = p.adjust(p, "BH")) %>% ungroup()
+write.csv(c_tab, file.path(out_dir, "C_tissue_by_TSG_status.csv"), row.names = FALSE)
+
+```
+
+### D. On-treatment tissue vs RECIP and week-12 ctDNA
+In the on-treatment strata, compare tissue features between RECIP progressive disease and partial response/stable disease, and between detectable (≥ 1%) and undetectable week-12 (C5D1) ctDNA, by Wilcoxon test. Group sizes and mean differences are reported.
+
+```{r comp-30-tissue-pet-ctdna-05}
+## D. on-treatment tissue vs 12-week RECIP and on-treatment ctDNA detection
+d_tab <- feat %>% filter(timepoint == "Cycle1") %>% group_by(stratum, feature) %>% group_modify(~ {
+  pd <- .x$RECIP == "PD"; ok <- .x$RECIP %in% c("PD", "PR", "SD")
+  ct <- !is.na(.x$ctDNA_C5D1); det <- .x$ctDNA_C5D1 >= 0.01
+  data.frame(n_PD = sum(pd & ok), n_nonPD = sum(!pd & ok),
+             p_RECIP_PD = tryCatch(suppressWarnings(wilcox.test(.x$value[pd & ok], .x$value[!pd & ok], exact = FALSE))$p.value, error = function(e) NA),
+             mean_diff_PD = mean(.x$value[pd & ok]) - mean(.x$value[!pd & ok]),
+             n_ctDNA_det = sum(ct & det, na.rm = TRUE), n_ctDNA_undet = sum(ct & !det, na.rm = TRUE),
+             p_ctDNA_C5D1 = tryCatch(suppressWarnings(wilcox.test(.x$value[ct & det], .x$value[ct & !det], exact = FALSE))$p.value, error = function(e) NA),
+             mean_diff_ctDNA_det = mean(.x$value[ct & det]) - mean(.x$value[ct & !det])) }) %>% ungroup()
+write.csv(d_tab, file.path(out_dir, "D_on_treatment_tissue_vs_RECIP_ctDNA.csv"), row.names = FALSE)
+
+```
+
+### E. *ATM*, *SPOP* and MMRd-altered patients
+Rank each patient within stratum for *FOLH1*, IFN-α, IFN-I/STING and HLA-I, and keep the patients with an *ATM*, *SPOP* or mismatch-repair alteration. The output is descriptive. The chunk ends by printing summaries of A–E.
+
+```{r comp-30-tissue-pet-ctdna-06}
+## E. ATM / SPOP / MMRd-altered patients: percentile of on-treatment and pre-treatment programmes
+e_tab <- feat %>% filter(feature %in% c("Hallmark_IFNa", "IFN_I_STING", "HLA_I", "FOLH1")) %>% group_by(stratum, feature) %>%
+  mutate(pct = rank(value) / n()) %>% ungroup() %>% filter(alt_ATM == 1 | alt_SPOP == 1 | alt_MMRd == 1) %>%
+  transmute(stratum, feature, subject_id, alteration = paste0(ifelse(alt_ATM %in% 1, "ATM ", ""), ifelse(alt_SPOP %in% 1, "SPOP ", ""), ifelse(alt_MMRd %in% 1, "MMRd", "")),
+            value, percentile = pct, max_psa_change)
+write.csv(e_tab, file.path(out_dir, "E_ATM_SPOP_MMRd_programme_percentiles.csv"), row.names = FALSE)
+e_sum <- e_tab %>% group_by(stratum, feature) %>% summarise(n = n(), median_percentile = median(percentile), .groups = "drop")
+
+options(width = 200)
+cat("\n==== A. tissue vs PET / ctDNA (P < 0.1) ====\n"); print(as.data.frame(a %>% filter(p < 0.1) %>% mutate(across(where(is.numeric), ~signif(.x, 2)))), row.names = FALSE)
+cat("\n==== A. FOLH1 vs PSMA SUVmean, all strata ====\n"); print(as.data.frame(a %>% filter(feature == "FOLH1", variable == "PSMA_SUVmean") %>% mutate(across(where(is.numeric), ~signif(.x, 2)))), row.names = FALSE)
+cat("\n==== B. FOLH1 beyond PET ====\n"); print(as.data.frame(b %>% mutate(across(where(is.numeric), ~signif(.x, 2)))), row.names = FALSE)
+cat("\n==== C. TSG (P < 0.1) ====\n"); print(as.data.frame(c_tab %>% filter(p < 0.1) %>% mutate(across(where(is.numeric), ~signif(.x, 2)))), row.names = FALSE)
+cat("\n==== D. RECIP / ctDNA on treatment ====\n"); print(as.data.frame(d_tab %>% mutate(across(where(is.numeric), ~signif(.x, 2)))), row.names = FALSE)
+cat("\n==== E. ATM/SPOP/MMRd percentiles ====\n"); print(as.data.frame(e_sum %>% mutate(across(where(is.numeric), ~signif(.x, 2)))), row.names = FALSE)
+cat("R8 complete.\n")
+```

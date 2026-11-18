@@ -1,0 +1,159 @@
+---
+title: "Morphometric PSMA⁺ tumour share and nuclei-adjusted FOLH1"
+subtitle: "PRINCE spatial transcriptomics: `comp_53_psma_fraction`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+This script asks whether the *FOLH1*–response association simply reflects how much of the sampled tumour was PSMA-positive. It uses AOI surface area and nuclei counts from the GeoMx segmentation (DSP ROI summary workbook). For each patient and timepoint it computes the morphometric PSMA⁺ share of tumour, PSMA⁺ / (PSMA⁺ + PanCK⁺PSMA⁻) nuclei or area, pooled over ROIs, with the ROI median as a sensitivity measure.
+
+The share is related to PSA change (Spearman, 5,000-permutation P, worst leave-one-out P, and lm with batch), to response group, rPFS, PSMA-PET SUVmean and tissue *FOLH1*. The script also tests whether adjusting for the share changes the *FOLH1*–PSA association. Paired pre- to on-treatment change is tested, and progression biopsies are described. As a separate technical check, pseudobulk *FOLH1* is refitted against PSA change with the log total nuclei of the pseudobulked AOIs as a covariate.
+
+**Manuscript items supported**
+
+- Supplementary Table 104 (assembled by comp_47)
+- Results: morphometric PSMA⁺ share only inconsistently associated with response; *FOLH1* association robust to nuclei count (Supplementary Table 100 text)
+- Methods: Composition and morphometric analyses
+
+**Pipeline step:** `./run_pipeline.sh --only 53_psma_fraction`. Approximate runtime: a few minutes.
+
+**Inputs**
+
+- `data/reference/PRINCE DSP ROI SUMMARY_RAMYAR_DATA ANALYSIS 21052026.xlsx`
+- `data/phase2_se_qc_filtered.qs`
+- `results/C1_clinical/patient_table.qs`
+- `results/C13_pseudobulk_LOQ/pseudobulk_strata.qs`
+
+**Outputs**
+
+- `results/R25_psma_fraction/aoi_area_nuclei.csv`
+- `results/R25_psma_fraction/patient_psma_fraction.csv`
+- `results/R25_psma_fraction/A_psma_fraction_vs_outcome.csv`
+- `results/R25_psma_fraction/B_paired_change.csv`
+- `results/R25_psma_fraction/B_progression.csv`
+- `results/R25_psma_fraction/C_FOLH1_nuclei_adjusted.csv`
+
+**Depends on**: `comp_01`, `comp_13b`
+
+## Analysis
+
+### Morphometric PSMA⁺ share
+
+The header defines the share, the outcome tests and the nuclei-adjusted technical check.
+
+Reads area and nuclei counts from the three run-specific sheets of the ROI summary workbook; non-positive values are set to missing. These are joined to the AOI metadata and the per-AOI table is written. For each patient and timepoint, the PSMA⁺ share of tumour nuclei and area is computed, together with the ROI-median nuclei share, and joined to the clinical outcomes.
+
+For each timepoint and measure, the script computes:
+- Spearman correlation with PSA change, a 5,000-permutation P and the worst leave-one-out P;
+- an lm with batch, the non-responder versus responder comparison and a Cox model for rPFS;
+- correlations with SUVmean and with the tumour *FOLH1* composite, and the *FOLH1*–PSA P with and without the share as a covariate.
+
+The script then tests paired change (Wilcoxon signed-rank), tabulates progression biopsies, and refits pseudobulk *FOLH1* `~ PSA + batch` with and without log nuclei count.
+
+```{r comp-53-psma-fraction-01}
+## ============================================================================
+## PRINCE -- R25: morphometric PSMA-positive tumour fraction and nuclei-adjusted checks.
+## AOI surface area and nuclei count from the DSP ROI summary workbook (data/reference).
+## PSMA+ fraction = PSMA+ / (PSMA+ + PanCK+PSMA-) tumour nuclei (primary) or area, per patient x timepoint
+## (pooled over ROIs; ROI-median as sensitivity). Tests: Spearman with PSA change, lm with batch, NR vs R (Wilcoxon),
+## Cox rPFS per s.d., leave-one-out, 5,000-permutation P; relation to PSMA-PET SUVmean and tissue FOLH1; FOLH1 association
+## adjusted for the fraction; paired change pre -> on-treatment; progression biopsies descriptive.
+## Nuclei-adjusted technical check: FOLH1 ~ PSA + batch + log total nuclei of the pseudobulked AOIs.
+## Outputs: results/R25_psma_fraction/
+## ============================================================================
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({ library(qs); library(SummarizedExperiment); library(dplyr); library(tidyr); library(readxl); library(survival) })
+setwd(PRINCE_DIR); set.seed(2026)
+out_dir <- file.path(COMP_DIR, "R25_psma_fraction"); dir.create(out_dir, showWarnings = FALSE)
+f <- file.path(PMCC_DIR, "PRINCE DSP ROI SUMMARY_RAMYAR_DATA ANALYSIS 21052026.xlsx")
+rd <- function(sh, ar, nu) { d <- suppressMessages(read_excel(f, sheet = sh)); data.frame(aoi = d[[1]], area = suppressWarnings(as.numeric(d[[ar]])), nuclei = suppressWarnings(as.numeric(d[[nu]]))) }
+morph <- bind_rows(rd("ROI TAG SEGMENTS- RUNS 1-3", "Surface area", "Nuclei count"), rd("ROI TAG SEGMENTS- RUNS 4-7", "AOISurfaceArea", "AOINucleiCount"),
+                   rd("ROI TAG SEGMENTS - RUNS 8-10", "Surface area", "Nuclei count")) %>% filter(!is.na(aoi), !duplicated(aoi))
+morph$nuclei[morph$nuclei <= 0] <- NA; morph$area[morph$area <= 0] <- NA
+se <- qs::qread("phase2_se_qc_filtered.qs"); cd <- as.data.frame(colData(se)); cd$aoi_id <- rownames(cd)
+cd <- left_join(cd, morph, by = c("plate_barcode_aoi_id" = "aoi")); stopifnot(nrow(cd) == ncol(se))
+write.csv(cd %>% select(aoi_id, subject_id, timepoint, segment_name, roi_name, area, nuclei), file.path(out_dir, "aoi_area_nuclei.csv"), row.names = FALSE)
+pt <- qs::qread(out_path("C1_clinical", "patient_table.qs"))
+tum <- cd %>% filter(response_group_neat != "Control", segment_name %in% c("PSMA+", "PanCK+PSMA-"))
+frac <- function(d) d %>% summarise(n_roi = n_distinct(roi_name),
+  frac_nuclei = sum(nuclei[segment_name == "PSMA+"], na.rm = TRUE) / sum(nuclei, na.rm = TRUE),
+  frac_area = sum(area[segment_name == "PSMA+"], na.rm = TRUE) / sum(area, na.rm = TRUE), batch = first(study_batch), .groups = "drop")
+pf <- tum %>% group_by(subject_id, timepoint) %>% frac()
+roi_med <- tum %>% group_by(subject_id, timepoint, roi_name) %>% summarise(fn = sum(nuclei[segment_name == "PSMA+"], na.rm = TRUE) / sum(nuclei, na.rm = TRUE), .groups = "drop") %>%
+  group_by(subject_id, timepoint) %>% summarise(frac_nuclei_roi_median = median(fn, na.rm = TRUE), .groups = "drop")
+pf <- left_join(pf, roi_med, by = c("subject_id", "timepoint")) %>%
+  left_join(pt %>% select(subject_id, max_psa_change, psa_change_capped, r_pfstime, r_pfsevent, response_group_neat, PSMAPET_BL_SUVmean), by = "subject_id")
+pbs <- qs::qread(out_path("C13_pseudobulk_LOQ", "pseudobulk_strata.qs"))
+fz <- function(sid) { p <- pbs[[sid]]; setNames(as.numeric(scale(p$lcpm["FOLH1", ])), p$meta$subject_id) }
+sp <- function(a, b) { ok <- complete.cases(a, b); t <- suppressWarnings(cor.test(a[ok], b[ok], method = "spearman", exact = FALSE)); c(unname(t$estimate), t$p.value, sum(ok)) }
+A <- list()
+for (tp in c("Archival", "Screening", "Cycle1")) for (v in c("frac_nuclei", "frac_area", "frac_nuclei_roi_median")) {
+  d <- pf %>% filter(timepoint == tp); x <- d[[v]]; d$x <- x
+  r <- sp(x, d$max_psa_change)
+  nb <- n_distinct(d$batch) > 1; fm <- if (nb) psa_change_capped ~ x + factor(batch) else psa_change_capped ~ x
+  lmP <- summary(lm(fm, d))$coefficients["x", 4]
+  loo <- max(sapply(seq_len(nrow(d)), function(i) sp(x[-i], d$max_psa_change[-i])[2]))
+  rp <- replicate(5000, sp(sample(x), d$max_psa_change)[1]); pperm <- (1 + sum(abs(rp) >= abs(r[1]))) / 5001
+  nr <- d$response_group_neat == "Non_Responder"; rr <- d$response_group_neat == "Responder"
+  cx <- tryCatch(summary(coxph(Surv(r_pfstime, r_pfsevent) ~ scale(x), d))$coefficients[1, c(2, 5)], error = function(e) c(NA, NA))
+  fol <- c(fz(paste0("PSMA__", tp)), NULL); fpan <- fz(paste0("PanCKPSMA__", tp))
+  fc <- sapply(d$subject_id, function(p) mean(c(fol[p], fpan[p]), na.rm = TRUE))
+  rs <- sp(x, d$PSMAPET_BL_SUVmean); rf <- sp(x, fc)
+  ## FOLH1 composite vs PSA change, with and without the fraction
+  dd <- data.frame(psa = d$psa_change_capped / 50, fc = fc, x = x, b = factor(d$batch))
+  g0 <- tryCatch(summary(lm(fc ~ psa + (if (nb) b else NULL), dd))$coefficients["psa", 4], error = function(e) NA)
+  g1 <- tryCatch(summary(lm(if (nb) fc ~ psa + x + b else fc ~ psa + x, dd))$coefficients["psa", 4], error = function(e) NA)
+  A[[paste(tp, v)]] <- data.frame(timepoint = tp, measure = v, n = r[3], median = median(x, na.rm = TRUE), IQR = IQR(x, na.rm = TRUE),
+    rho_psa = r[1], p_psa = r[2], p_perm = pperm, p_loo_worst = loo, p_lm_batch = lmP,
+    median_NR = median(x[nr], na.rm = TRUE), median_R = median(x[rr], na.rm = TRUE), p_NR_vs_R = tryCatch(wilcox.test(x[nr], x[rr], exact = FALSE)$p.value, error = function(e) NA),
+    HR_rPFS = cx[1], p_rPFS = cx[2], rho_SUVmean = rs[1], p_SUVmean = rs[2], rho_FOLH1 = rf[1], p_FOLH1 = rf[2],
+    p_FOLH1_vs_psa = g0, p_FOLH1_vs_psa_adj_fraction = g1)
+}
+A <- bind_rows(A)
+## paired change in PSMA+ fraction (pre -> on-treatment) and progression
+pw <- pf %>% select(subject_id, timepoint, frac_nuclei) %>% pivot_wider(names_from = timepoint, values_from = frac_nuclei)
+pr <- pw %>% filter(!is.na(Screening), !is.na(Cycle1))
+P <- data.frame(comparison = "pre-treatment -> on-treatment bone", n = nrow(pr), median_pre = median(pr$Screening), median_on = median(pr$Cycle1),
+                n_down = sum(pr$Cycle1 < pr$Screening), p_signed_rank = wilcox.test(pr$Cycle1, pr$Screening, paired = TRUE, exact = FALSE)$p.value,
+                rho_change_psa = sp(pr$Cycle1 - pr$Screening, pt$max_psa_change[match(pr$subject_id, pt$subject_id)])[1],
+                p_change_psa = sp(pr$Cycle1 - pr$Screening, pt$max_psa_change[match(pr$subject_id, pt$subject_id)])[2])
+prog <- pf %>% filter(timepoint == "DiseaseProgression") %>% select(subject_id, frac_nuclei, frac_area, n_roi) %>%
+  left_join(pw %>% select(subject_id, Archival, Screening, Cycle1), by = "subject_id")
+## nuclei-adjusted technical check on FOLH1 (cell number of the pseudobulk)
+N <- list()
+for (sid in names(pbs)) { p <- pbs[[sid]]; m <- p$meta
+  sg <- c(CD45 = "CD45+", PSMA = "PSMA+", PanCKPSMA = "PanCK+PSMA-")[sub("__.*", "", sid)]; tp <- sub(".*__", "", sid)
+  nu <- cd %>% filter(segment_name == sg, timepoint == tp, response_group_neat != "Control") %>% group_by(subject_id) %>% summarise(lnuc = ifelse(sum(nuclei, na.rm = TRUE) > 0, log(sum(nuclei, na.rm = TRUE)), NA), .groups = "drop")
+  d <- data.frame(y = p$lcpm["FOLH1", ], psa = m$psa_change_capped / 50, b = factor(m$study_batch), lnuc = nu$lnuc[match(m$subject_id, nu$subject_id)])
+  nb <- nlevels(droplevels(d$b)) > 1
+  p0 <- summary(lm(if (nb) y ~ psa + b else y ~ psa, d))$coefficients["psa", 4]; p1 <- summary(lm(if (nb) y ~ psa + b + lnuc else y ~ psa + lnuc, d))$coefficients["psa", 4]
+  N[[sid]] <- data.frame(stratum = sid, p_batch = p0, p_batch_nuclei = p1, rho_nuclei_psa = sp(d$lnuc, m$max_psa_change)[1], p_nuclei_psa = sp(d$lnuc, m$max_psa_change)[2]) }
+N <- bind_rows(N)
+write.csv(pf, file.path(out_dir, "patient_psma_fraction.csv"), row.names = FALSE)
+```
+
+Writes the outcome, paired-change, progression and nuclei-adjusted tables. The printed output reports the number of analysed tumour AOIs with missing nuclei counts.
+
+```{r comp-53-psma-fraction-02}
+write.csv(A, file.path(out_dir, "A_psma_fraction_vs_outcome.csv"), row.names = FALSE)
+write.csv(P, file.path(out_dir, "B_paired_change.csv"), row.names = FALSE); write.csv(prog, file.path(out_dir, "B_progression.csv"), row.names = FALSE)
+write.csv(N, file.path(out_dir, "C_FOLH1_nuclei_adjusted.csv"), row.names = FALSE)
+options(width = 230); f2 <- function(x) as.data.frame(mutate(x, across(where(is.numeric), ~signif(.x, 2))))
+cat("missing nuclei among analysed tumour AOIs:", sum(is.na(tum$nuclei[tum$timepoint %in% c("Archival","Screening","Cycle1")])), "\n")
+print(f2(A), row.names = FALSE); print(f2(P), row.names = FALSE); print(f2(prog), row.names = FALSE); print(f2(N), row.names = FALSE)
+cat("R25 complete.\n")
+```

@@ -1,0 +1,290 @@
+---
+title: "Re-evaluation of earlier purity-adjusted, neuroendocrine and PET findings at patient level"
+subtitle: "PRINCE spatial transcriptomics: `comp_18_nepc_purity_reconcile`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+An earlier analysis of these samples used AOI-level limma models with patient blocking, RUV normalisation and ESTIMATE purity as a covariate. It reported many genes differing between non-responders and responders, a neuroendocrine programme in non-responders and a correlation between a neuroendocrine score and PSMA-PET tumour growth. This script asks whether those findings hold when the patient is the unit of inference.
+
+It (A) reads back the earlier AOI-level gene counts; (B) refits the non-responder versus responder contrast and continuous PSA change in patient pseudobulk on the LOQ gene universe under four covariate sets (none; batch; batch + ESTIMATE purity; batch + deconvolved tumour fraction), including the genes named in the earlier analysis; (C) calibrates the batch and batch + purity models by 200 patient-level label permutations; (D) checks whether purity differs by response and how it relates to deconvolved tumour fraction; and (E) reproduces the neuroendocrine–PET correlation at AOI and patient level and scores neuroendocrine and AR sets with mean z-scores and singscore.
+
+Patient-level purity and tumour fraction are library-size-weighted means over the patient's AOIs, matching the summed-count pseudobulk. Intermediate patients are excluded from the categorical contrast.
+
+**Manuscript items supported**
+
+- Extended Data Fig. 8a (genes at FDR < 0.05, earlier AOI-level models versus patient pseudobulk under covariate sets), via comp_28/comp_41
+- Extended Data Fig. 9a–c (ESTIMATE purity versus tumour fraction, purity by response, earlier named genes under covariate sets), via comp_28/comp_41
+- Extended Data Fig. 10a (pseudobulk counts, via comp_22/comp_24)
+- Supplementary Tables 30–34 (via comp_25)
+- Results: Re-evaluation of earlier neuroendocrine, purity and bone-niche findings
+- Methods: Reconciliation with earlier analyses and the standR workflow
+
+**Pipeline step:** `./run_pipeline.sh --only 18_nepc_purity_reconcile`. Approximate runtime: tens of minutes (200 permutations × 2 covariate sets × 6 strata of limma-voom).
+
+**Inputs**
+
+- `data/phase2_se_qc_filtered.qs`
+- `results/C1_clinical/patient_table.qs`
+- `results/R1_loq/loq_gene_universes.qs`
+- `results/C3_deconvolution/deconvolution_proportions.qs`
+- `data/reference/msigdb_gene_sets.rds`
+- `data/previous_analysis/Phase4_DE/*_toptable_with_RUV.csv`
+- `data/previous_analysis/Phase5_Purity/*_toptable_with_purity.csv`
+- `data/previous_analysis/Phase8_NEPC_Longitudinal/all_scores_per_AOI.csv`
+
+**Outputs**
+
+- `results/R3_nepc_purity/A_earlier_aoi_level_counts.csv`
+- `results/R3_nepc_purity/B_pseudobulk_de_by_covariates.csv`
+- `results/R3_nepc_purity/B_deck_genes_by_covariates.csv`
+- `results/R3_nepc_purity/C_permutation_calibration.csv`
+- `results/R3_nepc_purity/D_purity_diagnostics.csv`
+- `results/R3_nepc_purity/E_nepc_pet_reproduction.csv`
+- `results/R3_nepc_purity/E_scores_patient_level.csv`
+
+**Depends on**: `comp_16_loq_filter`, `comp_03b_deconv`, `comp_01_clinical`, `comp_00b_bone_cohort`
+
+## Analysis
+
+Header listing sections A–E of the re-evaluation.
+
+### Set-up
+Loads the AOI object, clinical table, LOQ gene universes and SpatialDecon epithelial-tumour fractions. Defines the genes named in the earlier analysis (`deck_genes`), the literature 13-gene neuroendocrine marker set, the seven neuroendocrine genes the earlier analysis selected on response in these samples (`deck_ne`, kept as a circular reference) and the Hallmark androgen-response set.
+
+```{r comp-18-nepc-purity-reconcile-01}
+## ============================================================================
+## PRINCE -- R3: reconcile the earlier purity-adjusted NEPC/AR findings
+## (PRINCE_GeoMx_Conference_Deck.pptx; phase4_DE.R / phase5_purity_covariate.R /
+## phase8_nepc_longitudinal.R) with the patient-level analysis.
+##  A. Earlier AOI-level results, read back from Results/Phase4_DE, Phase5_Purity
+##  B. Patient-level pseudobulk on the LOQ-filtered gene universe (comp_16), NR vs R
+##     (Intermediate excluded) and continuous PSA change, under four covariate sets:
+##     none | batch | batch + ESTIMATE purity | batch + deconvolved tumour fraction
+##     -> genes at FDR < 0.05 / 0.1, and the deck's named genes
+##  C. Permutation calibration: shuffle NR/R labels across patients (200x), refit the
+##     purity-adjusted model, count FDR < 0.05 genes -> how often does the observed
+##     number arise by chance?
+##  D. Purity diagnostics: ESTIMATE purity vs response and vs deconvolved tumour fraction
+##  E. NEPC / AR scores vs response and vs PSMA-PET (SUVmean, volume, volume change),
+##     at patient level; reproduction of the reported r = 0.38 (PET volume change)
+## Outputs: results/R3_nepc_purity/
+## ============================================================================
+
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({
+  library(qs); library(SummarizedExperiment); library(dplyr); library(tidyr); library(edgeR); library(limma); library(singscore)
+})
+setwd(PRINCE_DIR)
+check_ram_or_stop(20)
+set.seed(2026)
+out_dir <- file.path(COMP_DIR, "R3_nepc_purity"); dir.create(out_dir, showWarnings = FALSE)
+
+se <- qs::qread("phase2_se_qc_filtered.qs"); cd <- as.data.frame(colData(se))
+pt <- qs::qread(out_path("C1_clinical", "patient_table.qs"))
+uni <- qs::qread(file.path(COMP_DIR, "R1_loq", "loq_gene_universes.qs"))$universes
+dec <- qs::qread(out_path("C3_deconvolution", "deconvolution_proportions.qs"))
+tum_frac <- c(dec$lineage_primary[, "Epithelial_tumour"], dec$lineage_bone[, "Epithelial_tumour"])
+msig <- readRDS(file.path(PMCC_DIR, "msigdb_gene_sets.rds"))
+code <- c("CD45+" = "CD45", "PSMA+" = "PSMA", "PanCK+PSMA-" = "PanCKPSMA")
+deck_genes <- c("FOLH1", "TMPRSS2", "KLK2", "KLK3", "NKX3-1", "NEUROD1", "NCAM2", "BEX2", "ID2", "BCOR", "PLXNA3", "STXBP6",
+                "CHGA", "SYP", "IBSP", "XRCC2", "B2M", "SSTR5")
+nepc13 <- c("ASCL1", "SOX2", "NKX2-1", "FOXA2", "INSM1", "CHGA", "CHGB", "SYP", "NCAM1", "EZH2", "AURKA", "MYCN", "PCSK1")
+deck_ne <- c("NEUROD1", "NCAM2", "BEX2", "ID2", "BCOR", "PLXNA3", "STXBP6")
+ar_hall <- msig$H$HALLMARK_ANDROGEN_RESPONSE
+
+```
+
+### A. Earlier AOI-level results
+Reads the earlier AOI-level toptables (RUV, and RUV + ESTIMATE purity) for pre-treatment and archival strata and records the number of genes at FDR < 0.05 and the FDR of *FOLH1* and *CHGA*. These tables were produced before the bone-only restriction and include lymph-node and soft-tissue biopsies.
+
+```{r comp-18-nepc-purity-reconcile-02}
+## ---- A. earlier AOI-level results ---------------------------------------------------------
+old <- bind_rows(lapply(c("CD45__Screening", "PSMA__Screening", "PanCKPSMA__Screening", "CD45__Archival", "PSMA__Archival", "PanCKPSMA__Archival"), function(s) {
+  a <- read.csv(file.path(PRINCE_DIR, "previous_analysis/Phase4_DE", paste0(s, "_toptable_with_RUV.csv")), row.names = 1)
+  b <- read.csv(file.path(PRINCE_DIR, "previous_analysis/Phase5_Purity", paste0(s, "_toptable_with_purity.csv")), row.names = 1)
+  data.frame(stratum = s, aoi_RUV_fdr05 = sum(a$adj.P.Val < 0.05), aoi_RUV_purity_fdr05 = sum(b$adj.P.Val < 0.05),
+             FOLH1_q_purity = signif(b["FOLH1", "adj.P.Val"], 2), CHGA_q_purity = signif(b["CHGA", "adj.P.Val"], 2))
+}))
+
+```
+
+### Patient pseudobulk and model helpers
+`pb` sums counts per patient on the stratum's ≥10% LOQ universe, applies TMM and attaches batch, library-size-weighted ESTIMATE purity and tumour fraction, and clinical and PSMA-PET variables. `fit_set` fits limma-voom (robust) for non-responder versus responder (intermediate patients excluded) or PSA change (per 50%), with the requested covariates; aliased columns are dropped by QR pivoting.
+
+```{r comp-18-nepc-purity-reconcile-03}
+## ---- pseudobulk builder ---------------------------------------------------------------------
+keep_aoi <- cd$response_group_neat != "Control" & cd$timepoint %in% c("Archival", "Screening", "Cycle1")
+pb <- function(sg, tp) {
+  idx <- which(keep_aoi & cd$segment_name == sg & cd$timepoint == tp); d <- cd[idx, ]
+  g <- uni[[paste0(code[sg], "__", tp)]]$g10
+  cc <- assay(se, "all_count")[g, idx]
+  m <- sapply(split(seq_len(nrow(d)), d$subject_id), function(i) rowSums(cc[, i, drop = FALSE]))
+  meta <- d %>% mutate(tf = tum_frac[rownames(d)]) %>% group_by(subject_id) %>%
+    summarise(batch = first(study_batch), purity = weighted.mean(tumour.purity.estimate, library_size), tumour_frac = weighted.mean(tf, library_size), n_aoi = n(), .groups = "drop")  # count-weighted, matching summed-count pseudobulk
+  meta <- meta[match(colnames(m), meta$subject_id), ] %>%
+    left_join(pt %>% select(subject_id, response_group_neat, max_psa_change, psa_change_capped, PSMAPET_BL_SUVmean,
+                            PSMAPET_BL_vol, PSMAPET_vol_change_pct), by = "subject_id")
+  dge <- calcNormFactors(DGEList(m))
+  list(dge = dge, meta = as.data.frame(meta), lcpm = cpm(dge, log = TRUE, prior.count = 1))
+}
+fit_set <- function(p, contrast, covs) {
+  m <- p$meta
+  if (contrast == "NR") { keep <- m$response_group_neat %in% c("Responder", "Non_Responder")
+    m <- m[keep, ]; dge <- p$dge[, keep]; m$x <- as.integer(m$response_group_neat == "Non_Responder")
+  } else { dge <- p$dge; m$x <- m$psa_change_capped / 50 }
+  f <- as.formula(paste("~ x", if (length(covs)) paste("+", paste(covs, collapse = " + ")) else ""))
+  X <- model.matrix(f, m); X <- X[, qr(X)$pivot[seq_len(qr(X)$rank)], drop = FALSE]
+  fit <- eBayes(lmFit(voom(dge, X), X), robust = TRUE)
+  topTable(fit, coef = "x", number = Inf, sort.by = "none")
+}
+covsets <- list(none = character(0), batch = "batch", batch_purity = c("batch", "purity"), batch_tumourfrac = c("batch", "tumour_frac"))
+
+```
+
+### B and C. Covariate sets and permutation calibration
+For archival and pre-treatment strata, both contrasts are fitted under the four covariate sets, recording genes at FDR < 0.05 and < 0.1 and the statistics of the earlier named genes. For the batch and batch + purity models, response labels are permuted 200 times among responders and non-responders and the number of FDR < 0.05 genes is recounted; permutation P = (1 + #null ≥ observed)/201.
+
+```{r comp-18-nepc-purity-reconcile-04}
+## ---- B + C. pseudobulk DE under covariate sets, with permutation calibration -------------------
+de_rows <- list(); gene_rows <- list(); perm_rows <- list()
+for (sg in names(code)) for (tp in c("Archival", "Screening")) {
+  p <- pb(sg, tp); sid <- paste0(code[sg], "__", tp)
+  for (ct in c("NR", "PSA")) for (cs in names(covsets)) {
+    tt <- fit_set(p, ct, covsets[[cs]])
+    de_rows[[paste(sid, ct, cs)]] <- data.frame(stratum = sid, contrast = ct, covariates = cs,
+      n_patients = ifelse(ct == "NR", sum(p$meta$response_group_neat %in% c("Responder", "Non_Responder")), nrow(p$meta)),
+      genes = nrow(tt), fdr05 = sum(tt$adj.P.Val < 0.05), fdr10 = sum(tt$adj.P.Val < 0.1))
+    g <- intersect(deck_genes, rownames(tt))
+    gene_rows[[paste(sid, ct, cs)]] <- data.frame(stratum = sid, contrast = ct, covariates = cs, gene = g,
+      logFC = tt[g, "logFC"], P = tt[g, "P.Value"], FDR = tt[g, "adj.P.Val"])
+  }
+  for (cs in c("batch", "batch_purity")) {
+    obs <- de_rows[[paste(sid, "NR", cs)]]$fdr05
+    m0 <- p$meta; keep <- m0$response_group_neat %in% c("Responder", "Non_Responder")
+    perm <- replicate(200, {
+      pp <- p; lab <- m0$response_group_neat; lab[keep] <- sample(lab[keep]); pp$meta$response_group_neat <- lab
+      sum(fit_set(pp, "NR", covsets[[cs]])$adj.P.Val < 0.05)
+    })
+    perm_rows[[paste(sid, cs)]] <- data.frame(stratum = sid, covariates = cs, observed_fdr05 = obs,
+      perm_median = median(perm), perm_95pct = quantile(perm, 0.95), perm_p = (1 + sum(perm >= obs)) / 201)
+  }
+  message(sid, " done")
+}
+de_tab <- bind_rows(de_rows); gene_tab <- bind_rows(gene_rows); perm_tab <- bind_rows(perm_rows)
+
+```
+
+### D. Purity diagnostics
+Per stratum, ESTIMATE purity in non-responders and responders (Wilcoxon), and its Spearman correlation with PSA change and with deconvolved tumour fraction.
+
+```{r comp-18-nepc-purity-reconcile-05}
+## ---- D. purity diagnostics -------------------------------------------------------------------
+pur <- bind_rows(lapply(names(code), function(sg) bind_rows(lapply(c("Archival", "Screening", "Cycle1"), function(tp) {
+  m <- pb(sg, tp)$meta; nrr <- m$response_group_neat %in% c("Responder", "Non_Responder")
+  data.frame(stratum = paste0(code[sg], "__", tp), n = nrow(m),
+             purity_NR = mean(m$purity[m$response_group_neat == "Non_Responder"]), purity_R = mean(m$purity[m$response_group_neat == "Responder"]),
+             p_purity_NR_vs_R = wilcox.test(purity ~ response_group_neat, m[nrr, ], exact = FALSE)$p.value,
+             rho_purity_psa = cor(m$purity, m$max_psa_change, method = "spearman"),
+             rho_purity_vs_decon = cor(m$purity, m$tumour_frac, method = "spearman"))
+}))))
+
+```
+
+### E. Neuroendocrine and AR scores, and PET
+- Reproduces the earlier neuroendocrine–PSMA-PET correlation from the earlier per-AOI scores, at patient level (Spearman and Pearson) and with AOIs as observations (pseudoreplicated).
+- In patient pseudobulk, scores the detected part of the 13-gene neuroendocrine set, the circular earlier neuroendocrine genes and Hallmark androgen response, as mean z-score and singscore, when at least three genes are detected. Each score is related to PSA change, PSMA-PET volume change and SUVmean (Spearman), and to response group (Wilcoxon; linear model with batch, and with batch + purity).
+
+```{r comp-18-nepc-purity-reconcile-06}
+## ---- E. NEPC / AR scores at patient level, and PET ----------------------------------------------
+ph8 <- read.csv(file.path(PRINCE_DIR, "previous_analysis/Phase8_NEPC_Longitudinal/all_scores_per_AOI.csv"))
+ph8_pt <- ph8 %>% filter(timepoint == "Screening") %>% group_by(subject_id) %>%
+  summarise(nepc = mean(score_nepc), ar = mean(score_ar_hallmark), .groups = "drop") %>% left_join(pt, by = "subject_id")
+rep_rows <- list()
+for (v in c("PSMAPET_vol_change_pct", "PSMAPET_BL_SUVmean", "PSMAPET_BL_vol", "max_psa_change")) {
+  ok <- complete.cases(ph8_pt$nepc, ph8_pt[[v]])
+  ct <- cor.test(ph8_pt$nepc[ok], ph8_pt[[v]][ok], method = "spearman", exact = FALSE)
+  ctp <- cor.test(ph8_pt$nepc[ok], ph8_pt[[v]][ok], method = "pearson")
+  rep_rows[[v]] <- data.frame(score = "Phase 8 NEPC (13 genes, all Screening AOIs, patient mean)", outcome = v,
+                              n = sum(ok), spearman = unname(ct$estimate), p_spearman = ct$p.value,
+                              pearson = unname(ctp$estimate), p_pearson = ctp$p.value)
+}
+# AOI-level version (as a deck-style analysis may have used): every Screening AOI as a point
+aoi8 <- ph8 %>% filter(timepoint == "Screening") %>% left_join(pt %>% select(subject_id, PSMAPET_vol_change_pct), by = "subject_id") %>%
+  filter(!is.na(PSMAPET_vol_change_pct))
+ct_aoi <- cor.test(aoi8$score_nepc, aoi8$PSMAPET_vol_change_pct, method = "pearson")
+rep_rows[["aoi"]] <- data.frame(score = "Phase 8 NEPC, AOI-level (pseudoreplicated)", outcome = "PSMAPET_vol_change_pct",
+                                n = nrow(aoi8), spearman = NA, p_spearman = NA, pearson = unname(ct_aoi$estimate), p_pearson = ct_aoi$p.value)
+
+sc_rows <- list()
+for (sg in names(code)) for (tp in c("Archival", "Screening")) {
+  p <- pb(sg, tp); z <- t(scale(t(p$lcpm))); m <- p$meta
+  sets <- list(NEPC13_detected = intersect(nepc13, rownames(z)), deck_NE = intersect(deck_ne, rownames(z)),
+               AR_hallmark = intersect(ar_hall, rownames(z)))
+  rk <- rankGenes(p$lcpm)
+  for (s in names(sets)) {
+    g <- sets[[s]]; if (length(g) < 3) next
+    sz <- colMeans(z[g, , drop = FALSE]); ss <- simpleScore(rk, upSet = g)$TotalScore
+    nrr <- m$response_group_neat %in% c("Responder", "Non_Responder")
+    for (meth in c("zmean", "singscore")) {
+      y <- if (meth == "zmean") sz else ss
+      r <- function(v) { ok <- complete.cases(y, m[[v]]); if (sum(ok) < 8) return(c(NA, NA))
+        ct <- cor.test(y[ok], m[[v]][ok], method = "spearman", exact = FALSE); c(ct$estimate, ct$p.value) }
+      a <- r("max_psa_change"); b <- r("PSMAPET_vol_change_pct"); cc <- r("PSMAPET_BL_SUVmean")
+      fb <- lm(y ~ m$batch); fbp <- lm(y ~ m$batch + m$purity)
+      nr <- as.integer(m$response_group_neat == "Non_Responder")
+      lmp <- function(form, data) { f <- lm(form, data); s <- summary(f)$coefficients; if ("nr" %in% rownames(s)) s["nr", 4] else NA }
+      dd <- data.frame(y = y, nr = nr, batch = m$batch, purity = m$purity)[nrr, ]
+      sc_rows[[paste(sg, tp, s, meth)]] <- data.frame(
+        stratum = paste0(code[sg], "__", tp), score = s, method = meth, n_genes = length(g), genes = paste(g, collapse = ","),
+        n = length(y), n_NR = sum(nr == 1 & nrr), rho_psa = a[1], p_psa = a[2],
+        p_NR_wilcox = wilcox.test(y[nrr & nr == 1], y[nrr & nr == 0], exact = FALSE)$p.value,
+        p_NR_batch = lmp(y ~ nr + batch, dd), p_NR_batch_purity = lmp(y ~ nr + batch + purity, dd),
+        rho_PET_volchange = b[1], p_PET_volchange = b[2], rho_PET_SUVmean = cc[1], p_PET_SUVmean = cc[2])
+    }
+  }
+}
+sc_tab <- bind_rows(sc_rows)
+
+```
+
+Prints each section and writes the result tables.
+
+```{r comp-18-nepc-purity-reconcile-07}
+## ---- report ------------------------------------------------------------------------------------
+options(width = 240)
+fmt <- function(x) as.data.frame(x %>% mutate(across(where(is.numeric), ~signif(.x, 3))))
+cat("\n==== A. Earlier AOI-level results (Phase 4 RUV; Phase 5 RUV + purity), NR vs R, FDR < 0.05 ====\n"); print(old, row.names = FALSE)
+cat("\n==== B. Patient-level pseudobulk (LOQ-filtered genes): genes at FDR < 0.05 / 0.1 ====\n")
+print(de_tab %>% pivot_wider(id_cols = c(stratum, contrast, n_patients, genes), names_from = covariates, values_from = c(fdr05, fdr10)) %>% as.data.frame(), row.names = FALSE)
+cat("\n==== C. Permutation calibration (NR vs R, 200 label shuffles) ====\n"); print(fmt(perm_tab), row.names = FALSE)
+cat("\n==== B. Deck genes, PanCK+PSMA- and PSMA+ Screening, NR vs R ====\n")
+print(fmt(gene_tab %>% filter(contrast == "NR", grepl("Screening", stratum), stratum != "CD45__Screening") %>%
+  select(stratum, covariates, gene, logFC, P, FDR) %>% pivot_wider(names_from = covariates, values_from = c(logFC, P, FDR))), row.names = FALSE)
+cat("\n==== D. ESTIMATE purity diagnostics (patient level) ====\n"); print(fmt(pur), row.names = FALSE)
+cat("\n==== E. Reproducing the NEPC vs PET result ====\n"); print(fmt(bind_rows(rep_rows)), row.names = FALSE)
+cat("\n==== E. NEPC / NE / AR scores at patient level ====\n"); print(fmt(sc_tab %>% select(-genes)), row.names = FALSE)
+
+write.csv(old, file.path(out_dir, "A_earlier_aoi_level_counts.csv"), row.names = FALSE)
+write.csv(de_tab, file.path(out_dir, "B_pseudobulk_de_by_covariates.csv"), row.names = FALSE)
+write.csv(gene_tab, file.path(out_dir, "B_deck_genes_by_covariates.csv"), row.names = FALSE)
+write.csv(perm_tab, file.path(out_dir, "C_permutation_calibration.csv"), row.names = FALSE)
+write.csv(pur, file.path(out_dir, "D_purity_diagnostics.csv"), row.names = FALSE)
+write.csv(bind_rows(rep_rows), file.path(out_dir, "E_nepc_pet_reproduction.csv"), row.names = FALSE)
+write.csv(sc_tab, file.path(out_dir, "E_scores_patient_level.csv"), row.names = FALSE)
+cat("\nR3 complete.\n")
+```

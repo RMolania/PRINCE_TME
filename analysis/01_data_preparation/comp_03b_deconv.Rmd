@@ -1,0 +1,326 @@
+---
+title: "Tissue-matched cell-type deconvolution with SpatialDecon"
+subtitle: "PRINCE spatial transcriptomics: `comp_03b_deconv`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+Each AOI is deconvolved with a single-cell reference that matches its tissue of origin. Archival primary-tumour AOIs, and the control-tissue AOIs, use PCCAT primary-tumour cells at the ct.L2 level (22 cell types). Bone AOIs (Screening, Cycle1 and progression) use GSE143791 non-tumour cells from tumour and involved bone-marrow samples, combined with two PCCAT tumour profiles: castration-resistant luminal cells (Tumour_AR) and NEPC neuroendocrine cells (Tumour_NE). Profiles are per-type mean counts per 10,000. To limit collinearity, only the 40 most type-specific markers per type are used. SpatialDecon is run on Q3-normalised raw counts with the per-AOI negative-probe background.
+
+To validate the estimates, fractions are correlated (Spearman) with canonical marker expression, and median lineage fractions are compared across compartments. Fine cell types are also grouped into coarse lineages (epithelial tumour, T/NK, B/plasma, myeloid, stromal, endothelial and, in bone, bone cells and erythroid/progenitor cells). The epithelial-tumour fraction from this script is the tumour-fraction covariate in later models. For each stratum, centred log-ratio (CLR) transformed fractions are tested against outcome with mixed models, CLR ~ PSA change (per 50%) + batch + (1 | patient), and with a non-responder versus responder contrast (intermediate patients excluded).
+
+**Manuscript items supported**
+
+- Supplementary Table 4 (deconvolution validation against marker genes) and Supplementary Table 5 (cell-type fraction versus outcome), written to the workbook by comp_11
+- Fig. 1c (mean SpatialDecon composition per compartment in primary tumour and bone; drawn by comp_28/comp_41 from these fractions)
+- Supplementary Data 3 (per-AOI SpatialDecon fractions, exported by comp_48)
+- Methods: Deconvolution
+- Tumour-fraction covariate used by comp_04, comp_07 and later purity- and composition-adjusted analyses
+
+**Pipeline step:** `./run_pipeline.sh --only 03b_deconv`. Approximate runtime: minutes (longer on the first run, when the bone reference profiles are built).
+
+**Inputs**
+
+- `data/refs/pccat_subsample.qs`
+- `data/reference/GSE143791/GSE143791_cell.annotation.human.csv.gz`
+- `data/reference/GSE143791/raw_files/BMET*-{Tumor,Involved}.count*`
+- `data/phase2_se_qc_filtered.qs`
+- `results/C1_clinical/patient_table.qs`
+
+**Outputs**
+
+- `results/C3_deconvolution/reference_profiles.qs`
+- `results/C3_deconvolution/deconvolution_proportions.qs`
+- `results/C3_deconvolution/proportions_PRIMARY_ref_Archival.csv`
+- `results/C3_deconvolution/proportions_BONE_ref_bone_AOIs.csv`
+- `results/C3_deconvolution/validation_marker_correlation.csv`
+- `results/C3_deconvolution/median_lineage_by_segment.csv`
+- `results/C3_deconvolution/celltype_outcome_associations.csv`
+- `results/C3_deconvolution/lineage_composition_by_response.pdf`
+
+**Depends on**: `comp_00b_bone_cohort`, `comp_01_clinical`, `comp_03a_build_refs`
+
+## Analysis
+
+Script header: the two tissue-matched references, the marker selection, the SpatialDecon settings, the validation and the association tests.
+
+### Reference profiles
+Helper functions compute per-type mean counts per 10,000 (only types with at least 15 cells) and select, for each type, the 40 genes with the largest log2 margin over the next-highest type (minimum expression 0.5). If the profiles are not yet cached:
+- PCCAT primary-tumour cells give the primary profile;
+- PCCAT CRPC/mCRPC luminal cells and NEPC neuroendocrine cells give the Tumour_AR and Tumour_NE profiles;
+- GSE143791 tumour and involved-marrow count files are merged on common genes, and annotated non-tumour cells give the bone microenvironment profiles, to which the two tumour profiles are added.
+
+```{r comp-03b-deconv-01}
+## ============================================================================
+## PRINCE comprehensive analysis -- C3b: deconvolution with prostate / bone references
+##   Ref "PRIMARY": PCCAT primary tumours (Group2 == "Pri"), ct.L2 (22 types)
+##                  -> Archival AOIs
+##   Ref "BONE":    GSE143791 (Kfoury 2021) Tumor + Involved bone-met non-tumour cells
+##                  (28 types) + PCCAT tumour profiles: Tumour_AR = Luminal cells from
+##                  CRPC/mCRPC, Tumour_NE = NE cells from NEPC
+##                  -> Screening / Cycle1 / DiseaseProgression AOIs
+##   Profiles = per-type mean counts-per-10k; genes = top-40 most type-specific
+##   markers per type (limits collinearity). SpatialDecon on Q3-normalised raw counts
+##   with neg-probe background (as Phase 6), without safeTME / tumour-cluster hacks.
+##   Validation: fraction vs canonical-marker expression; segment sanity.
+##   Tests: per stratum, CLR(proportions) ~ outcome + study_batch + (1|patient).
+## ============================================================================
+
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({
+  library(qs); library(SummarizedExperiment); library(Matrix); library(dplyr); library(tidyr)
+  library(data.table); library(SpatialDecon); library(lmerTest); library(ggplot2)
+})
+setwd(PRINCE_DIR)
+check_ram_or_stop(20)
+data.table::setDTthreads(1)
+
+cpm10k_means <- function(counts, types, min_cells = 15) {
+  keep <- names(which(table(types) >= min_cells))
+  sf <- 1e4 / pmax(colSums(counts), 1)
+  sapply(keep, function(t) {
+    i <- which(types == t)
+    as.numeric(counts[, i, drop = FALSE] %*% sf[i]) / length(i)
+  }) %>% `rownames<-`(rownames(counts))
+}
+top_markers <- function(prof, n = 40, min_expr = 0.5) {
+  lp <- log2(prof + 1)
+  unique(unlist(lapply(colnames(lp), function(t) {
+    second <- apply(lp[, colnames(lp) != t, drop = FALSE], 1, max)
+    spec <- lp[, t] - second
+    spec[prof[, t] < min_expr] <- -Inf
+    names(sort(spec, decreasing = TRUE))[1:n]
+  })))
+}
+
+ref_file <- out_path("C3_deconvolution", "reference_profiles.qs")
+if (!file.exists(ref_file)) {
+  ## ---- PCCAT ---------------------------------------------------------------------
+  pc <- qs::qread(file.path(PRINCE_DIR, "refs/pccat_subsample.qs"), nthreads = 1)
+  pri <- pc$meta$Group2 == "Pri"
+  prof_primary <- cpm10k_means(pc$counts[, pri], pc$meta$ct.L2[pri])
+  tum_ar <- pc$meta$Group2 %in% c("CRPC", "mCRPC") & pc$meta$ct.L2 == "Luminal"
+  tum_ne <- pc$meta$Group2 == "NEPC" & pc$meta$ct.L2 == "NE"
+  prof_tum <- cbind(Tumour_AR = cpm10k_means(pc$counts[, tum_ar], rep("x", sum(tum_ar)))[, 1],
+                    Tumour_NE = cpm10k_means(pc$counts[, tum_ne], rep("x", sum(tum_ne)))[, 1])
+  cat("PCCAT tumour profile cells: AR", sum(tum_ar), "| NE", sum(tum_ne), "\n")
+  rm(pc); invisible(gc())
+
+  ## ---- GSE143791 bone met (Tumor + Involved only) ---------------------------------
+  gdir <- file.path(PMCC_DIR, "GSE143791")
+  ann <- fread(file.path(gdir, "GSE143791_cell.annotation.human.csv.gz"))
+  files <- list.files(file.path(gdir, "raw_files"), pattern = "BMET[0-9]+-(Tumor|Involved)\\.count", full.names = TRUE)
+  bone_prof_list <- list(); bone_n <- list()
+  mats <- lapply(files, function(f) {
+    d <- fread(f, nThread = 1); g <- d[[1]]; d[[1]] <- NULL
+    keep <- intersect(colnames(d), ann$barcode)
+    m <- Matrix(as.matrix(d[, ..keep]), sparse = TRUE); rownames(m) <- g
+    m[!duplicated(g), , drop = FALSE]
+  })
+  genes <- Reduce(intersect, lapply(mats, rownames))
+  bone <- do.call(cbind, lapply(mats, function(m) m[genes, ])); rm(mats); invisible(gc())
+  btype <- ann$cells[match(colnames(bone), ann$barcode)]
+  cat("GSE143791 Tumor+Involved annotated cells:", ncol(bone), "\n"); print(table(btype))
+  nontum <- btype != "Tumor"
+  prof_bone_nt <- cpm10k_means(bone[, nontum], btype[nontum])
+  rm(bone); invisible(gc())
+
+  common_b <- intersect(rownames(prof_bone_nt), rownames(prof_tum))
+  prof_bone <- cbind(prof_bone_nt[common_b, ], prof_tum[common_b, ])
+  qs::qsave(list(primary = prof_primary, bone = prof_bone), ref_file)
+}
+refs <- qs::qread(ref_file)
+
+```
+
+### SpatialDecon
+Q3-normalises the raw GeoMx counts and builds the background matrix from each AOI's negative-probe geometric mean on the same scale. Archival and control AOIs are deconvolved with the primary reference, and all bone AOIs with the bone reference, each restricted to the reference's marker genes. Proportions are taken from `prop_of_all`, and missing values are set to 0.
+
+```{r comp-03b-deconv-02}
+## ---- GeoMx input (raw counts, Q3, neg-probe background) ----------------------------
+se <- qs::qread("phase2_se_qc_filtered.qs")
+cd <- as.data.frame(colData(se))
+pt <- qs::qread(out_path("C1_clinical", "patient_table.qs"))
+raw <- assay(se, "all_count")
+q3 <- apply(raw, 2, function(x) quantile(x[x > 0], 0.75))
+normq3 <- sweep(raw, 2, q3, "/") * mean(q3)
+bg <- matrix(rep(cd$neg_probe_geomean / q3 * mean(q3), each = nrow(raw)), nrow = nrow(raw),
+             dimnames = dimnames(raw))
+
+run_decon <- function(prof, aois) {
+  genes <- intersect(top_markers(prof), rownames(raw))
+  cat("  profile types:", ncol(prof), "| marker genes used:", length(genes), "\n")
+  res <- spatialdecon(norm = normq3[genes, aois], bg = bg[genes, aois], X = prof[genes, ],
+                      raw = raw[genes, aois], align_genes = TRUE)
+  prop <- t(res$prop_of_all)
+  prop[is.na(prop)] <- 0
+  prop
+}
+cat("Deconvolving Archival AOIs with PCCAT primary reference ...\n")
+a_aoi <- colnames(se)[cd$timepoint == "Archival" | (cd$response_group_neat == "Control")]
+prop_pri <- run_decon(refs$primary, a_aoi)
+cat("Deconvolving bone AOIs with GSE143791 + PCCAT tumour reference ...\n")
+b_aoi <- colnames(se)[cd$timepoint %in% c("Screening", "Cycle1", "DiseaseProgression")]
+prop_bone <- run_decon(refs$bone, b_aoi)
+
+```
+
+### Coarse lineages
+Maps primary-reference cell types through a fixed lookup, and bone-reference types by name patterns, to coarse lineages. It then sums fractions within each lineage. The bone mapping is printed so it can be checked.
+
+```{r comp-03b-deconv-03}
+## ---- coarse lineage groupings ------------------------------------------------------
+lineage_primary <- c(Luminal = "Epithelial_tumour", Basal = "Epithelial_tumour", Club = "Epithelial_tumour",
+  Hillock = "Epithelial_tumour", LPCs = "Epithelial_tumour", NE = "Epithelial_tumour",
+  CD4T = "T_NK", CD8T = "T_NK", NK = "T_NK", T_MKI67 = "T_NK", B = "B_plasma", Plasma_B = "B_plasma",
+  Mph = "Myeloid", Mono = "Myeloid", DCs = "Myeloid", Neutrophils = "Myeloid", Mye_cycling = "Myeloid",
+  Mast = "Myeloid", CAFs = "Stromal", Mural = "Stromal", Pericytes = "Stromal", Endo = "Endothelial")
+lin_bone <- function(t) dplyr::case_when(
+  grepl("^Tumour", t) ~ "Epithelial_tumour",
+  grepl("CD4|CD8|CTL|NK|Th|Treg", t) ~ "T_NK",
+  grepl("^B|Plasma|Pro-B|Pre-B", t) ~ "B_plasma",
+  grepl("Mono|TAM|TIM|DC|Neutro|Mast|Macro", t) ~ "Myeloid",
+  grepl("Osteo", t) ~ "Bone_cells",
+  grepl("Erythro|Progen", t) ~ "Erythroid_progenitor",
+  grepl("Endo", t) ~ "Endothelial",
+  grepl("Peri|Fibro|MSC|Stromal", t) ~ "Stromal",
+  TRUE ~ "Other")
+coarse <- function(prop, map) {
+  m <- if (is.function(map)) map(colnames(prop)) else map[colnames(prop)]
+  m[is.na(m)] <- "Other"
+  sapply(split(colnames(prop), m), function(cc) rowSums(prop[, cc, drop = FALSE]))
+}
+coarse_pri <- coarse(prop_pri, lineage_primary)
+coarse_bone <- coarse(prop_bone, lin_bone)
+cat("\nBone lineage mapping:\n"); print(split(colnames(prop_bone), lin_bone(colnames(prop_bone))))
+
+```
+
+### Validation
+For each cell type with canonical markers (for example CD8A/CD8B for CD8 T cells, ACP5/CTSK/MMP9 for osteoclasts, KLK3/AR for AR-driven tumour), computes the Spearman correlation between the deconvolved fraction and the mean marker log-CPM across AOIs. Median lineage fractions are tabulated by reference and compartment, as a check that CD45⁺ AOIs are immune-rich and tumour AOIs epithelial-rich.
+
+```{r comp-03b-deconv-04}
+## ---- validation ------------------------------------------------------------------
+lcpm <- log2(sweep(raw, 2, colSums(raw), "/") * 1e6 + 1)
+val_markers <- list(CD8T = c("CD8A", "CD8B"), CD4T = c("CD4", "IL7R"), B = c("MS4A1", "CD79A"),
+  Plasma_B = c("MZB1", "JCHAIN"), Mph = c("CD68", "CD163", "C1QA"), Endo = c("PECAM1", "VWF"),
+  CAFs = c("COL1A1", "DCN"), Mast = c("TPSAB1", "CPA3"), Luminal = c("KLK3", "AR"),
+  NE = c("CHGA", "SYP"), Tumour_AR = c("KLK3", "AR"), Tumour_NE = c("CHGA", "SYP"),
+  Osteoblasts = c("COL1A1", "RUNX2", "SP7"), Osteoclasts = c("ACP5", "CTSK", "MMP9"),
+  TAM = c("CD163", "C1QA"), Erythroid = c("HBB", "GYPA"), `CTL-1` = c("CD8A", "GZMK"))
+validate <- function(prop, label) bind_rows(lapply(intersect(names(val_markers), colnames(prop)), function(t) {
+  g <- intersect(val_markers[[t]], rownames(lcpm))
+  if (!length(g)) return(NULL)
+  score <- colMeans(lcpm[g, rownames(prop), drop = FALSE])
+  data.frame(reference = label, cell_type = t, markers = paste(g, collapse = ","),
+             spearman = cor(prop[, t], score, method = "spearman"), mean_prop = mean(prop[, t]))
+}))
+val <- bind_rows(validate(prop_pri, "PRIMARY"), validate(prop_bone, "BONE"))
+cat("\nValidation: deconvolved fraction vs marker expression (Spearman):\n")
+print(val %>% mutate(across(where(is.numeric), ~round(.x, 3))), row.names = FALSE)
+
+seg_summary <- bind_rows(
+  data.frame(reference = "PRIMARY", aoi = rownames(coarse_pri), coarse_pri, check.names = FALSE),
+  data.frame(reference = "BONE", aoi = rownames(coarse_bone), coarse_bone, check.names = FALSE)) %>%
+  mutate(segment = cd[aoi, "segment_name"], timepoint = cd[aoi, "timepoint"]) %>%
+  pivot_longer(-c(reference, aoi, segment, timepoint), names_to = "lineage", values_to = "prop") %>%
+  filter(!is.na(prop)) %>%
+  summarise(.by = c(reference, segment, lineage), median = median(prop)) %>%
+  pivot_wider(names_from = lineage, values_from = median)
+cat("\nMedian lineage fraction by segment:\n"); print(as.data.frame(seg_summary %>% mutate(across(where(is.numeric), ~round(.x, 3)))))
+
+```
+
+### Association with outcome
+In each compartment × timepoint stratum (patient AOIs only), cell types with mean fraction above 0.5% are CLR-transformed (pseudocount 10⁻³). Each type is fitted as CLR ~ PSA change/50 + study_batch + (1 | patient). A second model, CLR ~ non-responder + study_batch + (1 | patient), excludes intermediate patients. Fits are made at both the fine and the lineage level, with BH-FDR within stratum and level.
+
+```{r comp-03b-deconv-05}
+## ---- association tests (per stratum, patient-level mixed models) ------------------
+clr <- function(p) { p <- p + 1e-3; p <- p / rowSums(p); log(p) - rowMeans(log(p)) }
+test_stratum <- function(prop, aois, level) {
+  d0 <- cd[aois, ] %>% mutate(aoi = aois) %>%
+    left_join(pt[, c("subject_id", "psa_change_capped")], by = "subject_id")
+  pr <- prop[aois, colMeans(prop[aois, , drop = FALSE]) > 0.005, drop = FALSE]
+  if (ncol(pr) < 2) return(NULL)
+  z <- clr(pr)
+  bind_rows(lapply(colnames(z), function(t) {
+    d <- d0 %>% mutate(y = z[, t], psa = psa_change_capped / 50)
+    fit1 <- tryCatch(suppressMessages(lmer(y ~ psa + study_batch + (1 | subject_id), data = d)), error = function(e) NULL)
+    dn <- d %>% filter(response_group_neat %in% c("Responder", "Non_Responder")) %>%
+      mutate(NR = as.integer(response_group_neat == "Non_Responder"))
+    fit2 <- tryCatch(suppressMessages(lmer(y ~ NR + study_batch + (1 | subject_id), data = dn)), error = function(e) NULL)
+    co <- function(f, term) if (is.null(f)) c(NA, NA, NA) else {
+      s <- summary(f)$coefficients; if (!term %in% rownames(s)) c(NA, NA, NA) else s[term, c("Estimate", "Std. Error", "Pr(>|t|)")]
+    }
+    c1 <- co(fit1, "psa"); c2 <- co(fit2, "NR")
+    data.frame(level = level, cell_type = t, mean_prop = mean(pr[, t]),
+               mean_prop_R = mean(pr[d$response_group_neat == "Responder", t]),
+               mean_prop_NR = mean(pr[d$response_group_neat == "Non_Responder", t]),
+               beta_psa_per50 = c1[1], se_psa = c1[2], p_psa = c1[3],
+               beta_NR_vs_R = c2[1], se_NR = c2[2], p_NR = c2[3])
+  }))
+}
+assoc <- list()
+for (seg in c("CD45+", "PSMA+", "PanCK+PSMA-")) for (tp in c("Archival", "Screening", "Cycle1")) {
+  aois <- colnames(se)[cd$segment_name == seg & cd$timepoint == tp & cd$response_group_neat != "Control"]
+  P <- if (tp == "Archival") prop_pri else prop_bone
+  C <- if (tp == "Archival") coarse_pri else coarse_bone
+  for (lv in c("fine", "lineage")) {
+    r <- test_stratum(if (lv == "fine") P else C, aois, lv)
+    if (!is.null(r)) assoc[[paste(seg, tp, lv)]] <- cbind(segment = seg, timepoint = tp, r)
+  }
+}
+assoc <- bind_rows(assoc) %>% group_by(segment, timepoint, level) %>%
+  mutate(fdr_psa = p.adjust(p_psa, "BH"), fdr_NR = p.adjust(p_NR, "BH")) %>% ungroup()
+cat("\nTop deconvolution associations (p < 0.05 for either outcome):\n")
+print(as.data.frame(assoc %>% filter(p_psa < 0.05 | p_NR < 0.05) %>% arrange(pmin(p_psa, p_NR)) %>%
+  mutate(across(where(is.numeric), ~signif(.x, 3)))), row.names = FALSE)
+
+```
+
+### Save
+Writes the fine and lineage proportions (qs and csv), the validation and median-lineage tables and the association table. Also plots mean lineage composition by response group, compartment and timepoint.
+
+```{r comp-03b-deconv-06}
+## ---- save ---------------------------------------------------------------------------
+qs::qsave(list(prop_primary = prop_pri, prop_bone = prop_bone,
+               lineage_primary = coarse_pri, lineage_bone = coarse_bone),
+          out_path("C3_deconvolution", "deconvolution_proportions.qs"))
+write.csv(data.frame(aoi = rownames(prop_pri), prop_pri, check.names = FALSE),
+          out_path("C3_deconvolution", "proportions_PRIMARY_ref_Archival.csv"), row.names = FALSE)
+write.csv(data.frame(aoi = rownames(prop_bone), prop_bone, check.names = FALSE),
+          out_path("C3_deconvolution", "proportions_BONE_ref_bone_AOIs.csv"), row.names = FALSE)
+write.csv(val, out_path("C3_deconvolution", "validation_marker_correlation.csv"), row.names = FALSE)
+write.csv(seg_summary, out_path("C3_deconvolution", "median_lineage_by_segment.csv"), row.names = FALSE)
+write.csv(assoc, out_path("C3_deconvolution", "celltype_outcome_associations.csv"), row.names = FALSE)
+
+plot_df <- bind_rows(
+  data.frame(aoi = rownames(coarse_pri), coarse_pri, check.names = FALSE),
+  data.frame(aoi = rownames(coarse_bone), coarse_bone, check.names = FALSE)) %>%
+  mutate(segment = cd[aoi, "segment_name"], timepoint = cd[aoi, "timepoint"],
+         response = cd[aoi, "response_group_neat"]) %>%
+  filter(response != "Control", timepoint != "DiseaseProgression") %>%
+  pivot_longer(-c(aoi, segment, timepoint, response), names_to = "lineage", values_to = "prop") %>%
+  filter(!is.na(prop)) %>%
+  summarise(.by = c(segment, timepoint, response, lineage), prop = mean(prop))
+p <- ggplot(plot_df, aes(response, prop, fill = lineage)) + geom_col(position = "fill") +
+  facet_grid(segment ~ factor(timepoint, c("Archival", "Screening", "Cycle1"))) + theme_bw() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1)) +
+  labs(y = "mean fraction", x = "", title = "Deconvolved lineage composition (PCCAT primary / GSE143791+PCCAT bone refs)")
+ggsave(out_path("C3_deconvolution", "lineage_composition_by_response.pdf"), p, width = 10, height = 8)
+cat("\nC3b complete.\n")
+```

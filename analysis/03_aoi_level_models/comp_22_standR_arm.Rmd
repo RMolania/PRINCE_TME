@@ -1,0 +1,168 @@
+---
+title: "standR workflow arm: vignette-style GeoMx analysis as a sensitivity comparison"
+subtitle: "PRINCE spatial transcriptomics: `comp_22_standR_arm`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+Runs the Bioconductor standR GeoMx workflow as its documentation describes, separately in each compartment × timepoint stratum, to show how a widely used pipeline behaves on these data and how its results compare with the patient-level primary analysis. Control (technical-replicate) AOIs and progression biopsies are excluded.
+
+The chain is: `addPerROIQC` gene filter (min_count = 5, sample_fraction = 0.9, no negative-probe background), TMM normalisation (`geomxNorm`), negative-control genes chosen by `findNCGs` (top 300 by batch), and RUV-4 via `geomxBatchCorrection` protecting response group, with k = 1–6. k is chosen with standR's own clustering statistics (`computeClusterEvalStats`): the smallest k reaching at least 90% of the largest reduction in batch clustering; if no k reduces batch clustering, k = 1 is used and the stratum is flagged. Differential expression is limma-voom on counts with the RUV factors in the design (~ 0 + response group + W1..Wk; contrast non-responder − responder, intermediate patients kept in the model as in the vignette's multi-group design), fitted (a) with AOIs as independent samples, as in the vignette, and (b) with patient blocking (two-pass `duplicateCorrelation`).
+
+The point of the comparison is the unit of inference: AOIs from the same patient are not independent, and RUV-4 protecting the outcome can inflate discovery. The calibration of these counts against shuffled labels is in `comp_23_standR_permutation`.
+
+**Manuscript items supported**
+
+- Extended Data Fig. 10a (genes at FDR < 0.05, NR vs R, standR AOI-independent vs patient-blocked vs patient pseudobulk), via `comp_24_ed_standR`
+- Supplementary Table 36 (S36_standR), via `comp_25_supp_tables_v3`
+- Methods: Reconciliation with earlier analyses and the standR workflow
+- Results: Re-evaluation of earlier neuroendocrine, purity and bone-niche findings (standR paragraph)
+
+**Pipeline step:** `./run_pipeline.sh --only 22_standR_arm`.
+
+**Inputs**
+
+- `data/phase2_se_qc_filtered.qs`
+- `results/R3_nepc_purity/B_pseudobulk_de_by_covariates.csv`
+- `results/R1_loq/loq_filter_summary.csv`
+
+**Outputs**
+
+- `results/R5_standR/standR_vs_primary_summary.csv`
+- `results/R5_standR/standR_key_genes.csv`
+- `results/R5_standR/standR_k_selection_stats.csv`
+
+**Depends on**: `comp_00b_bone_cohort`, `comp_16_loq_filter`, `comp_18_nepc_purity_reconcile`
+
+## Analysis
+
+### standR arm
+The header summarises the workflow exactly as run: standR QC filter, TMM, data-driven negative-control genes, RUV-4 with k = 1–6, k selection by standR's clustering statistics, and limma-voom with and without patient blocking.
+
+Load the bone-only AOI object, define the nine strata (CD45+, PSMA+ and PanCK+PSMA− × Archival, Screening, Cycle1) and drop Control AOIs. For each stratum the standR chain is run on raw counts; batch and response clustering are scored as the mean of the adjusted Rand index and silhouette statistics from `computeClusterEvalStats` at k = 0–6, and k is the smallest value achieving ≥ 90% of the maximal reduction in batch clustering (k = 1 with a flag when no k helps, as happens in PSMA+). Differential expression then follows the vignette: limma-voom with the RUV factors as covariates, contrast NR − R, fitted once with AOIs independent and once with patient blocking (`duplicateCorrelation` run twice, voom weights recomputed in between). The chunk records, per stratum, the number of genes before and after the standR filter, chosen k, the largest absolute correlation of any RUV factor with non-responder status, the counts of genes at FDR < 0.05 under both fits and the consensus within-patient correlation, plus FDRs for a set of genes named in earlier analyses (*FOLH1*, *TMPRSS2*, *KLK2*, *NEUROD1*, *ID2*, *BEX2*, *CHGA*, *IBSP*, *SSTR5*, *B2M*).
+
+```{r comp-22-standR-arm-01}
+## ============================================================================
+## PRINCE -- standR arm (sensitivity): the Bioconductor standR GeoMx workflow run as
+## its vignette describes, per segment x timepoint stratum (Control / DiseaseProgression
+## excluded):
+##   addPerROIQC(min_count = 5, sample_fraction = 0.9)  -> gene filter (no negative probes)
+##   geomxNorm(method = "TMM")
+##   findNCGs(batch_name = "study_batch", top_n = 300)
+##   geomxBatchCorrection(method = "RUV4", factors = "response_group_neat", k = 1..6)
+##   k chosen with computeClusterEvalStats: largest drop in batch clustering (mean of
+##   ARI/NMI/silhouette-type statistics for study_batch) while keeping response clustering
+##   DE: limma-voom on counts, design ~ response + W1..Wk, NR vs R (Intermediate kept in
+##   the model as in the vignette's multi-group design, contrast NR - R):
+##     (a) standR default: AOIs as independent samples
+##     (b) with patient blocking (duplicateCorrelation)
+##   Compared with the patient-level primary analysis (C13_pseudobulk_LOQ / R3).
+## Outputs: results/R5_standR/
+## ============================================================================
+
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({ library(qs); library(SummarizedExperiment); library(SpatialExperiment); library(standR)
+  library(edgeR); library(limma); library(dplyr); library(tidyr) })
+setwd(PRINCE_DIR)
+check_ram_or_stop(20)
+out_dir <- file.path(COMP_DIR, "R5_standR"); dir.create(out_dir, showWarnings = FALSE)
+
+se <- qs::qread("phase2_se_qc_filtered.qs"); cd <- as.data.frame(colData(se))
+code <- c("CD45+" = "CD45", "PSMA+" = "PSMA", "PanCK+PSMA-" = "PanCKPSMA")
+key_genes <- c("FOLH1", "TMPRSS2", "KLK2", "NEUROD1", "ID2", "BEX2", "CHGA", "IBSP", "SSTR5", "B2M")
+keep_aoi <- cd$response_group_neat != "Control" & cd$timepoint %in% c("Archival", "Screening", "Cycle1")
+
+# standR clustering statistics: mean of ARI and silhouette (higher = stronger clustering by that factor)
+clus <- function(x, foi) { st <- computeClusterEvalStats(x, foi)
+  mean(as.numeric(st$scores[st$types %in% c("Adjusted Rand Index", "Silhouette Coefficient")])) }
+summ <- list(); genes_out <- list(); kstats <- list()
+for (sg in names(code)) for (tp in c("Archival", "Screening", "Cycle1")) {
+  set.seed(2026)  # standR cluster statistics use kmeans (random starts); fixed seed makes k selection reproducible
+  sid <- paste0(code[sg], "__", tp); idx <- which(keep_aoi & cd$segment_name == sg & cd$timepoint == tp)
+  cnt <- assay(se, "all_count")[, idx]; d <- cd[idx, ]
+  spe <- SpatialExperiment(assays = list(counts = cnt, logcounts = edgeR::cpm(cnt, log = TRUE)), colData = d)
+  n_before <- nrow(spe)
+  spe <- addPerROIQC(spe, sample_fraction = 0.9, min_count = 5)
+  spe <- geomxNorm(spe, method = "TMM")
+  spe <- findNCGs(spe, batch_name = "study_batch", top_n = 300)
+  ncgs <- S4Vectors::metadata(spe)$NCGs
+
+  ## k selection with standR's own evaluation statistics
+  ev <- list(); fits <- list()
+  for (k in 1:6) {
+    sp_k <- tryCatch(geomxBatchCorrection(spe, factors = "response_group_neat", NCGs = ncgs, k = k), error = function(e) NULL)
+    if (is.null(sp_k)) next
+    fits[[as.character(k)]] <- sp_k
+    ev[[as.character(k)]] <- data.frame(k = k, batch = clus(sp_k, "study_batch"), response = clus(sp_k, "response_group_neat"))
+  }
+  ev <- bind_rows(data.frame(k = 0, batch = clus(spe, "study_batch"), response = clus(spe, "response_group_neat")), bind_rows(ev))
+  # smallest k achieving >= 90% of the maximal batch-clustering reduction
+  red <- ev$batch[1] - ev$batch; best <- suppressWarnings(max(red[-1], na.rm = TRUE))
+  # if no k reduces batch clustering (as in PSMA+), fall back to the minimal k = 1 and flag it
+  k_sel <- if (is.finite(best) && best > 0) min(ev$k[ev$k >= 1 & !is.na(red) & red >= 0.9 * best]) else 1
+  k_flag <- if (is.finite(best) && best > 0) "ok" else "no k reduced batch clustering; k = 1"
+  kstats[[sid]] <- cbind(stratum = sid, ev, chosen = ev$k == k_sel)
+  sp <- fits[[as.character(k_sel)]]
+  W <- as.data.frame(colData(sp))[, paste0("ruv_W", seq_len(k_sel)), drop = FALSE]
+
+  ## DE as in the vignette: limma-voom on counts with W in the design
+  grp <- factor(d$response_group_neat, levels = c("Responder", "Intermediate", "Non_Responder")); grp <- droplevels(grp)
+  X <- model.matrix(~ 0 + grp + ., data = data.frame(grp = grp, W)); colnames(X) <- sub("^grp", "", colnames(X))
+  dge <- calcNormFactors(DGEList(counts(sp)))
+  cm <- makeContrasts(NRvsR = Non_Responder - Responder, levels = X)
+  v <- voom(dge, X)
+  fa <- eBayes(contrasts.fit(lmFit(v, X), cm)); ta <- topTable(fa, coef = 1, number = Inf, sort.by = "none")
+  dc <- duplicateCorrelation(v, X, block = d$subject_id)
+  v2 <- voom(dge, X, block = d$subject_id, correlation = dc$consensus)
+  dc2 <- duplicateCorrelation(v2, X, block = d$subject_id)
+  fb <- eBayes(contrasts.fit(lmFit(v2, X, block = d$subject_id, correlation = dc2$consensus), cm))
+  tb <- topTable(fb, coef = 1, number = Inf, sort.by = "none")
+  w_psa <- suppressWarnings(max(abs(cor(as.matrix(W), d$response_group_neat == "Non_Responder"))))
+
+  summ[[sid]] <- data.frame(stratum = sid, n_aoi = ncol(sp), n_patients = length(unique(d$subject_id)),
+    n_NR_patients = length(unique(d$subject_id[d$response_group_neat == "Non_Responder"])),
+    genes_before = n_before, genes_after_standR_QC = nrow(sp), k = k_sel, k_flag = k_flag, max_abs_cor_W_with_NR = round(w_psa, 2),
+    fdr05_AOI_independent = sum(ta$adj.P.Val < 0.05), fdr05_patient_blocked = sum(tb$adj.P.Val < 0.05),
+    consensus_cor = round(dc2$consensus, 3))
+  g <- intersect(key_genes, rownames(ta))
+  genes_out[[sid]] <- data.frame(stratum = sid, gene = g, logFC = ta[g, "logFC"],
+    FDR_AOI_independent = ta[g, "adj.P.Val"], FDR_patient_blocked = tb[g, "adj.P.Val"])
+  message(sid, " done (k = ", k_sel, ")")
+}
+```
+
+Combine strata and join the patient-level primary result for the same contrast (patient pseudobulk, NR vs R adjusted for batch, from `comp_18`) and the size of the LOQ ≥ 10% gene universe (from `comp_16`), so the standR gene filter and gene counts can be compared directly with the background-aware patient-level analysis. Writes the summary, key-gene and k-selection tables to `results/R5_standR/`.
+
+```{r comp-22-standR-arm-02}
+summ <- bind_rows(summ); genes_out <- bind_rows(genes_out); kstats <- bind_rows(kstats)
+
+## comparison with the patient-level primary analysis (R3: NR vs R, batch, LOQ genes)
+pb <- read.csv(file.path(COMP_DIR, "R3_nepc_purity", "B_pseudobulk_de_by_covariates.csv")) %>%
+  filter(contrast == "NR", covariates == "batch") %>% select(stratum, fdr05_patient_pseudobulk = fdr05)
+summ <- left_join(summ, pb, by = "stratum")
+loq <- read.csv(file.path(COMP_DIR, "R1_loq", "loq_filter_summary.csv")) %>% select(stratum, genes_LOQ10 = genes_det10)
+summ <- left_join(summ, loq, by = "stratum")
+
+options(width = 250)
+cat("\n==== standR arm vs patient-level primary (NR vs R, genes at FDR < 0.05) ====\n"); print(summ, row.names = FALSE)
+cat("\n==== Key genes: FDR under standR (AOI-independent vs patient-blocked) ====\n")
+print(genes_out %>% filter(grepl("Screening", stratum)) %>% mutate(across(where(is.numeric), ~signif(.x, 2))), row.names = FALSE)
+write.csv(summ, file.path(out_dir, "standR_vs_primary_summary.csv"), row.names = FALSE)
+write.csv(genes_out, file.path(out_dir, "standR_key_genes.csv"), row.names = FALSE)
+write.csv(kstats, file.path(out_dir, "standR_k_selection_stats.csv"), row.names = FALSE)
+cat("\nstandR arm complete.\n")
+```

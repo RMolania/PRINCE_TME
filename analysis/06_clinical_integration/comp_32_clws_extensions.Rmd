@@ -1,0 +1,364 @@
+---
+title: "Normalisation, pooling, gene-set, RUV-III and site × response sensitivity analyses"
+subtitle: "PRINCE spatial transcriptomics: `comp_32_clws_extensions`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+Five extensions prompted by a comparison with the CLWS pipeline. The clinical grouping is unchanged: continuous PSA change and the trial-team responder/non-responder groups. Each part tests whether a conclusion of the primary patient-level analysis depends on an analytic choice.
+
+1. **Normalisation.** Key features (*FOLH1*, Hallmark androgen, HLA-I, Hallmark IFN-α, IFN-I/STING, p53 core) and their paired on-treatment induction are recomputed under TMM, upper quartile, RLE, cyclic loess and GeoMx-standard AOI-level Q3 normalisation followed by patient means.
+2. **Pooling across compartments.** (a) A feature-level mixed model over strata, feature_z ~ stratum + PSA + (1 | patient), with 500 patient-level permutations, plus a one-number-per-patient summary (mean z across strata); (b) gene-wise models per timepoint pooling the three compartments, ~ compartment + PSA + batch with patient blocking, calibrated by 100 patient permutations.
+3. **Gene-set tests.** `camera` on patient pseudobulk (Hallmark, Reactome, KEGG, GO:BP, C8) for PSA change and NR vs R, with the number of Hallmark sets at FDR < 0.1 calibrated by 100 label permutations.
+4. **RUV-III anchored on the control tissue.** The control-tissue AOIs are technical replicates and carry no response information, so they can anchor RUV-III without using the outcome. k is chosen on the between-batch variance of the controls, and patient means of the adjusted data are retested. The controls are used for normalisation only and are excluded from every association test.
+5. **Response-specific primary-to-bone change.** Paired pseudobulk ~ patient + site + site:PSA, gene-wise with 200 patient permutations, and programme-level patient Δ vs PSA.
+
+**Manuscript items supported**
+
+- Supplementary Table 61 (S61_pooled_FOLH1_programmes: 2a pooled feature models)
+- Supplementary Table 62 (S62_pooled_genewise: 2b pooled gene-wise summary)
+- Supplementary Table 63 (S63_site_x_response: primary-to-bone change vs response)
+- Supplementary Table 64 (S64_normalisation: key features under five normalisations)
+- Supplementary Table 65 (S65_RUVIII: key features after RUV-III on control replicates)
+- All via `comp_29_supp_tables_v4`
+- Methods: Composition and heterogeneity sensitivity analyses (pooling across strata, site × PSA change, alternative normalisations and RUV-III)
+- The camera gene-set results (part 3), the normalisation-induction table, the RUV-III k-selection and transcriptome tables, the pooled top-200 genes and the gene-wise site × response table are not reported in the manuscript tables (intermediate/supporting)
+
+**Pipeline step:** `./run_pipeline.sh --only 32_clws_extensions`. Approximate runtime: hours: several permutation loops (500 lmer refits per feature and scope; 100–200 limma/camera refits per stratum), parallelised over PRINCE_MAX_WORKERS.
+
+**Inputs**
+
+- `data/phase2_se_qc_filtered.qs`
+- `results/C1_clinical/patient_table.qs`
+- `results/R1_loq/loq_gene_universes.qs`
+- `results/C13_pseudobulk_LOQ/pseudobulk_strata.qs`
+- `data/reference/msigdb_gene_sets.rds`
+
+**Outputs**
+
+- `results/R10_clws_extensions/1_normalisation_features.csv`
+- `results/R10_clws_extensions/1_normalisation_induction.csv`
+- `results/R10_clws_extensions/2a_pooled_feature_models.csv`
+- `results/R10_clws_extensions/2b_pooled_genewise_summary.csv`
+- `results/R10_clws_extensions/2b_pooled_genewise_top200.csv`
+- `results/R10_clws_extensions/3_camera_all.csv`
+- `results/R10_clws_extensions/3_camera_hallmark_calibration.csv`
+- `results/R10_clws_extensions/4_ruv3_k_selection.csv`
+- `results/R10_clws_extensions/4_ruv3_features.csv`
+- `results/R10_clws_extensions/4_ruv3_transcriptome.csv`
+- `results/R10_clws_extensions/5_site_x_response_genewise.csv`
+- `results/R10_clws_extensions/5_site_x_response_programmes.csv`
+
+**Depends on**: `comp_00b_bone_cohort`, `comp_01_clinical`, `comp_16_loq_filter`, `comp_13b_pseudobulk_loq`
+
+## Analysis
+
+### Sensitivity extensions
+The header lists the five analyses. Clinical grouping is the same as in the primary analysis.
+
+Load inputs, remove cross-hybridising probe families and define the five features, helpers for the batch-adjusted linear model and Spearman correlation, a per-patient metadata builder (PSA change per 50 percentage points) and each patient's batch.
+
+```{r comp-32-clws-extensions-01}
+## ============================================================================
+## PRINCE -- R10: five extensions prompted by the CLWS pipeline (clinical grouping unchanged:
+## continuous PSA change; trial-team responder / non-responder groups).
+##  1. Normalisation robustness of key features and on-treatment induction:
+##     TMM | upper quartile (Q3) | RLE | cyclic loess (pseudobulk log2 CPM) |
+##     GeoMx-standard AOI-level Q3 then patient mean.
+##  2. Pooling across compartments at patient level:
+##     (a) feature-level mixed model across all nine strata, feature_z ~ stratum + PSA + (1|patient),
+##         patient-permutation P; and a one-number-per-patient summary (mean z across strata);
+##     (b) gene-wise pooled model per timepoint, ~ compartment + PSA + batch with patient
+##         blocking across compartments, calibrated by patient permutation (100x).
+##  3. camera gene-set tests on patient pseudobulk (PSA and NR vs R; H, Reactome, KEGG, GO:BP,
+##     C8 cell types), with Hallmark calibrated by patient permutation.
+##  4. RUV-III anchored on the technical-replicate control tissue (no response information
+##     used), k chosen on control between-batch variance; patient means of adjusted AOI data;
+##     key features and transcriptome-wide PSA association with permutation calibration.
+##  5. Response-specific primary -> bone change: paired pseudobulk ~ patient + site + site:PSA;
+##     gene-wise (permutation-calibrated) and programmes (patient delta vs PSA).
+## Outputs: results/R10_clws_extensions/
+## ============================================================================
+
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({ library(qs); library(SummarizedExperiment); library(dplyr); library(tidyr); library(edgeR); library(limma)
+  library(lme4); library(lmerTest); library(parallel); library(ruv); library(singscore) })
+setwd(PRINCE_DIR)
+check_ram_or_stop(20)
+set.seed(2026)
+out_dir <- file.path(COMP_DIR, "R10_clws_extensions"); dir.create(out_dir, showWarnings = FALSE)
+se <- qs::qread("phase2_se_qc_filtered.qs"); cd <- as.data.frame(colData(se))
+pt <- qs::qread(out_path("C1_clinical", "patient_table.qs"))
+uni <- qs::qread(file.path(COMP_DIR, "R1_loq", "loq_gene_universes.qs"))$universes
+msig <- readRDS(file.path(PMCC_DIR, "msigdb_gene_sets.rds"))
+artefact_re <- "^(USP17L|PRAMEF|NBPF|OR[0-9]+[A-Z]+[0-9]+)"
+counts_all <- assay(se, "all_count"); counts_all <- counts_all[!grepl(artefact_re, rownames(counts_all)), ]
+code <- c("CD45+" = "CD45", "PSMA+" = "PSMA", "PanCK+PSMA-" = "PanCKPSMA"); tps <- c("Archival", "Screening", "Cycle1")
+keep_aoi <- cd$response_group_neat != "Control" & cd$timepoint %in% tps
+progs <- list(AR_Hallmark = msig$H$HALLMARK_ANDROGEN_RESPONSE, HLA_I = c("HLA-A", "HLA-B", "HLA-C", "B2M", "TAP1", "TAP2", "TAPBP"),
+  Hallmark_IFNa = msig$H$HALLMARK_INTERFERON_ALPHA_RESPONSE, IFN_I_STING = c("IRF9", "STAT1", "IRF7", "OAS1", "STING1", "TMEM173", "B2M"),
+  P53_core = c("CDKN1A", "MDM2", "DDB2", "PHLDA3", "GDF15", "TNFRSF10B", "SESN1", "ZMAT3", "RRM2B", "TP53I3"))
+score <- function(lc) { z <- t(scale(t(lc))); cbind(FOLH1 = lc["FOLH1", ], sapply(progs, function(g) colMeans(z[intersect(g, rownames(z)), , drop = FALSE]))) }
+lm_p <- function(y, x, b) { b <- droplevels(factor(b)); f <- if (nlevels(b) > 1) lm(y ~ x + b) else lm(y ~ x); s <- summary(f)$coefficients; s[2, c(1, 4)] }
+sp <- function(y, x) { ct <- suppressWarnings(cor.test(y, x, method = "spearman", exact = FALSE)); c(unname(ct$estimate), ct$p.value) }
+pb_counts <- function(idx, key) sapply(split(seq_along(key), key), function(i) rowSums(counts_all[, idx[i], drop = FALSE]))
+meta_for <- function(subj) data.frame(subject_id = subj) %>% left_join(pt %>% select(subject_id, response_group_neat, max_psa_change, psa_change_capped), by = "subject_id") %>%
+  mutate(psa = psa_change_capped / 50)
+batch_of <- cd %>% filter(keep_aoi) %>% distinct(subject_id, study_batch) %>% group_by(subject_id) %>% summarise(batch = first(study_batch))
+
+```
+
+### 1. Normalisation robustness
+Per stratum, sum counts per patient over the LOQ universe and normalise in five ways (TMM, upper quartile, RLE, cyclic loess on log2 CPM, and AOI-level Q3 scaling averaged within patient). Each feature is then tested against PSA change (lm with batch; Spearman). Paired on-treatment induction is recomputed per compartment under each normalisation (Wilcoxon signed-rank). If both output tables already exist they are read back rather than recomputed.
+
+```{r comp-32-clws-extensions-02}
+## ============================ 1. normalisation robustness ===================================
+norm_lc <- function(m, method, aoi_idx = NULL, aoi_key = NULL) {
+  switch(method,
+    TMM = cpm(calcNormFactors(DGEList(m), method = "TMM"), log = TRUE, prior.count = 1),
+    Q3 = cpm(calcNormFactors(DGEList(m), method = "upperquartile"), log = TRUE, prior.count = 1),
+    RLE = cpm(calcNormFactors(DGEList(m), method = "RLE"), log = TRUE, prior.count = 1),
+    cyclicloess = normalizeBetweenArrays(log2(cpm(m) + 1), method = "cyclicloess"),
+    AOI_Q3 = { a <- counts_all[rownames(m), aoi_idx, drop = FALSE]; q3 <- apply(a, 2, quantile, 0.75)
+      la <- log2(t(t(a) / q3 * exp(mean(log(q3)))) + 1)
+      sapply(split(seq_along(aoi_key), aoi_key), function(i) rowMeans(la[, i, drop = FALSE]))[, colnames(m)] })
+}
+methods <- c("TMM", "Q3", "RLE", "cyclicloess", "AOI_Q3")
+n1 <- list()
+if (!file.exists(file.path(out_dir, "1_normalisation_induction.csv"))) {
+for (sg in names(code)) for (tp in tps) {
+  sid <- paste0(code[sg], "__", tp); idx <- which(keep_aoi & cd$segment_name == sg & cd$timepoint == tp)
+  g <- intersect(uni[[sid]]$g10, rownames(counts_all)); key <- cd$subject_id[idx]
+  m <- sapply(split(seq_along(key), key), function(i) rowSums(counts_all[g, idx[i], drop = FALSE]))
+  mt <- meta_for(colnames(m)) %>% left_join(cd[idx, ] %>% distinct(subject_id, batch = study_batch) %>% group_by(subject_id) %>% summarise(batch = first(batch)), by = "subject_id")
+  for (meth in methods) { F <- score(norm_lc(m, meth, idx, key))
+    for (f in colnames(F)) { a <- lm_p(F[, f], mt$psa, mt$batch); s <- sp(F[, f], mt$max_psa_change)
+      n1[[paste(sid, meth, f)]] <- data.frame(stratum = sid, method = meth, feature = f, beta = a[1], p_batch = a[2], rho = s[1], p_rho = s[2]) } }
+}
+norm_feat <- bind_rows(n1)
+## paired induction under each normalisation
+n1b <- list()
+for (sg in names(code)) {
+  idx <- which(keep_aoi & cd$segment_name == sg & cd$timepoint %in% c("Screening", "Cycle1")); d <- cd[idx, ]
+  key <- paste(d$subject_id, d$timepoint, sep = "|"); s_ <- sub("\\|.*", "", key); both <- names(which(tapply(d$timepoint, s_, function(x) length(unique(x))) == 2))
+  k2 <- s_ %in% both; idx <- idx[k2]; key <- key[k2]
+  g <- intersect(union(uni[[paste0(code[sg], "__Screening")]]$g10, uni[[paste0(code[sg], "__Cycle1")]]$g10), rownames(counts_all))
+  m <- sapply(split(seq_along(key), key), function(i) rowSums(counts_all[g, idx[i], drop = FALSE]))
+  for (meth in methods) { F <- score(norm_lc(m, meth, idx, key)); subj <- sub("\\|.*", "", colnames(m)); tpv <- sub(".*\\|", "", colnames(m))
+    for (f in colnames(F)) { dl <- sapply(both, function(s) F[subj == s & tpv == "Cycle1", f] - F[subj == s & tpv == "Screening", f])
+      n1b[[paste(sg, meth, f)]] <- data.frame(segment = sg, method = meth, feature = f, n = length(dl), n_up = sum(dl > 0), median_change = median(dl),
+        p_wilcox = wilcox.test(dl, exact = FALSE)$p.value) } }
+}
+norm_ind <- bind_rows(n1b)
+write.csv(norm_feat, file.path(out_dir, "1_normalisation_features.csv"), row.names = FALSE)
+write.csv(norm_ind, file.path(out_dir, "1_normalisation_induction.csv"), row.names = FALSE)
+} else { norm_feat <- read.csv(file.path(out_dir, "1_normalisation_features.csv")); norm_ind <- read.csv(file.path(out_dir, "1_normalisation_induction.csv")) }
+message("1 done")
+
+```
+
+### 2. Pooling across compartments
+(a) Features z-scored within stratum, then lmer(y ~ stratum + PSA + (1 | patient)) over all nine strata and per timepoint, with a 500-shuffle patient-permutation P and the Spearman correlation of each patient's mean z with PSA change. (b) For each timepoint, the three compartments' pseudobulk counts on their shared genes are combined and fitted by limma-voom ~ compartment + PSA + batch, blocking on patient (two-pass `duplicateCorrelation`). The number of genes at FDR < 0.1 is calibrated by 100 patient-level permutations of PSA change, and the *FOLH1* statistic and rank are reported.
+
+```{r comp-32-clws-extensions-03}
+## ============================ 2. pooling across compartments =================================
+pbs <- qs::qread(out_path("C13_pseudobulk_LOQ", "pseudobulk_strata.qs"))
+long <- bind_rows(lapply(names(pbs), function(sid) { p <- pbs[[sid]]; F <- score(p$lcpm); Fz <- scale(F)
+  data.frame(stratum = sid, timepoint = sub(".*__", "", sid), subject_id = p$meta$subject_id, Fz, check.names = FALSE) })) %>%
+  left_join(meta_for(unique(pt$subject_id)), by = "subject_id")
+pool <- list()
+for (f in c("FOLH1", names(progs))) for (scope in c("all", tps)) {
+  d <- long %>% filter(scope == "all" | timepoint == scope) %>% transmute(y = .data[[f]], stratum, subject_id, psa, max_psa_change) %>% filter(!is.na(y), !is.na(psa))
+  fit1 <- function(dd) { m <- suppressMessages(lmerTest::lmer(y ~ stratum + psa + (1 | subject_id), dd)); summary(m)$coefficients["psa", c(1, 5)] }
+  ob <- tryCatch(fit1(d), error = function(e) c(NA, NA)); pts <- unique(d[, c("subject_id", "psa")])
+  perm <- unlist(mclapply(1:500, function(b) { set.seed(b); px <- setNames(sample(pts$psa), pts$subject_id); dd <- d; dd$psa <- px[dd$subject_id]
+    tryCatch(fit1(dd)[1], error = function(e) NA) }, mc.cores = MAX_WORKERS))
+  pm <- d %>% group_by(subject_id) %>% summarise(y = mean(y), x = first(max_psa_change), .groups = "drop"); s <- sp(pm$y, pm$x)
+  pool[[paste(f, scope)]] <- data.frame(feature = f, scope = scope, n_obs = nrow(d), n_patients = nrow(pts), beta = ob[1], p_lmm = ob[2],
+    p_perm = (1 + sum(abs(perm) >= abs(ob[1]), na.rm = TRUE)) / (1 + sum(!is.na(perm))), rho_patient_mean = s[1], p_patient_mean = s[2])
+}
+pool_tab <- bind_rows(pool)
+## gene-wise pooled per timepoint
+gw <- list(); gw_genes <- list()
+for (tp in tps) {
+  sids <- paste0(code, "__", tp); g <- Reduce(intersect, lapply(sids, function(s) rownames(pbs[[s]]$dge)))
+  m <- do.call(cbind, lapply(sids, function(s) { x <- pbs[[s]]$dge$counts[g, ]; colnames(x) <- paste(s, colnames(x), sep = ":"); x }))
+  bt <- bind_rows(lapply(sids, function(s) data.frame(stratum = s, subject_id = pbs[[s]]$meta$subject_id, batch = pbs[[s]]$meta$study_batch)))
+  mt <- data.frame(col = colnames(m), stratum = sub(":.*", "", colnames(m)), subject_id = sub("\\|.*", "", sub(".*:", "", colnames(m)))) %>%
+    left_join(meta_for(unique(pt$subject_id)), by = "subject_id") %>% left_join(bt, by = c("stratum", "subject_id"))
+  X <- model.matrix(~ stratum + psa + batch, mt); X <- X[, qr(X)$pivot[seq_len(qr(X)$rank)]]
+  dge <- calcNormFactors(DGEList(m)); v <- voom(dge, X); dc <- duplicateCorrelation(v, X, block = mt$subject_id)
+  v <- voom(dge, X, block = mt$subject_id, correlation = dc$consensus); dc <- duplicateCorrelation(v, X, block = mt$subject_id)
+  tt <- topTable(eBayes(lmFit(v, X, block = mt$subject_id, correlation = dc$consensus), robust = TRUE), coef = "psa", number = Inf, sort.by = "none")
+  pts <- unique(mt[, c("subject_id", "psa")])
+  perm <- unlist(mclapply(1:100, function(b) { set.seed(100 + b); px <- setNames(sample(pts$psa), pts$subject_id); mp <- mt; mp$psa <- px[mp$subject_id]
+    Xp <- model.matrix(~ stratum + psa + batch, mp); Xp <- Xp[, qr(Xp)$pivot[seq_len(qr(Xp)$rank)]]
+    sum(p.adjust(eBayes(lmFit(v, Xp, block = mt$subject_id, correlation = dc$consensus), robust = TRUE)$p.value[, "psa"], "BH") < 0.1) }, mc.cores = MAX_WORKERS))
+  gw[[tp]] <- data.frame(timepoint = tp, n_samples = ncol(m), n_patients = nrow(pts), consensus = dc$consensus, n_genes = nrow(tt),
+    fdr05 = sum(tt$adj.P.Val < 0.05), fdr10 = sum(tt$adj.P.Val < 0.1), pi1 = 1 - propTrueNull(tt$P.Value, method = "lfdr"),
+    perm_median_fdr10 = median(perm), perm_95_fdr10 = unname(quantile(perm, 0.95)), perm_p = (1 + sum(perm >= sum(tt$adj.P.Val < 0.1))) / 101,
+    FOLH1_t = tt["FOLH1", "t"], FOLH1_P = tt["FOLH1", "P.Value"], FOLH1_rank = rank(tt$P.Value)[rownames(tt) == "FOLH1"])
+  gw_genes[[tp]] <- tt %>% mutate(gene = rownames(tt), timepoint = tp) %>% arrange(P.Value) %>% head(200)
+  message("2b ", tp, " done")
+}
+write.csv(pool_tab, file.path(out_dir, "2a_pooled_feature_models.csv"), row.names = FALSE)
+write.csv(bind_rows(gw), file.path(out_dir, "2b_pooled_genewise_summary.csv"), row.names = FALSE)
+write.csv(bind_rows(gw_genes), file.path(out_dir, "2b_pooled_genewise_top200.csv"), row.names = FALSE)
+message("2 done")
+
+```
+
+### 3. camera gene-set tests
+For each pseudobulk stratum and contrast (PSA; NR vs R), run `camera` on the voom object for five MSigDB collections (sets of 10–500 genes). The number of Hallmark sets at FDR < 0.1 is compared with 100 refits after shuffling the outcome across patients.
+
+```{r comp-32-clws-extensions-04}
+## ============================ 3. camera gene-set tests ========================================
+colls <- list(H = msig$H, REACTOME = msig$C2_CP_REAC, KEGG = msig$C2_CP_KEGG, GOBP = msig$C5_BP, C8 = msig$C8_CELLTYPE)
+cam <- list(); hperm <- list()
+for (sid in names(pbs)) {
+  p <- pbs[[sid]]; mt <- p$meta %>% mutate(psa = psa_change_capped / 50)
+  for (ct in c("PSA", "NR")) {
+    kk <- if (ct == "NR") mt$response_group_neat %in% c("Responder", "Non_Responder") else rep(TRUE, nrow(mt))
+    mm <- mt[kk, ]; mm$x <- if (ct == "NR") as.integer(mm$response_group_neat == "Non_Responder") else mm$psa
+    X <- model.matrix(if (length(unique(mm$study_batch)) > 1) ~ x + study_batch else ~ x, mm); X <- X[, qr(X)$pivot[seq_len(qr(X)$rank)]]
+    v <- voom(p$dge[, kk], X)
+    for (cn in names(colls)) {
+      idx <- ids2indices(colls[[cn]], rownames(v)); idx <- idx[lengths(idx) >= 10 & lengths(idx) <= 500]
+      r <- camera(v, idx, X, contrast = "x"); r$set <- rownames(r)
+      cam[[paste(sid, ct, cn)]] <- data.frame(stratum = sid, contrast = ct, collection = cn, r[, c("set", "NGenes", "Direction", "PValue", "FDR")])
+    }
+    ## Hallmark calibration: number of Hallmark sets at FDR < 0.1 under patient permutation
+    idxH <- ids2indices(colls$H, rownames(v)); obsH <- sum(camera(v, idxH, X, contrast = "x")$FDR < 0.1)
+    permH <- unlist(mclapply(1:100, function(b) { set.seed(300 + b); mp <- mm; mp$x <- sample(mm$x)
+      Xp <- model.matrix(if (length(unique(mp$study_batch)) > 1) ~ x + study_batch else ~ x, mp); Xp <- Xp[, qr(Xp)$pivot[seq_len(qr(Xp)$rank)]]
+      sum(camera(voom(p$dge[, kk], Xp), idxH, Xp, contrast = "x")$FDR < 0.1) }, mc.cores = MAX_WORKERS))
+    hperm[[paste(sid, ct)]] <- data.frame(stratum = sid, contrast = ct, hallmark_fdr10_obs = obsH, perm_median = median(permH), perm_95 = unname(quantile(permH, 0.95)),
+      perm_p = (1 + sum(permH >= obsH)) / 101)
+  }
+}
+cam_tab <- bind_rows(cam); write.csv(cam_tab, file.path(out_dir, "3_camera_all.csv"), row.names = FALSE)
+write.csv(bind_rows(hperm), file.path(out_dir, "3_camera_hallmark_calibration.csv"), row.names = FALSE)
+message("3 done")
+
+```
+
+### 4. RUV-III anchored on control replicates
+Per compartment, log2 CPM of patient AOIs and control-tissue AOIs over the union LOQ universe; control AOIs from the same sample are declared replicates, and every patient AOI is its own replicate group. Negative-control genes are the singscore carcinoma stable genes, falling back to the 300 lowest-variance genes if fewer than 50 are available. k ∈ {0, 1, 2, 3, 4, 6} is scored by the share of control-tissue variance explained by batch after removing sample effects, and the smallest k with ≥ 90% of the maximal reduction is kept. Patient means of the adjusted data are then retested for each feature (Spearman; lm with and without batch). Transcriptome-wide limma-trend on PSA change is calibrated by 200 permutations. Control AOIs serve only as the RUV anchor.
+
+```{r comp-32-clws-extensions-05}
+## ============================ 4. RUV-III anchored on control replicates ======================
+stable <- tryCatch(getStableGenes(1000, type = "carcinoma"), error = function(e) NULL)
+r4 <- list(); r4k <- list(); r4tw <- list()
+for (sg in names(code)) {
+  idx <- which(cd$segment_name == sg & (keep_aoi | cd$response_group_neat == "Control")); d <- cd[idx, ]
+  g <- intersect(Reduce(union, lapply(tps, function(tp) uni[[paste0(code[sg], "__", tp)]]$g10)), rownames(counts_all))
+  Y <- t(cpm(calcNormFactors(DGEList(counts_all[g, idx])), log = TRUE, prior.count = 1))  # AOI x gene
+  rep_id <- ifelse(d$response_group_neat == "Control", paste0("CTRL_", d$sample_name), rownames(d))
+  M <- ruv::replicate.matrix(rep_id)
+  ncg <- colnames(Y) %in% intersect(stable, colnames(Y)); if (sum(ncg) < 50) ncg <- rank(apply(Y, 2, var)) <= 300
+  isC <- d$response_group_neat == "Control"
+  bshare <- function(Z) { zc <- Z[isC, ]; b <- factor(d$study_batch[isC]); s <- factor(d$sample_name[isC])
+    mean(apply(zc, 2, function(y) { a <- anova(lm(y ~ s + b)); a["b", "Sum Sq"] / sum(a[, "Sum Sq"]) }), na.rm = TRUE) }
+  kk <- c(0, 1, 2, 3, 4, 6); adj <- list()
+  for (k in kk) { adj[[as.character(k)]] <- if (k == 0) Y else RUVIII(Y, M, ncg, k = k)
+    r4k[[paste(sg, k)]] <- data.frame(segment = sg, k = k, control_batch_share = bshare(adj[[as.character(k)]])) }
+  ks <- bind_rows(r4k) %>% filter(segment == sg); red <- ks$control_batch_share[1] - ks$control_batch_share
+  k_sel <- ks$k[which(red >= 0.9 * max(red))[1]]
+  Z <- adj[[as.character(k_sel)]]
+  for (tp in tps) {
+    sid <- paste0(code[sg], "__", tp); ii <- which(!isC & d$timepoint == tp); gg <- intersect(uni[[sid]]$g10, colnames(Z))
+    key <- d$subject_id[ii]; P <- sapply(split(seq_along(key), key), function(i) colMeans(Z[ii[i], gg, drop = FALSE]))
+    mt <- meta_for(colnames(P)) %>% left_join(d[ii, ] %>% distinct(subject_id, batch = study_batch) %>% group_by(subject_id) %>% summarise(batch = first(batch)), by = "subject_id")
+    F <- score(P)
+    for (f in colnames(F)) { a0 <- lm_p(F[, f], mt$psa, rep(1, nrow(mt))); a1 <- lm_p(F[, f], mt$psa, mt$batch); s <- sp(F[, f], mt$max_psa_change)
+      r4[[paste(sid, f)]] <- data.frame(stratum = sid, k = k_sel, feature = f, rho = s[1], p_rho = s[2], p_nobatch = a0[2], p_batch = a1[2]) }
+    X <- model.matrix(~ psa, mt); tt <- topTable(eBayes(lmFit(P, X), trend = TRUE, robust = TRUE), coef = "psa", number = Inf)
+    perm <- replicate(200, { Xp <- model.matrix(~ sample(psa), mt); sum(p.adjust(eBayes(lmFit(P, Xp), trend = TRUE, robust = TRUE)$p.value[, 2], "BH") < 0.1) })
+    r4tw[[sid]] <- data.frame(stratum = sid, k = k_sel, fdr10 = sum(tt$adj.P.Val < 0.1), pi1 = 1 - propTrueNull(tt$P.Value, method = "lfdr"),
+      perm_median = median(perm), perm_95 = unname(quantile(perm, 0.95)), perm_p = (1 + sum(perm >= sum(tt$adj.P.Val < 0.1))) / 201, top_genes = paste(head(rownames(tt), 8), collapse = ","))
+  }
+  message("4 ", sg, " done (k = ", k_sel, ")")
+}
+write.csv(bind_rows(r4k), file.path(out_dir, "4_ruv3_k_selection.csv"), row.names = FALSE)
+write.csv(bind_rows(r4), file.path(out_dir, "4_ruv3_features.csv"), row.names = FALSE)
+write.csv(bind_rows(r4tw), file.path(out_dir, "4_ruv3_transcriptome.csv"), row.names = FALSE)
+message("4 done")
+
+```
+
+### 5. Response-specific primary-to-bone change
+Per compartment, paired Archival/Screening pseudobulk is fitted by limma-voom ~ patient + site + site × PSA. Genes at FDR < 0.1 for the interaction are calibrated by 200 patient-level permutations of PSA change. For *FOLH1* and the Owen et al. comparison programmes, each patient's bone − primary change is related to PSA change (Spearman; lm with batch), with mean change in responders and non-responders.
+
+```{r comp-32-clws-extensions-06}
+## ============================ 5. response-specific primary -> bone change =====================
+owen <- list(IFN_I_core = c("IRF9", "STAT1", "STAT2", "IRF7", "STING1", "TMEM173", "OAS1", "ISG15", "MX1", "IFIT1", "IFI6"),
+  HLA_I = progs$HLA_I, HLA_II = c("HLA-DRA", "HLA-DRB1", "HLA-DPA1", "HLA-DPB1", "HLA-DQA1", "HLA-DQB1", "HLA-DMA", "HLA-DMB", "CD74"),
+  Hallmark_IFNg = msig$H$HALLMARK_INTERFERON_GAMMA_RESPONSE,
+  TAM_TIM = c("FOLR2", "SIGLEC1", "LYVE1", "SPP1", "IL4R", "CD200R1", "CD101", "LYZ", "S100A9", "S100A12", "APOE", "TGFB1", "C1QA", "C1QB", "C1QC",
+              "FN1", "MMP9", "IL1RN", "CD163", "CLEC7A", "TREM1", "FCN1", "CSTA", "VCAN", "PLAUR"), AR_Hallmark = progs$AR_Hallmark)
+r5 <- list(); r5g <- list()
+for (sg in names(code)) {
+  g <- intersect(union(uni[[paste0(code[sg], "__Archival")]]$g10, uni[[paste0(code[sg], "__Screening")]]$g10), rownames(counts_all))
+  ok <- keep_aoi & cd$segment_name == sg & cd$timepoint %in% c("Archival", "Screening")
+  both <- intersect(cd$subject_id[ok & cd$timepoint == "Archival"], cd$subject_id[ok & cd$timepoint == "Screening"])
+  idx <- which(ok & cd$subject_id %in% both); d <- cd[idx, ]; key <- paste(d$subject_id, d$timepoint, sep = "|")
+  m <- sapply(split(seq_along(key), key), function(i) rowSums(counts_all[g, idx[i], drop = FALSE]))
+  mt <- data.frame(subject_id = sub("\\|.*", "", colnames(m)), site = factor(ifelse(sub(".*\\|", "", colnames(m)) == "Archival", "Primary", "Bone"), c("Primary", "Bone"))) %>%
+    left_join(meta_for(both), by = "subject_id")
+  dge <- calcNormFactors(DGEList(m)); lc <- cpm(dge, log = TRUE, prior.count = 1)
+  fitint <- function(mt) { mt$int <- (mt$site == "Bone") * mt$psa; X <- model.matrix(~ subject_id + site + int, mt)
+    topTable(eBayes(lmFit(voom(dge, X), X), robust = TRUE), coef = "int", number = Inf, sort.by = "none") }
+  tt <- fitint(mt); pts <- unique(mt[, c("subject_id", "psa")])
+  perm <- unlist(mclapply(1:200, function(b) { set.seed(500 + b); px <- setNames(sample(pts$psa), pts$subject_id); mp <- mt; mp$psa <- px[mp$subject_id]
+    sum(fitint(mp)$adj.P.Val < 0.1) }, mc.cores = MAX_WORKERS))
+  r5g[[sg]] <- data.frame(segment = sg, n_patients = length(both), fdr10 = sum(tt$adj.P.Val < 0.1), pi1 = 1 - propTrueNull(tt$P.Value, method = "lfdr"),
+    perm_median = median(perm), perm_95 = unname(quantile(perm, 0.95)), perm_p = (1 + sum(perm >= sum(tt$adj.P.Val < 0.1))) / 201,
+    top_genes = paste(head(rownames(tt)[order(tt$P.Value)], 8), collapse = ","), FOLH1_P = tt["FOLH1", "P.Value"])
+  z <- t(scale(t(lc))); Fs <- cbind(FOLH1 = lc["FOLH1", ], sapply(owen, function(gs) colMeans(z[intersect(gs, rownames(z)), , drop = FALSE])))
+  for (f in colnames(Fs)) { dl <- sapply(both, function(s) Fs[mt$subject_id == s & mt$site == "Bone", f] - Fs[mt$subject_id == s & mt$site == "Primary", f])
+    pp <- meta_for(both) %>% left_join(batch_of, by = "subject_id"); s <- sp(dl, pp$max_psa_change); a <- lm_p(dl, pp$psa, pp$batch)
+    r5[[paste(sg, f)]] <- data.frame(segment = sg, feature = f, n = length(dl), rho_delta_psa = s[1], p_rho = s[2], p_batch = a[2],
+      mean_delta_R = mean(dl[pp$response_group_neat == "Responder"]), mean_delta_NR = mean(dl[pp$response_group_neat == "Non_Responder"])) }
+  message("5 ", sg, " done")
+}
+write.csv(bind_rows(r5g), file.path(out_dir, "5_site_x_response_genewise.csv"), row.names = FALSE)
+write.csv(bind_rows(r5), file.path(out_dir, "5_site_x_response_programmes.csv"), row.names = FALSE)
+
+```
+
+Print compact summaries of every part: *FOLH1*/AR across normalisations, induction across normalisations, pooled models, camera sets at FDR < 0.1 with the Hallmark calibration, RUV-III k selection, features and transcriptome results, and the site × response analyses.
+
+```{r comp-32-clws-extensions-07}
+## ============================ report ======================================================
+options(width = 230); f2 <- function(x) as.data.frame(mutate(x, across(where(is.numeric), ~signif(.x, 2))))
+cat("\n==== 1. FOLH1 / AR across normalisations (rho; batch-adjusted P) ====\n")
+print(f2(norm_feat %>% filter(feature %in% c("FOLH1", "AR_Hallmark")) %>% select(stratum, feature, method, rho, p_batch) %>%
+  pivot_wider(names_from = method, values_from = c(rho, p_batch))), row.names = FALSE)
+cat("\n==== 1. induction across normalisations (Wilcoxon P) ====\n")
+print(f2(norm_ind %>% filter(feature %in% c("P53_core", "HLA_I", "Hallmark_IFNa")) %>% select(segment, feature, method, p_wilcox) %>% pivot_wider(names_from = method, values_from = p_wilcox)), row.names = FALSE)
+cat("\n==== 2a. pooled feature models ====\n"); print(f2(pool_tab), row.names = FALSE)
+cat("\n==== 2b. pooled gene-wise ====\n"); print(f2(bind_rows(gw)), row.names = FALSE)
+cat("\n==== 3. camera: sets at FDR < 0.1 per stratum/contrast/collection ====\n")
+print(as.data.frame(cam_tab %>% group_by(stratum, contrast, collection) %>% summarise(n_fdr10 = sum(FDR < 0.1), top = paste(head(set[order(PValue)], 2), collapse = "; "), .groups = "drop") %>% filter(n_fdr10 > 0)), row.names = FALSE)
+cat("\n==== 3. Hallmark calibration ====\n"); print(f2(bind_rows(hperm)), row.names = FALSE)
+cat("\n==== 4. RUV-III k selection ====\n"); print(f2(bind_rows(r4k)), row.names = FALSE)
+cat("\n==== 4. RUV-III features (FOLH1, AR, p53, HLA) ====\n"); print(f2(bind_rows(r4) %>% filter(feature %in% c("FOLH1", "AR_Hallmark", "HLA_I", "P53_core"))), row.names = FALSE)
+cat("\n==== 4. RUV-III transcriptome ====\n"); print(f2(bind_rows(r4tw)), row.names = FALSE)
+cat("\n==== 5. site x response gene-wise ====\n"); print(f2(bind_rows(r5g)), row.names = FALSE)
+cat("\n==== 5. site x response programmes (P < 0.1) ====\n"); print(f2(bind_rows(r5) %>% filter(p_rho < 0.1 | p_batch < 0.1)), row.names = FALSE)
+cat("R10 complete.\n")
+```

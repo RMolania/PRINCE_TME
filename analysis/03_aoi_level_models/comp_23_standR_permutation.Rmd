@@ -1,0 +1,116 @@
+---
+title: "Calibration of the standR workflow by patient-level label permutation"
+subtitle: "PRINCE spatial transcriptomics: `comp_23_standR_permutation`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+Asks how many genes the standR workflow of `comp_22_standR_arm` reports at FDR < 0.05 when response labels carry no information. In the two pre-treatment bone tumour strata (PSMA+ and PanCK+PSMA− Screening), responder and non-responder labels are shuffled across **patients** (every AOI keeps its patient's label; intermediate patients stay fixed), and the full chain is rerun with the shuffled labels: RUV-4 protecting the shuffled factor with the same k as the real analysis, then limma-voom with AOIs independent and with patient blocking.
+
+The distribution of significant-gene counts over 50 shuffles is the false-positive yardstick for the observed counts. The permutation P value is (1 + number of shuffles with at least the observed count) / (1 + 50). Because the outcome is protected during RUV-4 in every shuffle, this tests the whole workflow, not only the final model.
+
+**Manuscript items supported**
+
+- Extended Data Fig. 10b (observed standR counts vs patient-shuffled null), via `comp_24_ed_standR`
+- Supplementary Table 37 (S37_standR_perm), via `comp_25_supp_tables_v3`
+- Methods: Reconciliation with earlier analyses and the standR workflow
+- Results: standR paragraph of 'Re-evaluation of earlier neuroendocrine, purity and bone-niche findings'
+
+**Pipeline step:** `./run_pipeline.sh --only 23_standR_permutation`. Approximate runtime: long: 2 strata × 51 full RUV-4 + limma-voom runs, run serially.
+
+**Inputs**
+
+- `data/phase2_se_qc_filtered.qs`
+- `results/R5_standR/standR_vs_primary_summary.csv`
+
+**Outputs**
+
+- `results/R5_standR/standR_permutation_calibration.csv`
+
+**Depends on**: `comp_00b_bone_cohort`, `comp_22_standR_arm`
+
+## Analysis
+
+### Permutation calibration of standR
+The header states the design: patient-level shuffling of R/NR labels with Intermediate fixed, rerunning the full standR chain with the k chosen in `comp_22`.
+
+Set the seed and the number of shuffles (50) and read the chosen k per stratum from the `comp_22` summary. `run_chain` applies RUV-4 protecting the supplied labels, builds the vignette design (~ 0 + group + W1..Wk, contrast NR − R) and returns the number of genes at FDR < 0.05 with AOIs independent and with two-pass patient blocking. For each of the two pre-treatment bone tumour strata, the standR QC filter, TMM and negative-control gene selection are run once; the chain is then fitted with the real labels and with 50 patient-level shuffles. The output table gives observed counts, null median, 90th percentile and maximum, the permutation P and the fraction of shuffles with any significant gene.
+
+```{r comp-23-standR-permutation-01}
+## ============================================================================
+## PRINCE -- calibration of the standR workflow by label permutation
+## For PSMA+ and PanCK+PSMA- Screening, shuffle Responder/Non-responder labels across
+## PATIENTS (Intermediate fixed; every AOI of a patient keeps that patient's label), then
+## rerun the full standR chain with the shuffled labels -- RUV4 protecting the shuffled
+## factor, the same k as the real analysis -- and limma-voom (a) AOIs independent and
+## (b) patient-blocked. The number of FDR < 0.05 genes under shuffled labels is the false-
+## positive yardstick for the observed counts (comp_22_standR_arm.R).
+## Outputs: results/R5_standR/standR_permutation_calibration.csv
+## ============================================================================
+
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({ library(qs); library(SummarizedExperiment); library(SpatialExperiment); library(standR)
+  library(edgeR); library(limma); library(dplyr) })
+setwd(PRINCE_DIR)
+check_ram_or_stop(20)
+set.seed(2026)
+out_dir <- file.path(COMP_DIR, "R5_standR")
+N_PERM <- 50
+
+se <- qs::qread("phase2_se_qc_filtered.qs"); cd <- as.data.frame(colData(se))
+summ <- read.csv(file.path(out_dir, "standR_vs_primary_summary.csv"))
+
+run_chain <- function(spe, labels, k, subj) {
+  colData(spe)$lab <- labels
+  sp <- geomxBatchCorrection(spe, factors = "lab", NCGs = S4Vectors::metadata(spe)$NCGs, k = k)
+  W <- as.data.frame(colData(sp))[, paste0("ruv_W", seq_len(k)), drop = FALSE]
+  grp <- droplevels(factor(labels, levels = c("Responder", "Intermediate", "Non_Responder")))
+  X <- model.matrix(~ 0 + grp + ., data = data.frame(grp = grp, W)); colnames(X) <- sub("^grp", "", colnames(X))
+  dge <- calcNormFactors(DGEList(counts(sp))); cm <- makeContrasts(NRvsR = Non_Responder - Responder, levels = X)
+  v <- voom(dge, X); a <- topTable(eBayes(contrasts.fit(lmFit(v, X), cm)), number = Inf)
+  dc <- duplicateCorrelation(v, X, block = subj); v2 <- voom(dge, X, block = subj, correlation = dc$consensus)
+  dc2 <- duplicateCorrelation(v2, X, block = subj)
+  b <- topTable(eBayes(contrasts.fit(lmFit(v2, X, block = subj, correlation = dc2$consensus), cm)), number = Inf)
+  c(indep = sum(a$adj.P.Val < 0.05), blocked = sum(b$adj.P.Val < 0.05))
+}
+
+rows <- list()
+for (sid in c("PSMA__Screening", "PanCKPSMA__Screening")) {
+  sg <- c(PSMA = "PSMA+", PanCKPSMA = "PanCK+PSMA-")[sub("__.*", "", sid)]
+  idx <- which(cd$segment_name == sg & cd$timepoint == "Screening" & cd$response_group_neat != "Control")
+  cnt <- assay(se, "all_count")[, idx]; d <- cd[idx, ]
+  spe <- SpatialExperiment(assays = list(counts = cnt, logcounts = edgeR::cpm(cnt, log = TRUE)), colData = d)
+  spe <- addPerROIQC(spe, sample_fraction = 0.9, min_count = 5); spe <- geomxNorm(spe, method = "TMM")
+  spe <- findNCGs(spe, batch_name = "study_batch", top_n = 300)
+  k <- summ$k[summ$stratum == sid]
+  obs <- run_chain(spe, d$response_group_neat, k, d$subject_id)
+  pts <- unique(d[, c("subject_id", "response_group_neat")]); movable <- pts$response_group_neat %in% c("Responder", "Non_Responder")
+  perm <- t(replicate(N_PERM, {
+    lab <- pts$response_group_neat; lab[movable] <- sample(lab[movable])
+    run_chain(spe, lab[match(d$subject_id, pts$subject_id)], k, d$subject_id)
+  }))
+  rows[[sid]] <- data.frame(stratum = sid, k = k, analysis = c("AOIs independent", "patient-blocked"),
+    observed = obs, perm_median = apply(perm, 2, median), perm_90pct = apply(perm, 2, quantile, 0.9),
+    perm_max = apply(perm, 2, max), perm_p = (1 + colSums(sweep(perm, 2, obs, ">="))) / (1 + N_PERM),
+    frac_perm_with_any_hit = colMeans(perm > 0))
+  message(sid, " done")
+}
+res <- bind_rows(rows)
+print(res, row.names = FALSE)
+write.csv(res, file.path(out_dir, "standR_permutation_calibration.csv"), row.names = FALSE)
+cat("standR permutation complete.\n")
+```

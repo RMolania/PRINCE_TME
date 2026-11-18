@@ -1,0 +1,569 @@
+---
+title: "First Extended Data figure set and the base Supplementary Tables workbook"
+subtitle: "PRINCE spatial transcriptomics: `comp_11_extended_figures`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+This script draws the first set of ten Extended Data figures from the outputs of comp_01 to comp_08, and builds the first Supplementary Tables workbook. Four of the figures were kept, renumbered as Supplementary Figures, in the final manuscript:
+- its ExtendedDataFig1 (absolute versus relative batch metric, and RUV-4 k selection) becomes Supplementary Fig. 5;
+- ExtendedDataFig7 (primary-tumour IFN-γ genes, ligand–receptor co-expression, within-ROI coupling) becomes Supplementary Fig. 4;
+- ExtendedDataFig8 (clinical, imaging and ctDNA predictors) becomes Supplementary Fig. 2;
+- ExtendedDataFig10 (longitudinal programme change and primary–metastasis concordance) becomes Supplementary Fig. 3.
+
+The remaining Extended Data figures here (deconvolution, cell-type associations, AOI-level DE and pathways, the programme map and outcome prediction) were replaced in later figure sets.
+
+The workbook holds sheets S1–S14 (patients, AOI availability, normalisation, deconvolution, programme associations, AOI-level DE, longitudinal change, the treatment-induced programme, ligand–receptor results, clinical associations and patient-level outcome models). Later scripts load and extend it (comp_15 → comp_25 → comp_29 → comp_42 → comp_47), and these sheets keep their numbers as Supplementary Tables 1–14 in the released workbook. The S1 caption's patient count (33) is fixed text from before the bone-only restriction; the table itself has one row per bone-cohort patient.
+
+**Manuscript items supported**
+
+- Supplementary Fig. 2 (from ExtendedDataFig8 of this script)
+- Supplementary Fig. 3 (from ExtendedDataFig10)
+- Supplementary Fig. 4 (from ExtendedDataFig7)
+- Supplementary Fig. 5 (from ExtendedDataFig1)
+- Supplementary Tables 1–14 (sheets S1–S14 of the workbook extended by comp_15 → 25 → 29 → 42 → 47)
+- Intermediate: ExtendedDataFig2–6 and 9 of this script are not used in the final manuscript
+
+**Pipeline step:** `./run_pipeline.sh --only 11_extended_figures`. Approximate runtime: minutes.
+
+**Inputs**
+
+- `results/C1_clinical/patient_table.qs`
+- `results/C1_clinical/clinical_feature_associations.csv`
+- `results/C1_clinical/aoi_availability_patient_x_timepoint_segment.csv`
+- `data/phase2_se_qc_filtered.qs`
+- `data/previous_analysis/Phase3d_PSMA_RootCause/batch_metrics_relative_vs_absolute.csv`
+- `results/C2_normalization/k_sweep_all_strata.csv`
+- `results/C2_normalization/normalization_summary.csv`
+- `results/C2_normalization/normalized_strata.qs`
+- `results/C3_deconvolution/deconvolution_proportions.qs`
+- `results/C3_deconvolution/validation_marker_correlation.csv`
+- `results/C3_deconvolution/celltype_outcome_associations.csv`
+- `results/C4_DE/de_summary.csv`
+- `results/C4_DE/de_results.qs`
+- `results/C4_DE/robust_genes_all_strata.csv`
+- `results/C5_signatures/signature_associations_all.csv`
+- `results/C5_signatures/per_AOI_singscores.qs`
+- `results/C6_longitudinal/programme_change_per_leg.csv`
+- `results/C6_longitudinal/primary_met_concordance.csv`
+- `results/C6_longitudinal/PanCKPSMAneg_Screening_to_Cycle1_paired_DE.csv`
+- `results/C7_crosstalk/within_roi_coupling.csv`
+- `results/C7_crosstalk/ligand_receptor_associations.csv`
+- `results/C8_outcome_models/lopo_enet_PSA50_auc.csv`
+- `results/C8_outcome_models/lopo_enet_feature_selection.csv`
+- `results/C8_outcome_models/univariable_patient_level.csv`
+
+**Outputs**
+
+- `results/Manuscript/ExtendedDataFig1..10.{pdf,png}`
+- `results/Manuscript/Supplementary_Tables.xlsx`
+
+**Depends on**: `comp_01_clinical`, `comp_02_normalize`, `comp_03b_deconv`, `comp_04_de`, `comp_05_signatures`, `comp_06_longitudinal`, `comp_07_crosstalk`, `comp_08_outcome_models`
+
+## Analysis
+
+Script header: the contents of the ten Extended Data figures and the Supplementary Tables workbook in this first figure set.
+
+### Set-up
+Sources the shared set-up, loads packages and creates `results/Manuscript/`. Defines colours, labels (timepoints shown as primary, pre-treatment bone and on-treatment bone), a 7-pt theme, the figure-saving helper, a helper that splits stratum codes into compartment and timepoint, and Kaplan–Meier step data. Reads the patient table and QC-filtered object, and records whether the comp_04 results exist; the DE figures and tables are written only if they do.
+
+```{r comp-11-extended-figures-01}
+## ============================================================================
+## PRINCE manuscript -- Extended Data Figures 1-10 + Supplementary Tables
+##   ED1  normalization (relative vs absolute batch metric; k selection, 9 strata)
+##   ED2  deconvolution references and validation
+##   ED3  deconvolved cell types vs response
+##   ED4  gene-level DE (dream, 3 specifications, pseudobulk)          [needs C4]
+##   ED5  pathway enrichment across strata (fgsea)                       [needs C4]
+##   ED6  full programme association map (singscore vs z-score)
+##   ED7  primary-tumour immune context and within-ROI crosstalk
+##   ED8  clinical and ctDNA predictors
+##   ED9  outcome prediction (LOPO elastic net)
+##   ED10 longitudinal programme changes and primary-metastasis concordance
+## Supplementary Tables S1-S12 -> Manuscript/Supplementary_Tables.xlsx
+## ============================================================================
+
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({
+  library(qs); library(SummarizedExperiment); library(dplyr); library(tidyr); library(ggplot2)
+  library(patchwork); library(ggrepel); library(survival); library(scales); library(ragg); library(openxlsx)
+})
+setwd(PRINCE_DIR)
+check_ram_or_stop(20)
+fig_dir <- file.path(COMP_DIR, "Manuscript"); dir.create(fig_dir, showWarnings = FALSE)
+
+resp_cols <- c(Responder = "#3B6FB6", Intermediate = "#E3A33B", Non_Responder = "#C0392B")
+resp_lab <- c(Responder = "Responder", Intermediate = "Intermediate", Non_Responder = "Non-responder")
+seg_cols <- c("CD45+" = "#7B9E3E", "PSMA+" = "#B5338A", "PanCK+PSMA-" = "#2C8C99")
+seg_lab <- c("CD45+" = "CD45+", "PSMA+" = "PSMA+", "PanCK+PSMA-" = "PanCK+PSMA−")
+seg_from_code <- c(CD45 = "CD45+", PSMA = "PSMA+", PanCKPSMA = "PanCK+PSMA-")
+tp_levels <- c("Archival", "Screening", "Cycle1")
+tp_read <- c(Archival = "Primary", Screening = "Pre-treatment bone", Cycle1 = "On-treatment bone")
+theme_set(theme_classic(base_size = 7, base_family = "Helvetica") +
+  theme(axis.line = element_line(linewidth = 0.3), axis.ticks = element_line(linewidth = 0.3),
+        strip.background = element_blank(), strip.text = element_text(size = 6.5, face = "bold"),
+        legend.key.size = unit(3, "mm"), legend.text = element_text(size = 6), legend.title = element_text(size = 6.5),
+        plot.title = element_text(size = 6.5), plot.tag = element_text(size = 9, face = "bold")))
+save_fig <- function(p, name, h_mm) {
+  ggsave(file.path(fig_dir, paste0(name, ".pdf")), p, width = 183, height = h_mm, units = "mm", device = cairo_pdf)
+  ggsave(file.path(fig_dir, paste0(name, ".png")), p, width = 183, height = h_mm, units = "mm", dpi = 300, device = agg_png)
+  cat("saved", name, "\n")
+}
+fmt_p <- function(p) ifelse(p < 0.001, formatC(p, format = "e", digits = 1), formatC(p, format = "f", digits = 3))
+strat_cols <- function(df, col = "stratum") df %>%
+  mutate(segment = seg_from_code[sub("__.*", "", .data[[col]])],
+         timepoint = factor(sub(".*__", "", .data[[col]]), tp_levels),
+         seg_label = factor(seg_lab[segment], seg_lab))
+km_df <- function(time, event, group) {
+  f <- survfit(Surv(time, event) ~ group)
+  data.frame(time = f$time, surv = f$surv, n.censor = f$n.censor,
+             strata = sub("group=", "", rep(names(f$strata), f$strata))) %>%
+    group_by(strata) %>% group_modify(~ bind_rows(data.frame(time = 0, surv = 1, n.censor = 0), .x)) %>% ungroup()
+}
+
+pt <- qs::qread(out_path("C1_clinical", "patient_table.qs"))
+se <- qs::qread("phase2_se_qc_filtered.qs"); cd <- as.data.frame(colData(se))
+c4_done <- file.exists(out_path("C4_DE", "de_summary.csv"))
+
+```
+
+### Normalisation (final Supplementary Fig. 5)
+- a, from the frozen earlier root-cause analysis: the relative batch metric (maximum batch R² over the top five PCs) and the absolute between-batch variance (fraction of k = 0) as k increases. The absolute measure falls in every stratum, so the apparent PSMA⁺ failure comes from the relative metric.
+- b, the comp_02 k sweep in all nine strata: batch variance, total variance and positive-control signal, with the chosen k and the 0.6 and 0.7 reference levels.
+
+```{r comp-11-extended-figures-02}
+## =====================================================================================
+## ED1 -- normalization
+## =====================================================================================
+p3d <- read.csv(file.path(PRINCE_DIR, "previous_analysis/Phase3d_PSMA_RootCause/batch_metrics_relative_vs_absolute.csv")) %>%
+  strat_cols() %>% group_by(stratum) %>%
+  mutate(abs_frac = abs_batch_var / abs_batch_var[k == 0]) %>% ungroup() %>%
+  pivot_longer(c(rel_tech_R2_top5PC, abs_frac), names_to = "metric", values_to = "value") %>%
+  mutate(metric = recode(metric, rel_tech_R2_top5PC = "Relative: max batch R², top-5 PCs",
+                         abs_frac = "Absolute: between-batch variance (fraction of k = 0)"))
+e1a <- ggplot(p3d, aes(k, value, colour = seg_label, linetype = timepoint)) + geom_line(linewidth = 0.45) +
+  geom_point(size = 0.8) + facet_wrap(~metric, scales = "free_y") +
+  scale_colour_manual(values = setNames(seg_cols, seg_lab), name = NULL) + scale_linetype_discrete(labels = tp_read) + labs(y = NULL, linetype = NULL,
+  title = "PSMA+ 'failure' is a relative-metric artefact: absolute batch variance falls in every stratum")
+sw <- read.csv(out_path("C2_normalization", "k_sweep_all_strata.csv")) %>% strat_cols()
+ns <- read.csv(out_path("C2_normalization", "normalization_summary.csv")) %>% strat_cols()
+e1b <- ggplot(sw %>% pivot_longer(c(batch_var_frac, total_var_frac, signal_retained)) %>%
+                mutate(name = recode(name, batch_var_frac = "Batch variance", total_var_frac = "Total variance",
+                                     signal_retained = "Positive-control signal")),
+              aes(k, value, colour = name)) + geom_line(linewidth = 0.4) +
+  geom_hline(yintercept = c(0.6, 0.7), linetype = 3, linewidth = 0.25) +
+  geom_vline(data = ns, aes(xintercept = k), linetype = 2, linewidth = 0.3, colour = "grey30") +
+  facet_grid(timepoint ~ seg_label, labeller = labeller(timepoint = tp_read)) +
+  scale_colour_manual(values = c("Batch variance" = "#C0392B", "Total variance" = "grey50",
+                                 "Positive-control signal" = "#3B6FB6"), name = NULL) +
+  labs(y = "Fraction of k = 0", x = "RUV-4 unwanted factors (k)", title = "k selection in the nine strata (dashed = chosen k)") +
+  theme(legend.position = "bottom")
+save_fig(e1a / e1b + plot_layout(heights = c(1, 2.2)) + plot_annotation(tag_levels = "a"), "ExtendedDataFig1", 200)
+
+```
+
+### Deconvolution validation (intermediate)
+Bars of Spearman correlation between fractions and marker expression; example scatter plots of fraction versus marker (Tumour_AR, osteoclasts, macrophages); and a heatmap of mean fine-type fractions by compartment and reference. This figure was later replaced by the SpatialDecon–BayesPrism comparison.
+
+```{r comp-11-extended-figures-03}
+## =====================================================================================
+## ED2 -- deconvolution validation and composition
+## =====================================================================================
+dec <- qs::qread(out_path("C3_deconvolution", "deconvolution_proportions.qs"))
+val <- read.csv(out_path("C3_deconvolution", "validation_marker_correlation.csv")) %>%
+  mutate(reference = recode(reference, PRIMARY = "Primary reference", BONE = "Bone reference"),
+         lab = paste0(gsub("_", " ", cell_type), " (", markers, ")"))
+e2a <- ggplot(val, aes(spearman, reorder(lab, spearman), fill = reference)) + geom_col(width = 0.7) +
+  geom_vline(xintercept = 0.5, linetype = 3, linewidth = 0.25) +
+  scale_fill_manual(values = c("Primary reference" = "#8C6D9E", "Bone reference" = "#6A8EAE"), name = NULL) +
+  labs(x = "Spearman ρ, fraction vs marker expression", y = NULL) + theme(legend.position = "bottom")
+lcpm <- log2(sweep(assay(se, "all_count"), 2, colSums(assay(se, "all_count")), "/") * 1e6 + 1)
+ex <- bind_rows(
+  data.frame(aoi = rownames(dec$prop_bone), frac = dec$prop_bone[, "Tumour_AR"],
+             marker = colMeans(lcpm[c("KLK3", "AR"), rownames(dec$prop_bone)]), type = "Tumour_AR vs KLK3/AR (bone)"),
+  data.frame(aoi = rownames(dec$prop_bone), frac = dec$prop_bone[, "Osteoclasts"],
+             marker = colMeans(lcpm[c("ACP5", "CTSK", "MMP9"), rownames(dec$prop_bone)]), type = "Osteoclasts vs ACP5/CTSK/MMP9 (bone)"),
+  data.frame(aoi = rownames(dec$prop_primary), frac = dec$prop_primary[, "Mph"],
+             marker = colMeans(lcpm[c("CD68", "CD163", "C1QA"), rownames(dec$prop_primary)]), type = "Macrophages vs CD68/CD163/C1QA (primary)")) %>%
+  mutate(segment = cd[aoi, "segment_name"])
+e2b <- ggplot(ex, aes(marker, frac, colour = segment)) + geom_point(size = 0.5, alpha = 0.6) +
+  facet_wrap(~type, scales = "free") + scale_colour_manual(values = seg_cols, labels = seg_lab, name = NULL) +
+  scale_y_continuous(labels = percent) + labs(x = "Marker expression (log2 CPM)", y = "Deconvolved fraction") +
+  theme(legend.position = "bottom")
+fine_long <- function(P, site) data.frame(P, aoi = rownames(P), check.names = FALSE) %>%
+  pivot_longer(-aoi, names_to = "cell_type", values_to = "prop") %>%
+  mutate(segment = cd[aoi, "segment_name"], timepoint = cd[aoi, "timepoint"], response = cd[aoi, "response_group_neat"], site = site) %>%
+  filter(response != "Control", timepoint %in% tp_levels)
+fl <- bind_rows(fine_long(dec$prop_primary, "Primary (PCCAT, 22 types)"), fine_long(dec$prop_bone, "Bone (GSE143791 + PCCAT)")) %>%
+  group_by(site, segment, cell_type) %>% summarise(prop = mean(prop), .groups = "drop") %>%
+  group_by(site, cell_type) %>% filter(max(prop) > 0.01) %>% ungroup() %>%
+  mutate(segment = factor(seg_lab[segment], seg_lab))
+e2c <- ggplot(fl, aes(segment, reorder(cell_type, prop), fill = prop)) + geom_tile(colour = "white") +
+  geom_text(aes(label = ifelse(prop >= 0.05, percent(prop, 1), "")), size = 1.7) +
+  facet_wrap(~site, scales = "free_y") + scale_fill_gradient(low = "white", high = "#1F3A5F", labels = percent, name = "Mean\nfraction") +
+  labs(x = NULL, y = NULL) + theme(axis.line = element_blank(), axis.ticks = element_blank())
+save_fig((e2a | e2c) / e2b + plot_layout(heights = c(1.6, 1)) + plot_annotation(tag_levels = "a"), "ExtendedDataFig2", 190)
+
+```
+
+### Cell types versus response (intermediate)
+Dot plot of fine cell-type CLR effects per +50% PSA change across strata, for types with P < 0.1 somewhere, with rings at FDR < 0.1. Patient-mean pericyte fractions by response group in two strata.
+
+```{r comp-11-extended-figures-04}
+## =====================================================================================
+## ED3 -- deconvolved cell types vs response
+## =====================================================================================
+ca <- read.csv(out_path("C3_deconvolution", "celltype_outcome_associations.csv")) %>%
+  filter(level == "fine") %>%
+  mutate(seg_label = factor(seg_lab[segment], seg_lab), timepoint = factor(timepoint, tp_levels),
+         col = paste(timepoint, seg_label, sep = "\n"))
+keep_ct <- ca %>% group_by(cell_type) %>% summarise(m = min(pmin(p_psa, p_NR, na.rm = TRUE)), .groups = "drop") %>%
+  filter(m < 0.1) %>% pull(cell_type)
+e3a <- ggplot(ca %>% filter(cell_type %in% keep_ct) %>%
+                arrange(timepoint, seg_label) %>% mutate(col = factor(col, unique(col))),
+              aes(col, cell_type, colour = beta_psa_per50, size = -log10(p_psa))) + geom_point() +
+  geom_point(data = ~ filter(.x, fdr_psa < 0.1), shape = 1, colour = "black", stroke = 0.4) +
+  scale_colour_gradient2(low = "#3B6FB6", mid = "grey90", high = "#C0392B", name = "CLR change\nper +50% PSA") +
+  scale_size_continuous(range = c(0.4, 4), name = "−log10 P") +
+  labs(x = NULL, y = NULL, title = "Cell-type fractions vs PSA response (mixed model; ring = FDR < 0.1)") +
+  theme(axis.text.x = element_text(size = 5.5))
+lin <- read.csv(out_path("C3_deconvolution", "celltype_outcome_associations.csv")) %>% filter(level == "lineage")
+peri <- bind_rows(lapply(c("PanCK+PSMA-", "PSMA+"), function(sg) {
+  tp <- ifelse(sg == "PanCK+PSMA-", "Screening", "Cycle1")
+  data.frame(aoi = rownames(dec$prop_bone), v = dec$prop_bone[, "Pericytes"]) %>%
+    mutate(subject_id = cd[aoi, "subject_id"], segment = cd[aoi, "segment_name"], timepoint = cd[aoi, "timepoint"]) %>%
+    filter(segment == sg, timepoint == tp) %>% group_by(subject_id) %>% summarise(v = mean(v), .groups = "drop") %>%
+    left_join(pt[, c("subject_id", "response_group_neat")], by = "subject_id") %>%
+    mutate(panel = paste(seg_lab[sg], tp, sep = ", "))
+})) %>% mutate(response_group_neat = factor(response_group_neat, names(resp_cols)))
+e3b <- ggplot(peri, aes(response_group_neat, v, colour = response_group_neat)) +
+  geom_jitter(width = 0.12, size = 1) + stat_summary(fun = median, geom = "crossbar", width = 0.45, linewidth = 0.3) +
+  facet_wrap(~panel, scales = "free_y") + scale_colour_manual(values = resp_cols, guide = "none") +
+  scale_x_discrete(labels = c(Responder = "R", Intermediate = "Int", Non_Responder = "NR")) +
+  scale_y_continuous(labels = percent) + labs(x = NULL, y = "Pericyte fraction (patient mean)")
+save_fig(e3a / e3b + plot_layout(heights = c(2.2, 1)) + plot_annotation(tag_levels = "a"), "ExtendedDataFig3", 180)
+
+```
+
+### AOI-level DE and pathways (intermediate; only when comp_04 output exists)
+ED4: counts of genes at FDR < 0.1 under specifications A/B/C and robust genes; Screening volcano plots; Spearman agreement of gene-wise effects between specifications and with pseudobulk. ED5: the 30 gene sets most often at FDR < 0.05 across strata (fgsea NES).
+
+```{r comp-11-extended-figures-05}
+## =====================================================================================
+## ED4 / ED5 -- gene-level DE and pathways (C4)
+## =====================================================================================
+if (c4_done) {
+  de <- qs::qread(out_path("C4_DE", "de_results.qs"))
+  dsum <- read.csv(out_path("C4_DE", "de_summary.csv")) %>% strat_cols()
+  e4a <- ggplot(dsum %>% pivot_longer(c(fdr10_A, fdr10_B, fdr10_C, robust)) %>%
+                  mutate(name = recode(name, fdr10_A = "A: RUV", fdr10_B = "B: batch", fdr10_C = "C: RUV + tumour fraction",
+                                       robust = "Robust (≥2 specs, pseudobulk, LOPO)")),
+                aes(seg_label, value + 0.5, fill = name)) + geom_col(position = position_dodge(0.85), width = 0.8) +
+    facet_wrap(~timepoint) + scale_y_log10() +
+    scale_fill_manual(values = c("A: RUV" = "#9DB4D3", "B: batch" = "#6F8FB8", "C: RUV + tumour fraction" = "#3B6FB6",
+                                 "Robust (≥2 specs, pseudobulk, LOPO)" = "#C0392B"), name = NULL) +
+    labs(x = NULL, y = "Genes at FDR < 0.1 (+0.5, log scale)", title = "Genes associated with continuous PSA change") +
+    theme(legend.position = "bottom", axis.text.x = element_text(angle = 25, hjust = 1))
+  scr <- bind_rows(lapply(grep("Screening", names(de$genes), value = TRUE), function(s) de$genes[[s]] %>% mutate(stratum = s))) %>%
+    strat_cols() %>% mutate(lab = ifelse(gene %in% c("FOLH1", "CHGA", "IBSP", "CTSK", "SPP1", "CD276", "IFNGR1", "KLK3", "AR") |
+                                           (robust & rank(P_A) <= 8), gene, NA))
+  e4b <- ggplot(scr, aes(logFC_A, -log10(P_A))) +
+    geom_point(aes(colour = FDR_A < 0.1), size = 0.25, alpha = 0.6) +
+    geom_text_repel(aes(label = lab), size = 1.8, max.overlaps = 25, segment.size = 0.2, na.rm = TRUE) +
+    facet_wrap(~seg_label, scales = "free") + scale_colour_manual(values = c(`FALSE` = "grey75", `TRUE` = "#C0392B"), guide = "none") +
+    labs(x = "log2 FC per +50% PSA change (spec. A)", y = "−log10 P", title = "Pre-treatment bone metastases (Screening)")
+  conc <- bind_rows(lapply(names(de$genes), function(s) {
+    g <- de$genes[[s]]
+    data.frame(stratum = s, AB = cor(g$logFC_A, g$logFC_B, method = "spearman", use = "complete"),
+               AC = cor(g$logFC_A, g$logFC_C, method = "spearman", use = "complete"),
+               APB = cor(g$logFC_A, g$logFC_PB, method = "spearman", use = "complete"))
+  })) %>% strat_cols() %>% pivot_longer(c(AB, AC, APB)) %>%
+    mutate(name = recode(name, AB = "A vs B", AC = "A vs C", APB = "A vs pseudobulk"))
+  e4c <- ggplot(conc, aes(interaction(seg_label, timepoint, sep = " · "), value, fill = name)) +
+    geom_col(position = position_dodge(0.8), width = 0.75) + coord_flip() +
+    scale_fill_manual(values = c("A vs B" = "#9DB4D3", "A vs C" = "#3B6FB6", "A vs pseudobulk" = "#E3A33B"), name = NULL) +
+    labs(x = NULL, y = "Spearman ρ of gene-wise effects") + theme(legend.position = "bottom")
+  save_fig(e4a / e4b / e4c + plot_layout(heights = c(1, 1.2, 1.2)) + plot_annotation(tag_levels = "a"), "ExtendedDataFig4", 230)
+
+  gs <- bind_rows(de$gsea) %>% filter(!is.na(padj)) %>% strat_cols()
+  top_pw <- gs %>% filter(padj < 0.05) %>% group_by(pathway) %>% summarise(n = n(), best = min(padj), .groups = "drop") %>%
+    arrange(desc(n), best) %>% slice_head(n = 30) %>% pull(pathway)
+  e5 <- ggplot(gs %>% filter(pathway %in% top_pw) %>%
+                 mutate(pathway = gsub("_", " ", sub("^(HALLMARK|REACTOME|KEGG|GOBP)_", "\\1: ", pathway)),
+                        pathway = substr(pathway, 1, 60)),
+               aes(seg_label, reorder(pathway, NES), colour = NES, size = -log10(padj))) + geom_point() +
+    facet_grid(~timepoint) +
+    scale_colour_gradient2(low = "#3B6FB6", mid = "grey90", high = "#C0392B", name = "NES\n(red = higher\nwith worse\nresponse)") +
+    scale_size_continuous(range = c(0.3, 3.5), name = "−log10 FDR") +
+    labs(x = NULL, y = NULL, title = "Top 30 recurrent gene sets (fgsea on spec. A t-statistics, PSA change)") +
+    theme(axis.text.x = element_text(size = 5.5, angle = 35, hjust = 1), axis.text.y = element_text(size = 5.5))
+  save_fig(e5, "ExtendedDataFig5", 170)
+}
+
+```
+
+### Programme map (intermediate)
+Heatmap of signed −log10 P (PSA change) for the 45 most associated programmes, excluding PCCAT L3, across strata, and agreement between singscore and mean z-score results.
+
+```{r comp-11-extended-figures-06}
+## =====================================================================================
+## ED6 -- full programme map (singscore) + method concordance
+## =====================================================================================
+a5 <- read.csv(out_path("C5_signatures", "signature_associations_all.csv")) %>% strat_cols()
+top_sig <- a5 %>% filter(collection != "pccat_L3") %>% group_by(signature) %>%
+  summarise(m = min(p_psa, na.rm = TRUE), .groups = "drop") %>% arrange(m) %>% slice_head(n = 45) %>% pull(signature)
+e6a <- ggplot(a5 %>% filter(signature %in% top_sig, collection != "pccat_L3") %>%
+                mutate(val = pmax(pmin(-log10(p_psa) * sign(beta_psa), 4), -4),
+                       star = ifelse(fdr_psa < 0.1, "*", ""),
+                       signature = substr(gsub("_", " ", sub("HALLMARK_", "", signature)), 1, 40)),
+              aes(seg_label, signature, fill = val)) + geom_tile(colour = "white") +
+  geom_text(aes(label = star), size = 2, vjust = 0.75) + facet_grid(~timepoint) +
+  scale_fill_gradient2(low = "#3B6FB6", mid = "white", high = "#C0392B", limits = c(-4, 4), name = "Signed\n−log10 P") +
+  labs(x = NULL, y = NULL, title = "45 most associated programmes (PSA change; * FDR < 0.1)") +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1, size = 5.5), axis.text.y = element_text(size = 5),
+        axis.line = element_blank(), axis.ticks = element_blank())
+e6b <- ggplot(a5, aes(-log10(p_psa) * sign(beta_psa), -log10(z_p_psa) * sign(z_beta_psa))) +
+  geom_abline(linetype = 3, linewidth = 0.25) + geom_point(size = 0.3, alpha = 0.4, colour = "grey30") +
+  labs(x = "singscore signed −log10 P", y = "mean z-score signed −log10 P",
+       title = sprintf("Scoring-method agreement (ρ = %.2f)", cor(a5$beta_psa * 0 + -log10(a5$p_psa) * sign(a5$beta_psa),
+                                                                    -log10(a5$z_p_psa) * sign(a5$z_beta_psa), method = "spearman", use = "complete")))
+save_fig(e6a | e6b + plot_layout(widths = c(2.3, 1)) + plot_annotation(tag_levels = "a"), "ExtendedDataFig6", 200)
+
+```
+
+### Crosstalk (final Supplementary Fig. 4)
+- a, primary tumours: IFN-γ pathway genes fitted here as standardised expression ~ psa + study_batch + (1 | patient) in each compartment;
+- b, ligand–receptor heatmap (signed −log10 P versus PSA change; * FDR < 0.1);
+- c, tumour MHC-I in PSMA⁺ AOIs versus the T-cell-inflamed score in the co-located CD45⁺ AOI;
+- d, pre-treatment bone HLA-I versus Treg coupling by response, annotated with the comp_07 interaction FDR.
+
+```{r comp-11-extended-figures-07}
+## =====================================================================================
+## ED7 -- primary-tumour immune context and crosstalk
+## =====================================================================================
+norm <- qs::qread(out_path("C2_normalization", "normalized_strata.qs"), nthreads = 1)
+suppressMessages(library(lmerTest))
+ifn <- bind_rows(lapply(c("CD45__Archival", "PSMA__Archival", "PanCKPSMA__Archival"), function(s) {
+  bind_rows(lapply(c("IFNG", "IFNGR1", "IFNGR2", "STAT1", "IRF1", "CXCL9", "CD274"), function(g) {
+    x <- norm[[s]]; if (!g %in% colnames(x$Yadj)) return(NULL)
+    d <- x$cd %>% mutate(y = as.numeric(scale(x$Yadj[, g])), psa = psa_change_capped / 50)
+    co <- summary(suppressMessages(lmer(y ~ psa + study_batch + (1 | subject_id), d)))$coefficients["psa", ]
+    data.frame(stratum = s, gene = g, beta = co[1], se = co[2], p = co[5])
+  }))
+})) %>% strat_cols() %>% mutate(gene = factor(gene, c("IFNG", "IFNGR1", "IFNGR2", "STAT1", "IRF1", "CXCL9", "CD274")))
+e7a <- ggplot(ifn, aes(gene, beta, colour = seg_label)) + geom_hline(yintercept = 0, linewidth = 0.25, linetype = 2) +
+  geom_pointrange(aes(ymin = beta - 1.96 * se, ymax = beta + 1.96 * se), position = position_dodge(0.6), size = 0.2, linewidth = 0.35) +
+  scale_colour_manual(values = setNames(seg_cols, seg_lab), name = NULL) +
+  labs(x = NULL, y = "Standardized effect per +50% PSA (95% CI)", title = "Primary tumours: IFNGR1 up without downstream IFN-γ response") +
+  theme(legend.position = "bottom")
+coup <- read.csv(out_path("C7_crosstalk", "within_roi_coupling.csv"))
+sc5 <- qs::qread(out_path("C5_signatures", "per_AOI_singscores.qs"))
+roi_pair <- function(tsid, tvar, ivar) {
+  t <- sc5[[tsid]]; i <- sc5[[sub("^[A-Za-z]+__", "CD45__", tsid)]]
+  t$key <- paste(t$subject_id, t$roi_name); i$key <- paste(i$subject_id, i$roi_name)
+  k <- intersect(t$key, i$key)
+  data.frame(x = t[match(k, t$key), tvar], y = i[match(k, i$key), ivar],
+             response = t$response_group_neat[match(k, t$key)])
+}
+cp1 <- roi_pair("PSMA__Archival", "immune|MHC_I", "immune|Tcell_inflamed_GEP")
+e7b <- ggplot(cp1, aes(x, y, colour = response)) + geom_point(size = 0.8) +
+  geom_smooth(aes(group = 1), method = "lm", se = FALSE, colour = "grey30", linewidth = 0.3, formula = y ~ x) +
+  scale_colour_manual(values = resp_cols, labels = resp_lab, name = NULL) +
+  labs(x = "Tumour MHC-I score (PSMA+ AOI)", y = "T-cell-inflamed score (co-located CD45+ AOI)",
+       title = "Within-ROI coupling, primary tumours") + theme(legend.position = "none")
+cp2 <- roi_pair("PSMA__Screening", "paper_CAN26|HLA_I", "immune|Treg") %>% filter(response != "Intermediate")
+e7c <- ggplot(cp2, aes(x, y, colour = response)) + geom_point(size = 0.8) +
+  geom_smooth(method = "lm", se = FALSE, linewidth = 0.4, formula = y ~ x) +
+  scale_colour_manual(values = resp_cols, labels = resp_lab, name = NULL) +
+  labs(x = "Tumour HLA-I score (PSMA+ AOI)", y = "Treg score (co-located CD45+ AOI)",
+       title = sprintf("Bone metastases: HLA-I–Treg coupling by response (FDR %s)",
+                       fmt_p(coup$fdr_interaction[coup$timepoint == "Screening" & coup$tumour_segment == "PSMA+" &
+                                                   coup$tumour_prog == "paper_CAN26|HLA_I" & coup$immune_prog == "immune|Treg"]))) +
+  theme(legend.position = "bottom")
+lr <- read.csv(out_path("C7_crosstalk", "ligand_receptor_associations.csv")) %>%
+  mutate(pair = paste0(ligand, "→", receptor), col = paste(sub("-treatment bone", "-\ntreatment\nbone", tp_read[timepoint]), seg_lab[tumour_segment], sep = "\n"),
+         timepoint = factor(timepoint, tp_levels)) %>% arrange(timepoint) %>% mutate(col = factor(col, unique(col)))
+e7d <- ggplot(lr, aes(col, pair, fill = pmax(pmin(-log10(p_psa) * sign(beta_psa), 4), -4))) + geom_tile(colour = "white") +
+  geom_text(aes(label = ifelse(fdr_psa < 0.1, "*", "")), size = 2, vjust = 0.75) +
+  scale_fill_gradient2(low = "#3B6FB6", mid = "white", high = "#C0392B", name = "Signed\n−log10 P") +
+  labs(x = NULL, y = NULL, title = "Ligand–receptor co-expression across co-located AOIs vs PSA change") +
+  theme(axis.text.x = element_text(size = 5.2), axis.text.y = element_text(size = 5.2), axis.line = element_blank())
+save_fig((e7a | e7d) / (e7b | e7c) + plot_layout(heights = c(1.2, 1)) + plot_annotation(tag_levels = "a"), "ExtendedDataFig7", 190)
+
+```
+
+### Clinical predictors (final Supplementary Fig. 2)
+- a, univariable Cox hazard ratios for rPFS from comp_01, omitting non-estimable fits and duplicate PET fields, with readable labels;
+- b, rPFS by ctDNA TP53/PTEN/RB1 alteration (log-rank);
+- c, rPFS by response group;
+- d, PSMA-PET volume change to cycle 5 versus PSA change;
+- e, alkaline phosphatase by response group.
+
+```{r comp-11-extended-figures-08}
+## =====================================================================================
+## ED8 -- clinical and ctDNA predictors
+## =====================================================================================
+cl <- read.csv(out_path("C1_clinical", "clinical_feature_associations.csv")) %>%
+  filter(!is.na(HR_rPFS), is.finite(HR_rPFS_hi), HR_rPFS > 1e-3, HR_rPFS < 1e3) %>%
+  filter(!feature %in% c("psma_vol_trorres", "psma_suvmean_trorres")) %>%  # duplicates of PSMAPET_BL_vol / PSMAPET_BL_SUVmean
+  mutate(feature = recode(feature, alt_TSG_alt = "TP53/PTEN/RB1 altered", alt_TP53 = "TP53 altered", alt_PTEN = "PTEN altered",
+                          alt_RB1 = "RB1 altered", alt_AR = "AR altered", alt_PIK3CA = "PIK3CA altered", alt_SPOP = "SPOP altered",
+                          alt_BRCA2 = "BRCA2 altered", alt_CHEK2 = "CHEK2 altered", alt_CDK12 = "CDK12 altered",
+                          alt_DDR_alt = "Any DDR altered", ctDNA_BL_detected = "ctDNA detected", ctDNA_BL = "ctDNA fraction",
+                          lborres_alp = "Alkaline phosphatase", lborres_ldh = "LDH", lborres_alb = "Albumin",
+                          PSMAPET_BL_SUVmean = "PSMA-PET SUVmean", PSMAPET_BL_vol = "PSMA-PET volume",
+                          PSMAPET_vol_change_pct = "PSMA-PET volume change (C5)", TMB_ctDNA = "TMB (ctDNA)",
+                          age = "Age", ecog = "ECOG performance status", psa = "PSA at study entry", initial_psa_level = "PSA at diagnosis",
+                          lym_lborres = "Lymphocyte count", neu_lborres = "Neutrophil count", hgb_lborres = "Haemoglobin",
+                          fdg_suvmean_trorres = "FDG-PET SUVmean", fdg_suvmax_trorres = "FDG-PET SUVmax", fdg_vol_trorres = "FDG-PET MTV",
+                          psma_suvmax_trorres = "PSMA-PET SUVmax", TMB_tissue = "TMB (tissue)"))
+stopifnot(!any(grepl("_", cl$feature)))
+e8a <- ggplot(cl %>% arrange(HR_rPFS) %>% mutate(feature = factor(feature, unique(feature))),
+              aes(HR_rPFS, feature, colour = fdr_rPFS < 0.1)) + geom_vline(xintercept = 1, linetype = 2, linewidth = 0.25) +
+  geom_errorbar(aes(xmin = HR_rPFS_lo, xmax = pmin(HR_rPFS_hi, 100)), width = 0, linewidth = 0.35, orientation = "y") +
+  geom_point(size = 1) + scale_x_log10() + scale_colour_manual(values = c(`FALSE` = "grey55", `TRUE` = "#C0392B"), guide = "none") +
+  labs(x = "rPFS hazard ratio (95% CI; per s.d. or altered vs not)", y = NULL, title = "Univariable Cox models (red = FDR < 0.1)") +
+  theme(axis.text.y = element_text(size = 5.5))
+d8 <- pt %>% filter(!is.na(alt_TSG_alt)) %>% mutate(group = ifelse(alt_TSG_alt == 1, "TP53/PTEN/RB1 altered", "Not altered"))
+lr8 <- survdiff(Surv(r_pfstime, r_pfsevent) ~ group, d8)
+e8b <- ggplot(km_df(d8$r_pfstime, d8$r_pfsevent, d8$group), aes(time, surv, colour = strata)) + geom_step(linewidth = 0.5) +
+  geom_point(data = ~ filter(.x, n.censor > 0), shape = 3, size = 0.8) +
+  scale_colour_manual(values = c("TP53/PTEN/RB1 altered" = "#C0392B", "Not altered" = "#3B6FB6"), name = NULL) +
+  scale_y_continuous(labels = percent, limits = c(0, 1)) +
+  labs(x = "Months", y = "rPFS", title = sprintf("Log-rank P = %s", fmt_p(1 - pchisq(lr8$chisq, 1)))) +
+  theme(legend.position = c(0.7, 0.85))
+e8c <- ggplot(km_df(pt$r_pfstime, pt$r_pfsevent, pt$response_group_neat) %>% mutate(strata = factor(strata, names(resp_cols))),
+              aes(time, surv, colour = strata)) + geom_step(linewidth = 0.5) +
+  scale_colour_manual(values = resp_cols, labels = resp_lab, name = NULL) + scale_y_continuous(labels = percent, limits = c(0, 1)) +
+  labs(x = "Months", y = "rPFS", title = "rPFS by PSA response group") + theme(legend.position = c(0.7, 0.85))
+e8d <- ggplot(pt, aes(PSMAPET_vol_change_pct, pmin(max_psa_change, 150), colour = response_group_neat)) +
+  geom_point(size = 1.2) + scale_x_continuous(trans = pseudo_log_trans(sigma = 10), breaks = c(-100, -10, 0, 10, 100, 1000)) +
+  scale_colour_manual(values = resp_cols, guide = "none") +
+  labs(x = "PSMA-PET tumour volume change to cycle 5 (%)", y = "Max PSA change (%, capped)", title = "Imaging and PSA response agree")
+e8e <- ggplot(pt %>% mutate(response_group_neat = factor(response_group_neat, names(resp_cols))),
+              aes(response_group_neat, lborres_alp, colour = response_group_neat)) +
+  geom_jitter(width = 0.12, size = 1) + stat_summary(fun = median, geom = "crossbar", width = 0.45, linewidth = 0.3) +
+  scale_y_log10() + scale_colour_manual(values = resp_cols, guide = "none") +
+  scale_x_discrete(labels = c(Responder = "R", Intermediate = "Int", Non_Responder = "NR")) +
+  labs(x = NULL, y = "Alkaline phosphatase (U/L)", title = "Bone-turnover marker")
+save_fig((e8a | (e8b / e8c)) / (e8d | e8e) + plot_layout(heights = c(1.6, 1)) + plot_annotation(tag_levels = "a"), "ExtendedDataFig8", 200)
+
+```
+
+### Outcome prediction (intermediate)
+Leave-one-patient-out elastic-net AUCs for PSA50 with bootstrap CIs, features selected in at least half of the folds, and patient-level features with nominal P < 0.05 for rPFS (from comp_08).
+
+```{r comp-11-extended-figures-09}
+## =====================================================================================
+## ED9 -- outcome prediction
+## =====================================================================================
+auc <- read.csv(out_path("C8_outcome_models", "lopo_enet_PSA50_auc.csv"))
+sel <- read.csv(out_path("C8_outcome_models", "lopo_enet_feature_selection.csv"))
+pretty_feat <- function(x) {
+  x <- sub("^alt_TSG_alt$", "TP53/PTEN/RB1 altered", x); x <- sub("^alt_", "", x); x <- sub(" altered$", "", x)
+  x <- sub("^lborres_alp$", "Alkaline phosphatase", x); x <- sub("^PSMAPET_BL_SUVmean$", "PSMA-PET SUVmean", x)
+  x <- sub("^PSMAPET_BL_vol$", "PSMA-PET volume", x); x <- sub("^TMB_ctDNA$", "TMB (ctDNA)", x); x <- sub("^ctDNA_BL$", "ctDNA fraction", x)
+  x <- sub("^PanCK:", "PanCK+PSMA−: ", x); x <- sub("^PSMA:", "PSMA+: ", x); x <- sub("^CD45:", "CD45+: ", x)
+  x <- sub("^decon:", "Deconv.: ", x); x <- sub("HALLMARK_", "", x); gsub("_", " ", x)
+}
+uni <- read.csv(out_path("C8_outcome_models", "univariable_patient_level.csv"))
+e9a <- ggplot(auc, aes(LOPO_AUC, reorder(block, LOPO_AUC))) + geom_vline(xintercept = 0.5, linetype = 2, linewidth = 0.25) +
+  geom_errorbar(aes(xmin = AUC_lo, xmax = AUC_hi), width = 0, linewidth = 0.4, orientation = "y") + geom_point(size = 1.5, colour = "#3B6FB6") +
+  geom_text(aes(label = sprintf("%.2f (n = %d; %d NR)", LOPO_AUC, n, n_nonresponders)), nudge_y = 0.3, size = 1.9) +
+  coord_cartesian(xlim = c(0.3, 1)) + labs(x = "Leave-one-patient-out AUC for PSA50 (95% bootstrap CI)", y = NULL)
+e9b <- ggplot(sel %>% filter(selection_freq >= 0.5) %>% mutate(feature = pretty_feat(feature)),
+              aes(block, reorder(feature, selection_freq), fill = selection_freq)) +
+  geom_tile(colour = "white") + scale_fill_gradient(low = "#D9E2EC", high = "#1F3A5F", labels = percent, name = "Selected in\nLOPO folds") +
+  labs(x = NULL, y = NULL) + theme(axis.text.x = element_text(angle = 25, hjust = 1), axis.text.y = element_text(size = 5.2), axis.line = element_blank())
+e9c <- ggplot(uni %>% filter(is.finite(log(HR_rPFS)), HR_rPFS > 0.01, HR_rPFS < 100, p_rPFS < 0.05) %>% arrange(HR_rPFS) %>%
+                mutate(lab = paste(block, pretty_feat(feature), sep = " · "), feature = factor(lab, unique(lab))),
+              aes(HR_rPFS, feature, colour = block)) + geom_vline(xintercept = 1, linetype = 2, linewidth = 0.25) +
+  geom_errorbar(aes(xmin = HR_rPFS_lo, xmax = pmin(HR_rPFS_hi, 50)), width = 0, linewidth = 0.35, orientation = "y") + geom_point(size = 1) +
+  scale_x_log10() + scale_colour_manual(values = c(Archival = "#8C6D9E", Screening = "#2C8C99", Clinical = "grey40"), name = NULL) +
+  labs(x = "rPFS HR per s.d. (95% CI)", y = NULL, title = "Patient-level features with P < 0.05 for rPFS") +
+  theme(axis.text.y = element_text(size = 5.2), legend.position = "bottom")
+save_fig(((e9a / e9c + plot_layout(heights = c(0.6, 1.6))) | e9b) + plot_annotation(tag_levels = "a"), "ExtendedDataFig9", 190)
+
+```
+
+### Longitudinal change (final Supplementary Fig. 3)
+- a, standardised mean change and change × PSA interaction for each programme, compartment and leg (* FDR < 0.1);
+- b, Spearman correlation of patient-mean primary and matched metastasis scores (filled, FDR < 0.1).
+
+```{r comp-11-extended-figures-10}
+## =====================================================================================
+## ED10 -- longitudinal changes and primary-metastasis concordance
+## =====================================================================================
+leg <- read.csv(out_path("C6_longitudinal", "programme_change_per_leg.csv")) %>%
+  mutate(seg_label = factor(seg_lab[segment], seg_lab), leg = factor(leg, c("Archival->Screening", "Screening->Cycle1"),
+                                                                      c("Primary → metastasis", "Pre → on treatment")))
+lp <- leg %>% select(seg_label, leg, programme, change_at_mean_psa, fdr_change, change_x_psa, fdr_change_x_psa) %>%
+  pivot_longer(c(change_at_mean_psa, change_x_psa), names_to = "term", values_to = "est") %>%
+  mutate(fdr = ifelse(term == "change_at_mean_psa", fdr_change, fdr_change_x_psa),
+         term = factor(recode(term, change_at_mean_psa = "Mean change", change_x_psa = "Change × PSA response"),
+                       c("Mean change", "Change × PSA response")),
+         programme = gsub("_", " ", programme))
+e10a <- ggplot(lp, aes(seg_label, programme, fill = pmax(pmin(est, 1), -1))) + geom_tile(colour = "white") +
+  geom_text(aes(label = ifelse(fdr < 0.1, "*", "")), size = 2, vjust = 0.75) + facet_grid(~ leg + term) +
+  scale_fill_gradient2(low = "#3B6FB6", mid = "white", high = "#C0392B", name = "Standardized\neffect") +
+  labs(x = NULL, y = NULL, title = "Programme change in matched patients (* FDR < 0.1); interaction > 0 = larger rise with worse response") +
+  theme(axis.text.x = element_text(angle = 35, hjust = 1, size = 5.2), axis.text.y = element_text(size = 5.5), axis.line = element_blank(),
+        strip.text = element_text(size = 5.5))
+conc <- read.csv(out_path("C6_longitudinal", "primary_met_concordance.csv")) %>% mutate(seg_label = factor(seg_lab[segment], seg_lab))
+e10b <- ggplot(conc, aes(rho_archival_vs_screening, reorder(gsub("_", " ", programme), rho_archival_vs_screening), colour = seg_label)) +
+  geom_vline(xintercept = 0, linewidth = 0.25, linetype = 2) + geom_point(aes(shape = fdr < 0.1), size = 1.3) +
+  scale_shape_manual(values = c(`FALSE` = 1, `TRUE` = 16), labels = c(`FALSE` = "FDR ≥ 0.1", `TRUE` = "FDR < 0.1"), name = NULL) +
+  scale_colour_manual(values = setNames(seg_cols, seg_lab), name = NULL) +
+  labs(x = "Spearman ρ, primary vs matched metastasis (patient means)", y = NULL, title = "What the primary tumour carries forward") +
+  theme(axis.text.y = element_text(size = 5.5))
+save_fig(e10a / e10b + plot_layout(heights = c(1.4, 1)) + plot_annotation(tag_levels = "a"), "ExtendedDataFig10", 230)
+
+```
+
+### Supplementary Tables workbook
+Writes sheets S1–S14, each with a caption in row 1 and the table from row 3, to `results/Manuscript/Supplementary_Tables.xlsx`. The DE sheets (S7–S9) are written only if comp_04 has run. Later table scripts load this workbook and append further sheets; S1–S14 keep their numbers in the released Supplementary Tables.
+
+```{r comp-11-extended-figures-11}
+## =====================================================================================
+## Supplementary tables
+## =====================================================================================
+wb <- createWorkbook()
+add <- function(name, df, desc) {
+  addWorksheet(wb, name); writeData(wb, name, desc, startRow = 1); writeData(wb, name, df, startRow = 3)
+  setColWidths(wb, name, cols = seq_len(ncol(df)), widths = "auto")
+}
+add("S1_patients", pt, sprintf("Table S1. Patient-level clinical, imaging, ctDNA and outcome data (%d patients).", nrow(pt)))
+add("S2_availability", read.csv(out_path("C1_clinical", "aoi_availability_patient_x_timepoint_segment.csv")),
+    "Table S2. AOIs per patient x timepoint x compartment after QC.")
+add("S3_normalization", read.csv(out_path("C2_normalization", "normalization_summary.csv")), "Table S3. Per-stratum RUV-4 normalization summary.")
+add("S4_deconv_validation", read.csv(out_path("C3_deconvolution", "validation_marker_correlation.csv")), "Table S4. Deconvolution validation against marker genes.")
+add("S5_deconv_associations", read.csv(out_path("C3_deconvolution", "celltype_outcome_associations.csv")), "Table S5. Cell-type fraction vs outcome (mixed models).")
+add("S6_programmes", a5 %>% select(-segment, -seg_label), "Table S6. Programme score vs outcome, all strata (singscore and z-score).")
+if (c4_done) {
+  add("S7_DE_robust", read.csv(out_path("C4_DE", "robust_genes_all_strata.csv")), "Table S7. Robust genes (FDR<0.1 in >=2 specifications, pseudobulk sign, LOPO >= 90%).")
+  add("S8_DE_summary", read.csv(out_path("C4_DE", "de_summary.csv")), "Table S8. Differential expression summary per stratum.")
+  add("S9_fgsea", bind_rows(qs::qread(out_path("C4_DE", "de_results.qs"))$gsea) %>% filter(padj < 0.05), "Table S9. Gene-set enrichment (FDR<0.05), all strata.")
+}
+add("S10_longitudinal", read.csv(out_path("C6_longitudinal", "programme_change_per_leg.csv")), "Table S10. Programme change per leg in matched patients.")
+add("S11_treatment_programme", read.csv(out_path("C6_longitudinal", "PanCKPSMAneg_Screening_to_Cycle1_paired_DE.csv")) %>% filter(adj.P.Val < 0.05),
+    "Table S11. Treatment-induced genes, paired Screening->Cycle1 PanCK+PSMA- AOIs (FDR<0.05).")
+add("S12_crosstalk", read.csv(out_path("C7_crosstalk", "ligand_receptor_associations.csv")), "Table S12. Ligand-receptor co-expression vs outcome.")
+add("S13_clinical", read.csv(out_path("C1_clinical", "clinical_feature_associations.csv")), "Table S13. Clinical and ctDNA feature associations.")
+add("S14_outcome_models", uni, "Table S14. Patient-level univariable outcome models.")
+saveWorkbook(wb, file.path(fig_dir, "Supplementary_Tables.xlsx"), overwrite = TRUE)
+cat("Extended Data complete. C4 included:", c4_done, "\n")
+```

@@ -1,0 +1,295 @@
+---
+title: "Legacy: RUV-4 normalisation of pre-treatment strata (earlier all-site analysis)"
+subtitle: "PRINCE spatial transcriptomics: `phase3_normalization`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "results_legacy"))
+```
+
+## Overview
+
+This is a legacy script from the earlier all-site analysis (primary tumours plus metastatic biopsies from bone, lymph node and soft tissue). It is included for transparency and is not part of the bone-only pipeline. It normalised the six archival and pre-treatment compartment strata with RUV-4. RUV-III-PRPS could not be used because the intermediate response group lay entirely within one sequencing batch, so no cross-batch pseudo-replicates existed for it. RUV-4 instead estimates unwanted factors from negative-control genes: the 2,000 singscore stable genes that were retained in the stratum. Genes above LOQ in at least 10% of AOIs were kept, and control AOIs were excluded.
+
+The number of factors k was chosen over a sweep from 1 to 8. Batch variance was measured as the relative metric (maximum batch R² over the top five PCs); positive-control marker F ratios and RLE spread were also recorded. The smallest k was chosen that reduced batch R² by at least 15% while keeping the marker F ratio within 0.7–1.5. The current manuscript shows that this relative metric is misleading for PSMA⁺ AOIs (Supplementary Fig. 5; see phase3d). The unwanted factors estimated here were used as covariates in the earlier AOI-level differential expression (phase4).
+
+**Manuscript items supported**
+
+- Legacy. Its RUV factors feed phase4 and phase5, whose frozen top tables (`data/previous_analysis/Phase4_DE`, `Phase5_Purity`) are re-evaluated by comp_18 (Extended Data Fig. 8a).
+- Background for Supplementary Fig. 5 (RUV-4 normalisation of the earlier analysis; the frozen Phase3d metrics are plotted by comp_11)
+
+**Pipeline step:** `./run_pipeline.sh --legacy` (optional; not needed to reproduce the manuscript, whose frozen inputs are in `data/previous_analysis/`). Approximate runtime: minutes.
+
+**Inputs**
+
+- `data/interim/phase2_se_qc_filtered.qs`
+
+**Outputs**
+
+- `results_legacy/phase3_ruv_results.rds`
+- `results_legacy/phase3_summary_table.csv`
+- `results_legacy/Results/Phase3_Normalization/*_k_selection.pdf`
+- `results_legacy/Results/Phase3_Normalization/*_pca_before_after.pdf`
+
+**Depends on**: `comp_00a`
+
+## Analysis
+
+### Legacy RUV-4 normalisation
+
+The header explains the scope (archival and pre-treatment strata only), why RUV-4 was used rather than RUV-III-PRPS, and the choice of negative-control genes.
+
+Sets the working directory to `results_legacy/`. Outputs of this script are not used directly; the frozen copies used downstream are in `data/previous_analysis/`. Loads the all-site QC-filtered object and the 2,000 singscore stable genes, and defines the positive-control markers for each compartment. Defines the relative batch metric, the maximum R² of batch over the top five PCs.
+
+```{r phase3-normalization-01}
+## ============================================================================
+## PRINCE Trial GeoMx DSP -- Phase 3: Normalization / Removal of Unwanted Variation
+##
+## Scope of this pass: Archival + Screening timepoints x 3 segments = 6 strata
+## (the pre-treatment strata needed for Q1; Cycle1/DiseaseProgression deferred to
+## Phase 8 longitudinal analysis). Control-tissue AOIs are excluded from every
+## stratum (technical replicates only; used for QC only).
+##
+## Method: RUV-4 (ruv package) uniformly across all 6 strata, NOT RUV-III-PRPS.
+## Every stratum's `response_group_neat` has the Intermediate group aliased 100%
+## with study_batch == "batch_3" (verified per-stratum below), which breaks
+## RUV-III-PRPS's pseudo-replicate (PRPS) construction (no cross-batch replicate
+## exists for a group that lives in only one batch). RUV-4 estimates unwanted
+## factors W directly from negative-control genes per sample and has no such
+## requirement.
+##
+## Negative controls: top 2000 stable genes from singscore::getStableGenes()
+## (default type = "carcinoma", matching prior usage in Prince_Archival_CD45.Rmd),
+## intersected with genes retained in each stratum.
+## ============================================================================
+
+suppressMessages({
+  library(qs); library(SummarizedExperiment); library(dplyr)
+  library(ruv); library(edgeR); library(singscore); library(ggplot2)
+})
+
+PRINCE_ROOT <- normalizePath(Sys.getenv("PRINCE_ROOT", "."))
+RAW_DIR <- file.path(PRINCE_ROOT, "data", "interim")     # all-site QC'd objects written by comp_00a_qc
+dir.create(file.path(PRINCE_ROOT, "results_legacy"), showWarnings = FALSE)
+setwd(file.path(PRINCE_ROOT, "results_legacy"))           # legacy outputs; frozen copies used downstream are in data/previous_analysis
+dir.create("Results/Phase3_Normalization", showWarnings = FALSE, recursive = TRUE)
+
+se <- qs::qread(file.path(RAW_DIR, "phase2_se_qc_filtered.qs"))
+cd_full <- as.data.frame(colData(se))
+
+stable_genes <- singscore::getStableGenes(n_stable = 2000)
+
+pos_ctrl_markers <- list(
+  "CD45+"       = c("PTPRC", "CD3D", "CD8A", "CD68"),
+  "PSMA+"       = c("FOLH1", "KLK3", "AR"),
+  "PanCK+PSMA-" = c("KRT8", "KRT18", "EPCAM", "KRT19")
+)
+
+strata <- expand.grid(segment = c("CD45+", "PSMA+", "PanCK+PSMA-"),
+                       timepoint = c("Archival", "Screening"),
+                       stringsAsFactors = FALSE)
+
+K_RANGE <- 1:8
+r2 <- function(y, var) {
+  if (length(unique(var)) < 2) return(NA_real_)
+  summary(lm(y ~ var))$r.squared
+}
+tech_R2 <- function(pca_x, batch_var, npc = 5) {
+  npc <- min(npc, ncol(pca_x))
+  max(sapply(1:npc, function(i) r2(pca_x[, i], batch_var)))
+}
+
+all_results <- list()
+summary_rows <- list()
+
+```
+
+### Per-stratum k sweep
+
+For each stratum the script:
+- checks whether a response group is aliased with a single batch;
+- filters genes at 10% detection above LOQ and computes log-CPM;
+- fits RUV-4 with k = 1–8, with response group as the factor of interest;
+- records the relative batch R², the response R², the mean positive-control F ratio and the RLE IQR.
+
+k is chosen by the rule described in the comments: a strict band, then a relaxed band flagged for review, then a default of k = 1. The k-selection curve and before/after PCA plots are saved, along with the adjusted matrix, the W factors and the diagnostics for each stratum.
+
+```{r phase3-normalization-02}
+for (s in seq_len(nrow(strata))) {
+  seg <- strata$segment[s]; tp <- strata$timepoint[s]
+  stratum_id <- paste0(gsub("[^A-Za-z0-9]", "", seg), "__", tp)
+  cat("\n\n================ STRATUM:", seg, "/", tp, "================\n")
+
+  idx <- cd_full$segment_name == seg & cd_full$timepoint == tp &
+    cd_full$response_group_neat != "Control"
+  sub_se <- se[, idx]
+  sub_cd <- droplevels(as.data.frame(colData(sub_se)))
+  cat("N AOIs:", ncol(sub_se), " N patients:", length(unique(sub_cd$subject_id)), "\n")
+
+  # confounding check: is any response level aliased with a single study_batch?
+  conf_tab <- table(sub_cd$response_group_neat, sub_cd$study_batch)
+  n_batches_per_group <- rowSums(conf_tab > 0)
+  aliased_groups <- names(n_batches_per_group)[n_batches_per_group <= 1]
+  cat("Response groups aliased with a single study_batch:",
+      ifelse(length(aliased_groups) == 0, "none", paste(aliased_groups, collapse = ", ")), "\n")
+
+  # gene filter: >=10% detection within this stratum
+  counts <- assay(sub_se, "all_count")
+  above_loq <- sweep(counts, 2, sub_cd$LOQ, `>`)
+  genes_keep <- rowMeans(above_loq) >= 0.10
+  counts <- counts[genes_keep, ]
+  sub_se <- sub_se[genes_keep, ]  # keep se's gene set consistent with logcpm/Yadj/DE input
+  cat("Genes retained (>=10% detection in stratum):", nrow(counts), "\n")
+
+  logcpm <- t(edgeR::cpm(counts, log = TRUE, prior.count = 0.5))  # AOIs x genes
+  ctl <- colnames(logcpm) %in% stable_genes
+  cat("Negative control (stable) genes usable:", sum(ctl), "\n")
+
+  resp <- droplevels(factor(sub_cd$response_group_neat))
+  X <- model.matrix(~resp)[, -1, drop = FALSE]
+
+  markers <- intersect(pos_ctrl_markers[[seg]], colnames(logcpm))
+  cat("Positive control markers present for this segment:", paste(markers, collapse = ", "), "\n")
+
+  f_stat <- function(mat, gene, group) {
+    if (!(gene %in% colnames(mat))) return(NA_real_)
+    tryCatch(summary(aov(mat[, gene] ~ group))[[1]][1, "F value"], error = function(e) NA_real_)
+  }
+  posctrl_F_raw <- sapply(markers, function(g) f_stat(logcpm, g, resp))
+
+  pca_raw <- prcomp(logcpm, center = TRUE, scale. = FALSE)
+  tech_R2_raw <- max(tech_R2(pca_raw$x, sub_cd$study_batch), tech_R2(pca_raw$x, factor(sub_cd$dsp_experiment)))
+  bio_R2_raw  <- tech_R2(pca_raw$x, resp)
+
+  sweep_rows <- list()
+  fits <- list()
+  for (k in K_RANGE) {
+    fit <- tryCatch(ruv::RUV4(Y = logcpm, X = X, ctl = ctl, k = k), error = function(e) NULL)
+    if (is.null(fit)) next
+    Yadj <- logcpm - fit$W %*% fit$alpha
+    fits[[as.character(k)]] <- fit
+
+    pca_adj <- prcomp(Yadj, center = TRUE, scale. = FALSE)
+    tR2 <- max(tech_R2(pca_adj$x, sub_cd$study_batch), tech_R2(pca_adj$x, factor(sub_cd$dsp_experiment)))
+    bR2 <- tech_R2(pca_adj$x, resp)
+    posctrl_F_adj <- sapply(markers, function(g) f_stat(Yadj, g, resp))
+    posctrl_ratio <- mean(posctrl_F_adj / posctrl_F_raw, na.rm = TRUE)
+
+    rle <- sweep(Yadj, 2, apply(Yadj, 1, median), FUN = "-")
+    rle_iqr_med <- median(apply(rle, 2, IQR))
+
+    sweep_rows[[as.character(k)]] <- data.frame(
+      k = k, tech_R2 = tR2, bio_R2 = bR2,
+      posctrl_F_ratio = posctrl_ratio, rle_iqr_median = rle_iqr_med
+    )
+  }
+  sweep_tab <- bind_rows(sweep_rows)
+  sweep_tab <- rbind(data.frame(k = 0, tech_R2 = tech_R2_raw, bio_R2 = bio_R2_raw,
+                                 posctrl_F_ratio = 1, rle_iqr_median = median(apply(
+                                   sweep(logcpm, 2, apply(logcpm, 1, median), "-"), 2, IQR))),
+                      sweep_tab)
+  cat("\nk-sweep diagnostics:\n")
+  print(sweep_tab, row.names = FALSE)
+
+  # k selection heuristic (revised after inspecting an initial permissive-threshold
+  # pass: that version chose k as high as 8 in strata where posctrl_F_ratio had
+  # climbed to 4x-18x baseline and tech_R2 was behaving non-monotonically -- both
+  # signs of overfitting/instability at higher k in these modest sample sizes
+  # (62-105 AOIs), not genuine improvement. Revised rule explicitly guards against
+  # BOTH signal erosion AND implausible signal inflation, and prefers the smallest
+  # (most parsimonious) k satisfying both, per the master plan's over-correction
+  # warning.):
+  #   - posctrl_F_ratio in [0.7, 1.5]  (signal neither collapsed nor implausibly
+  #     amplified -- a large ratio increase is itself a red flag for overfitting,
+  #     not a sign of "cleaner" data)
+  #   - tech_R2 reduced by >=15% relative to the raw (k=0) baseline
+  # Falls back to a wider band [0.5, 2] with any tech_R2 reduction if nothing
+  # satisfies the strict rule, explicitly flagged for manual review; if even that
+  # fails, keeps k=1 (minimal, conservative) and flags the stratum as having no
+  # defensible correction found in this sweep.
+  tech_R2_baseline <- sweep_tab$tech_R2[sweep_tab$k == 0]
+  candidates <- sweep_tab %>%
+    filter(k >= 1, posctrl_F_ratio >= 0.7, posctrl_F_ratio <= 1.5,
+           tech_R2 <= tech_R2_baseline * 0.85)
+  if (nrow(candidates) > 0) {
+    flag <- "OK"
+  } else {
+    candidates <- sweep_tab %>%
+      filter(k >= 1, posctrl_F_ratio >= 0.5, posctrl_F_ratio <= 2,
+             tech_R2 < tech_R2_baseline)
+    flag <- "MARGINAL -- relaxed thresholds used; REVIEW"
+  }
+  if (nrow(candidates) == 0) {
+    chosen_k <- 1
+    flag <- "NO k met any defensible criterion in this sweep -- defaulted to k=1; REVIEW STRATUM"
+  } else {
+    chosen_k <- min(candidates$k)
+  }
+  cat("\nChosen k =", chosen_k, " (selection status:", flag, ")\n")
+
+  fit_final <- fits[[as.character(chosen_k)]]
+  Yadj_final <- logcpm - fit_final$W %*% fit_final$alpha
+
+  # diagnostic plot: k-selection curve
+  p1 <- ggplot(sweep_tab, aes(x = k)) +
+    geom_line(aes(y = tech_R2, color = "technical R2 (batch)")) +
+    geom_line(aes(y = bio_R2, color = "biological R2 (response)")) +
+    geom_line(aes(y = posctrl_F_ratio / 5, color = "pos-ctrl F ratio (/5, rescaled)")) +
+    geom_vline(xintercept = chosen_k, linetype = "dashed") +
+    theme_bw() + labs(title = paste("k-selection:", seg, tp), y = "value", color = "") +
+    theme(legend.position = "bottom")
+  ggsave(file.path("Results/Phase3_Normalization", paste0(stratum_id, "_k_selection.pdf")),
+         p1, width = 7, height = 5)
+
+  # diagnostic plot: PCA before/after at chosen k, colored by batch and response
+  pca_adj_final <- prcomp(Yadj_final, center = TRUE, scale. = FALSE)
+  pdat <- rbind(
+    data.frame(PC1 = pca_raw$x[, 1], PC2 = pca_raw$x[, 2], stage = "before",
+               batch = sub_cd$study_batch, response = resp),
+    data.frame(PC1 = pca_adj_final$x[, 1], PC2 = pca_adj_final$x[, 2], stage = "after",
+               batch = sub_cd$study_batch, response = resp)
+  )
+  p2 <- ggplot(pdat, aes(PC1, PC2, color = batch, shape = response)) +
+    geom_point(size = 1.8, alpha = 0.8) + facet_wrap(~stage, scales = "free") +
+    theme_bw() + labs(title = paste("PCA before/after RUV-4 (k =", chosen_k, "):", seg, tp))
+  ggsave(file.path("Results/Phase3_Normalization", paste0(stratum_id, "_pca_before_after.pdf")),
+         p2, width = 9, height = 4.5)
+
+  all_results[[stratum_id]] <- list(
+    segment = seg, timepoint = tp, se = sub_se, cd = sub_cd,
+    logcpm = logcpm, Yadj = Yadj_final, W = fit_final$W, chosen_k = chosen_k,
+    sweep_table = sweep_tab, aliased_groups = aliased_groups,
+    posctrl_markers = markers, selection_flag = flag
+  )
+  summary_rows[[stratum_id]] <- data.frame(
+    stratum = stratum_id, segment = seg, timepoint = tp,
+    n_aoi = ncol(sub_se), n_patients = length(unique(sub_cd$subject_id)),
+    n_genes = nrow(counts), chosen_k = chosen_k,
+    tech_R2_before = round(tech_R2_raw, 3),
+    tech_R2_after = round(sweep_tab$tech_R2[sweep_tab$k == chosen_k], 3),
+    posctrl_F_ratio = round(sweep_tab$posctrl_F_ratio[sweep_tab$k == chosen_k], 3),
+    selection_flag = flag
+  )
+}
+
+summary_tab <- bind_rows(summary_rows)
+cat("\n\n================ PHASE 3 SUMMARY ACROSS STRATA ================\n")
+print(summary_tab, row.names = FALSE)
+
+saveRDS(all_results, "phase3_ruv_results.rds")
+write.csv(summary_tab, "phase3_summary_table.csv", row.names = FALSE)
+cat("\nSaved phase3_ruv_results.rds (per-stratum se/logcpm/Yadj/W/diagnostics) and",
+    "phase3_summary_table.csv\n")
+cat("Diagnostic plots saved under Results/Phase3_Normalization/\n")
+cat("Phase 3 script complete.\n")
+```

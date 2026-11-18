@@ -1,0 +1,340 @@
+---
+title: "Validation of the PCCAT tumour-state signatures and direct search for NEPC-like and AR-low/PSMA-low regions"
+subtitle: "PRINCE spatial transcriptomics: `comp_33b_state_validation`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+This is the validation analysis of the PCCAT tumour-state scores derived in `comp_33_pccat_states`. It asks whether the atlas-derived 20-gene signatures measure what they claim in PRINCE GeoMx data, and whether there is direct evidence for neuroendocrine (NE) or AR-low/PSMA-low tumour regions.
+
+Stage 1 works in the PCCAT atlas alone. Each signature is re-derived with a 5-fold leave-donor-out scheme and its held-out AUC is computed, and the expression of every signature gene in non-epithelial PCCAT lineages is tabulated. Stage 2 works in PRINCE. Genes are flagged as unsafe if they are expressed in non-epithelial atlas cells, if they are higher in CD45⁺ than tumour AOIs, or if they track deconvolved myeloid or erythroid fractions in tumour AOIs. This yields purity-safe signatures, and both the original and purity-safe sets are re-scored. Each signature is then checked for detection above LOQ, for gene–gene coherence against expression-matched random sets, for correlation with deconvolution and AOI quality, and for technical noise in the control-tissue AOIs. Stage 3 searches directly for AOIs with low *FOLH1* and low AR activity and for AOIs expressing canonical NE genes above LOQ.
+
+The signatures were defined only from the external atlas, so no PRINCE outcome data enter their definition. Control-tissue AOIs are technical replicates and are used here only to estimate measurement noise.
+
+**Manuscript items supported**
+
+- Supplementary Table 67 (leave-donor-out specificity of PCCAT state signatures; `B1_leave_donor_out_AUC.csv`)
+- Supplementary Table 68 (detection above LOQ, coherence and contamination; `B2_measurement_quality_by_stratum.csv`)
+- Supplementary Table 71 (AOIs with *CHGA*, *CHGB* and *SYP* above LOQ; `B3_NE_positive_AOIs.csv`)
+- Results: re-evaluation of neuroendocrine findings (held-out AUC of the chromogranin-high NE state; NE genes largely below background; double-negative-like, basal, club and hillock scores reflecting tumour content and myeloid–stromal genes)
+- Methods: Atlas-derived tumour-state signatures
+
+**Pipeline step:** `./run_pipeline.sh --only 33b_state_validation` (argument `all`: stage 1 validates the signatures in the PCCAT atlas and needs about 25 GB of free RAM; stage 2 applies them to PRINCE). Approximate runtime: Stage 2/3 about 1 min; stage 1 needs at least 25 GB free RAM to load the atlas.
+
+**Inputs**
+
+- `data/refs/pccat_subsample.qs`
+- `data/phase2_se_qc_filtered.qs`
+- `data/reference/msigdb_gene_sets.rds`
+- `results/R11_pccat_states/A_PCCAT_state_signatures_top20.csv`
+- `results/R1_loq/loq_gene_universes.qs`
+- `results/C3_deconvolution/deconvolution_proportions.qs`
+
+**Outputs**
+
+- `results/R11_pccat_states/state_validation/B1_pccat_validation.qs`
+- `results/R11_pccat_states/state_validation/B1_leave_donor_out_AUC.csv`
+- `results/R11_pccat_states/state_validation/B1_signature_genes_nonepithelial_expression.csv`
+- `results/R11_pccat_states/state_validation/B2_signature_gene_purity_flags.csv`
+- `results/R11_pccat_states/state_validation/B2_purity_safe_signatures.csv`
+- `results/R11_pccat_states/state_validation/B2_PRINCE_aoi_scores_original_and_safe.csv`
+- `results/R11_pccat_states/state_validation/B2_measurement_quality_by_stratum.csv`
+- `results/R11_pccat_states/state_validation/B2_control_tissue_reliability.csv`
+- `results/R11_pccat_states/state_validation/B3_*.csv`
+- `results/R11_pccat_states/state_validation/B2_B3_results.qs`
+
+**Depends on**: `comp_03a_build_refs`, `comp_00b_bone_cohort`, `comp_16_loq_filter`, `comp_03b_deconv`, `comp_33_pccat_states`
+
+## Analysis
+
+Header. The script runs in up to three stages, chosen on the command line (`1`, `2` or `all`). Stage 1 uses the PCCAT atlas. Stages 2 and 3 use the PRINCE AOIs and run together under argument `2`.
+
+Set-up: load the shared configuration and libraries, create the output folder (which must lie outside the input data folder) and read the 20-gene signatures written by `comp_33_pccat_states`. `auc_fun` computes the area under the ROC curve from ranks (Mann–Whitney form) and is used throughout.
+
+```{r comp-33b-state-validation-01}
+## ============================================================================
+## PRINCE R11 -- state-signature validation: are the PCCAT tumour-state signatures trustworthy
+## measurements in PRINCE GeoMx, and is there direct evidence for NEPC-like / AR-low-PSMA-low regions?
+##  Stage 1 (PCCAT reference): leave-donor-out (5-fold by donor) re-derivation + held-out AUC;
+##          expression of signature genes in non-epithelial PCCAT lineages (ct.L1 / ct.L2).
+##  Stage 2 (PRINCE): purity-safe signatures (reference + in-situ rules), re-scoring, LOQ detection,
+##          coherence vs expression-matched random sets, correlation with deconvolution / AOI quality,
+##          technical-noise check on control-tissue AOIs.
+##  Stage 3 (PRINCE): direct search for AR-low/PSMA-low and NE-positive AOIs.
+## Usage: Rscript comp_33b_state_validation.R [1|2|all]
+## ============================================================================
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({ library(qs); library(Matrix); library(SummarizedExperiment); library(dplyr); library(tidyr)
+  library(edgeR); library(singscore) })
+setwd(PRINCE_DIR)
+OUT <- file.path(COMP_DIR, "R11_pccat_states", "state_validation"); dir.create(OUT, showWarnings = FALSE, recursive = TRUE)
+stopifnot(!startsWith(normalizePath(OUT), normalizePath(PRINCE_DIR)))
+args <- commandArgs(TRUE); stage <- if (length(args)) args[1] else "all"
+R11 <- file.path(COMP_DIR, "R11_pccat_states")
+sig_tab <- read.csv(file.path(R11, "A_PCCAT_state_signatures_top20.csv"), check.names = FALSE)
+sig_list <- split(sig_tab$gene, sig_tab$signature)
+auc_fun <- function(score, lab) { ok <- !is.na(score); score <- score[ok]; lab <- lab[ok]
+  n1 <- sum(lab); n0 <- sum(!lab); if (n1 == 0 || n0 == 0) return(NA)
+  (sum(rank(score)[lab]) - n1 * (n1 + 1) / 2) / (n1 * n0) }
+
+```
+
+### Stage 1: leave-donor-out validation in the PCCAT atlas
+- Load the atlas subsample and scale counts to 10,000 per cell. Compute the mean expression and detection rate of the signature genes, plus *AR*, *FOLH1*, *CHGA*, *SYP* and *KRT7*, in every coarse (ct.L1) and fine (ct.L2) lineage.
+- Restrict to epithelial cells from CRPC, mCRPC and NEPC samples, as in `comp_33`. Double-negative-like (DNPC-like) cells are non-NE cells with zero counts for *AR*, *FOLH1*, *CHGA*, *SYP*, *INSM1* and *ASCL1*. Because zero counts are commoner in small libraries, the AUC of low library size for this label is recorded as a confound check.
+- `stats_for` repeats the derivation rule: genes detected in ≥25% of the state's cells with mean ≥1 CPM10k, ranked by log₂ fold change, kept if higher in ≥70% of donors with ≥10 cells of the state, top 20. Re-deriving on all data first confirms that the published signatures are reproduced.
+- Donors are split into 5 folds (seed 11). Each signature is re-derived on four folds and scored on the held-out donors (mean log1p expression). AUCs are reported against all other epithelial cells and against the training contrast, with the median AUC per held-out donor and the AUC of library size alone as a baseline.
+- For each signature gene, record its expression in the state and the highest mean in any non-epithelial lineage, as a ratio used by the purity rules in stage 2.
+
+```{r comp-33b-state-validation-02}
+## =============================== STAGE 1: PCCAT ==================================================
+if (stage %in% c("1", "all")) {
+  check_ram_or_stop(25)
+  pc <- qs::qread("refs/pccat_subsample.qs", nthreads = 1); Xall <- pc$counts; mall <- pc$meta; rm(pc); invisible(gc())
+  cat("PCCAT:", dim(Xall), "\n"); print(table(mall$ct.L1)); print(table(mall$ct.L2, mall$ct.L1)[, , drop = FALSE]); print(table(mall$Group2))
+  liball <- pmax(Matrix::colSums(Xall), 1)
+  sg_genes <- intersect(unique(c(sig_tab$gene, "AR", "FOLH1", "CHGA", "SYP", "KRT7")), rownames(Xall))
+  Ns <- Xall[sg_genes, ] %*% Diagonal(x = 1e4 / liball); colnames(Ns) <- colnames(Xall)
+  ## (b) lineage means (CPM10k) and detection by ct.L1 and ct.L2, all cells
+  grp_means <- function(f) { f <- as.character(f); f[is.na(f)] <- "NA"; lv <- sort(unique(f))
+    M <- sapply(lv, function(l) Matrix::rowMeans(Ns[, f == l, drop = FALSE]))
+    D <- sapply(lv, function(l) Matrix::rowMeans(Ns[, f == l, drop = FALSE] > 0))
+    list(mean = M, det = D, n = table(f)) }
+  L1 <- grp_means(mall$ct.L1); L2 <- grp_means(mall$ct.L2)
+  ## epithelial cells for derivation (identical to comp_33)
+  epi_l2 <- c("Luminal", "Basal", "Club", "Hillock", "LPCs", "NE")
+  epi <- mall$ct.L2 %in% epi_l2 & mall$Group2 %in% c("CRPC", "mCRPC", "NEPC") & !is.na(mall$ct.L3)
+  epi_L1 <- names(sort(table(mall$ct.L1[mall$ct.L2 %in% epi_l2]), decreasing = TRUE))[1]
+  cat("epithelial ct.L1 label:", epi_L1, "\n")
+  X <- Xall[, epi]; m <- mall[epi, ]; lib <- liball[epi]; rm(Xall); invisible(gc())
+  Xn <- X %*% Diagonal(x = 1e4 / lib); colnames(Xn) <- colnames(X); rm(X); invisible(gc())
+  m$coarse <- ifelse(m$ct.L2 == "NE", "NE_all", paste0(m$ct.L2, "_all"))
+  g0 <- function(g) if (g %in% rownames(Xn)) Xn[g, ] == 0 else rep(TRUE, ncol(Xn))
+  dn_cells <- m$ct.L2 != "NE" & g0("AR") & g0("FOLH1") & g0("CHGA") & g0("SYP") & g0("INSM1") & g0("ASCL1")
+  arpos <- m$ct.L2 == "Luminal" & Xn["AR", ] > 0 & Xn["FOLH1", ] > 0
+  ## library-size confound of the DNPC-like definition
+  dn_lib <- data.frame(group = c("DNPC_like", "ARpos_FOLH1pos_luminal", "other_epithelial"),
+    n = c(sum(dn_cells), sum(arpos), sum(!dn_cells & !arpos)),
+    median_UMI = c(median(lib[dn_cells]), median(lib[arpos]), median(lib[!dn_cells & !arpos])))
+  dn_lib$AUC_libsize_low_predicts_DNPC <- c(auc_fun(-lib, dn_cells), NA, NA)
+  dn_ct <- as.data.frame(table(ct.L3 = m$ct.L3[dn_cells])); dn_grp <- as.data.frame(table(Group2 = m$Group2[dn_cells]))
+  cat("DNPC-like composition:\n"); print(dn_lib); print(dn_ct)
+
+  stats_for <- function(in_cells, out_cells, label) {
+    mi <- Matrix::rowMeans(Xn[, in_cells, drop = FALSE]); mo <- Matrix::rowMeans(Xn[, out_cells, drop = FALSE])
+    det <- Matrix::rowMeans(Xn[, in_cells, drop = FALSE] > 0); lfc <- log2(mi + 0.1) - log2(mo + 0.1)
+    dn <- table(m$Donor_ID[in_cells]); dn <- names(dn[dn >= 10])
+    cand <- names(sort(lfc[det >= 0.25 & mi >= 1], decreasing = TRUE))[1:200]; cand <- cand[!is.na(cand)]
+    if (!length(cand)) return(character(0))
+    cons <- if (length(dn) >= 2) rowMeans(sapply(dn, function(d) Matrix::rowMeans(Xn[cand, in_cells & m$Donor_ID == d, drop = FALSE]) > mo[cand])) else setNames(rep(1, length(cand)), cand)
+    head(cand[cons >= 0.7], 20) }
+  ## sanity: full-data re-derivation reproduces the published signatures
+  defs <- c(setNames(lapply(sort(unique(m$ct.L3)), function(s) list(inn = m$ct.L3 == s, out = m$ct.L3 != s)), sort(unique(m$ct.L3))),
+            setNames(lapply(sort(unique(m$coarse)), function(s) list(inn = m$coarse == s, out = m$coarse != s)), sort(unique(m$coarse))),
+            list(DNPC_like = list(inn = dn_cells, out = arpos), ARpos_PSMApos_luminal = list(inn = arpos, out = dn_cells)))
+  repro <- sapply(names(defs), function(s) length(intersect(stats_for(defs[[s]]$inn, defs[[s]]$out, s), sig_list[[s]])))
+  cat("full-data reproduction (overlap /20):\n"); print(repro)
+  ## (a) leave-donor-out, 5 folds by donor
+  set.seed(11); donors <- unique(m$Donor_ID); fold <- setNames(sample(rep(1:5, length.out = length(donors))), donors)
+  cf <- fold[m$Donor_ID]
+  score_cells <- function(genes, cells) { genes <- intersect(genes, rownames(Xn)); if (length(genes) < 3) return(rep(NA, sum(cells)))
+    Matrix::colMeans(log1p(Xn[genes, cells, drop = FALSE])) }
+  held <- matrix(NA_real_, ncol(Xn), length(defs), dimnames = list(colnames(Xn), names(defs)))
+  full <- held; ldo_overlap <- matrix(NA, 5, length(defs), dimnames = list(NULL, names(defs)))
+  for (s in names(defs)) full[, s] <- score_cells(sig_list[[s]], rep(TRUE, ncol(Xn)))
+  for (k in 1:5) { tr <- cf != k; te <- cf == k; cat("fold", k, "held-out cells", sum(te), "\n")
+    for (s in names(defs)) { g <- stats_for(defs[[s]]$inn & tr, defs[[s]]$out & tr, s)
+      ldo_overlap[k, s] <- length(intersect(g, sig_list[[s]])); held[te, s] <- score_cells(g, te) } }
+  ldo <- bind_rows(lapply(names(defs), function(s) { inn <- defs[[s]]$inn; out <- defs[[s]]$out
+    others <- !inn  # all other epithelial cells
+    data.frame(signature = s, n_cells = sum(inn), n_donors_with_state = length(unique(m$Donor_ID[inn])),
+      n_donors_ge10 = sum(table(m$Donor_ID[inn]) >= 10),
+      AUC_heldout_vs_other_epi = auc_fun(held[, s], inn), AUC_heldout_vs_training_contrast = auc_fun(held[inn | out, s], inn[inn | out]),
+      AUC_fullsig_in_sample = auc_fun(full[, s], inn), mean_gene_overlap_fold_vs_full = mean(ldo_overlap[, s]),
+      AUC_low_libsize_alone = auc_fun(-lib, inn)) }))
+  ## per-donor held-out AUC (donors with >= 10 cells of the state), robustness
+  ldo$median_AUC_per_heldout_donor <- sapply(ldo$signature, function(s) { inn <- defs[[s]]$inn
+    dd <- names(which(table(m$Donor_ID[inn]) >= 10)); if (!length(dd)) return(NA)
+    median(sapply(dd, function(d) { c0 <- m$Donor_ID == d; auc_fun(held[c0, s], inn[c0]) }), na.rm = TRUE) })
+  print(ldo)
+  ## epithelial-state means of each gene (for purity rule) and non-epithelial lineage table
+  non_epi_L1 <- setdiff(colnames(L1$mean), c(epi_L1, "NA"))
+  gene_tab <- bind_rows(lapply(names(sig_list), function(s) { g <- intersect(sig_list[[s]], rownames(Ns)); inn <- defs[[s]]$inn
+    mi <- Matrix::rowMeans(Xn[g, inn, drop = FALSE])
+    nm <- L1$mean[g, non_epi_L1, drop = FALSE]; nd <- L1$det[g, non_epi_L1, drop = FALSE]
+    l2_non <- setdiff(colnames(L2$mean), c(epi_l2, "NA")); n2 <- L2$mean[g, l2_non, drop = FALSE]
+    data.frame(signature = s, gene = g, state_mean_CPM10k = mi, epi_all_mean = L1$mean[g, epi_L1],
+      max_nonepi_L1 = colnames(nm)[max.col(nm, ties.method = "first")], max_nonepi_L1_mean = apply(nm, 1, max),
+      max_nonepi_L1_det = apply(nd, 1, max),
+      max_nonepi_L2 = colnames(n2)[max.col(n2, ties.method = "first")], max_nonepi_L2_mean = apply(n2, 1, max),
+      nm, check.names = FALSE) }))
+  gene_tab$ratio_state_vs_max_nonepi <- gene_tab$state_mean_CPM10k / pmax(pmax(gene_tab$max_nonepi_L1_mean, gene_tab$max_nonepi_L2_mean), 1e-3)
+  qs::qsave(list(ldo = ldo, ldo_overlap = ldo_overlap, gene_tab = gene_tab, L1 = L1, L2 = L2, dn_lib = dn_lib, dn_ct = dn_ct,
+                 dn_grp = dn_grp, repro = repro, epi_L1 = epi_L1), file.path(OUT, "B1_pccat_validation.qs"))
+  write.csv(ldo, file.path(OUT, "B1_leave_donor_out_AUC.csv"), row.names = FALSE)
+  write.csv(gene_tab, file.path(OUT, "B1_signature_genes_nonepithelial_expression.csv"), row.names = FALSE)
+  rm(Xn, Ns); invisible(gc()); cat("Stage 1 done\n")
+}
+
+```
+
+### Stages 2 and 3: measurement quality in PRINCE and direct search
+- **In-situ purity rules.** On TMM log-CPM of patient AOIs, compute the median tumour-minus-CD45⁺ difference per gene in primary and bone tissue, and the Spearman correlation with deconvolved myeloid and erythroid fractions across tumour AOIs. A gene is purity-safe if it is on the panel, its state/non-epithelial ratio in the atlas is ≥4, it is not >0.25 log₂ higher in CD45⁺ AOIs, and it has no ρ > 0.3 with marrow fractions.
+- **Re-scoring.** Original and purity-safe sets, plus Hallmark androgen response, are scored with singscore on each stratum's LOQ gene universe (≥5 genes). Control AOIs are scored in the Archival universe of their segment. A lenient mean-z score over all panel genes of each safe set is added for interpretation only.
+- **Coherence and confounding.** Mean pairwise correlation of batch-centred log-CPM is compared with 500 random gene sets matched on expression (20 bins), giving a z score and empirical P. Spearman correlations with tumour, myeloid, marrow, T/NK and erythroid fractions and with % genes above LOQ need ≥10 AOIs. Reliability is 1 − (control variance / patient Archival variance).
+- **Stage 3.** NE genes are called above the per-AOI LOQ. Within each tumour stratum, double-low AOIs have *FOLH1* and Hallmark AR scores both in the lowest 10% or 25%. The stage writes NE-positive AOIs (≥2 core NE genes, or *CHGA*, *CHGB* and *SYP* all above LOQ), NE detection rates by stratum and in control tissue, per-patient counts of double-low AOIs, and Wilcoxon comparisons of double-low against other tumour AOIs.
+
+```{r comp-33b-state-validation-03}
+## =============================== STAGE 2 + 3: PRINCE =============================================
+if (stage %in% c("2", "all")) {
+  B1 <- qs::qread(file.path(OUT, "B1_pccat_validation.qs")); gene_tab <- B1$gene_tab
+  se <- qs::qread("phase2_se_qc_filtered.qs"); cd <- as.data.frame(colData(se))
+  U <- qs::qread(file.path(COMP_DIR, "R1_loq", "loq_gene_universes.qs")); uni <- U$universes; loq_aoi <- U$aoi
+  dec <- qs::qread(file.path(COMP_DIR, "C3_deconvolution", "deconvolution_proportions.qs"))
+  msig <- readRDS(file.path(PMCC_DIR, "msigdb_gene_sets.rds"))
+  artefact_re <- "^(USP17L|PRAMEF|NBPF|OR[0-9]+[A-Z]+[0-9]+)"
+  counts_all <- assay(se, "all_count"); counts_all <- counts_all[!grepl(artefact_re, rownames(counts_all)), ]
+  code <- c("CD45+" = "CD45", "PSMA+" = "PSMA", "PanCK+PSMA-" = "PanCKPSMA"); tps <- c("Archival", "Screening", "Cycle1")
+  is_ctrl <- cd$response_group_neat == "Control"
+  ## per-AOI LOQ calls on raw counts
+  loq <- loq_aoi[colnames(se), "LOQ_std"]; above <- sweep(as.matrix(counts_all), 2, loq, ">")
+
+  ## ---- in-situ rules (PRINCE): CD45+ vs tumour AOIs; correlation with myeloid/erythroid in bone tumour AOIs
+  lc_all <- cpm(calcNormFactors(DGEList(counts_all[, !is_ctrl])), log = TRUE, prior.count = 1); cdn <- cd[!is_ctrl, ]
+  tum <- cdn$segment_name %in% c("PSMA+", "PanCK+PSMA-"); imm <- cdn$segment_name == "CD45+"
+  prim <- cdn$timepoint == "Archival"; bone <- cdn$timepoint %in% c("Screening", "Cycle1")
+  sgg <- intersect(unique(gene_tab$gene), rownames(lc_all))
+  lfc_tum_cd45 <- function(sel) apply(lc_all[sgg, , drop = FALSE], 1, function(x) median(x[tum & sel]) - median(x[imm & sel]))
+  insitu <- data.frame(gene = sgg, tum_minus_CD45_primary = lfc_tum_cd45(prim), tum_minus_CD45_bone = lfc_tum_cd45(bone))
+  bt <- which(tum & bone); bta <- colnames(lc_all)[bt]; lb <- dec$lineage_bone
+  okb <- bta %in% rownames(lb)
+  insitu$rho_bone_tumour_Myeloid <- apply(lc_all[sgg, bt[okb]], 1, function(x) cor(x, lb[bta[okb], "Myeloid"], method = "spearman"))
+  insitu$rho_bone_tumour_Erythroid <- apply(lc_all[sgg, bt[okb]], 1, function(x) cor(x, lb[bta[okb], "Erythroid_progenitor"], method = "spearman"))
+  pt <- which(tum & prim); pta <- colnames(lc_all)[pt]; lp <- dec$lineage_primary; okp <- pta %in% rownames(lp)
+  insitu$rho_primary_tumour_Myeloid <- apply(lc_all[sgg, pt[okp]], 1, function(x) cor(x, lp[pta[okp], "Myeloid"], method = "spearman"))
+  gene_tab <- left_join(gene_tab, insitu, by = "gene")
+  ## purity rules
+  gene_tab <- gene_tab %>% mutate(
+    flag_ref_nonepi = ratio_state_vs_max_nonepi < 4,
+    on_panel = gene %in% rownames(counts_all),
+    flag_insitu_CD45 = !is.na(tum_minus_CD45_primary) & (tum_minus_CD45_primary < -0.25 | tum_minus_CD45_bone < -0.25),  # CD45+ AOIs higher by > 0.25 log2
+    flag_insitu_marrow = !is.na(rho_bone_tumour_Myeloid) & (rho_bone_tumour_Myeloid > 0.3 | rho_bone_tumour_Erythroid > 0.3 | rho_primary_tumour_Myeloid > 0.3),
+    purity_safe = on_panel & !flag_ref_nonepi & !flag_insitu_CD45 & !flag_insitu_marrow)
+  write.csv(gene_tab, file.path(OUT, "B2_signature_gene_purity_flags.csv"), row.names = FALSE)
+  key <- c("NE_all", "NE_FOXA2", "NE_EZH2", "NE_CHG+", "DNPC_like", "Hillock", "Hillock_all", "Club_all", "Basal_all", "LPCs_all")
+  safe_list <- lapply(setNames(names(sig_list), paste0(names(sig_list), "_safe")), function(s) gene_tab$gene[gene_tab$signature == s & gene_tab$purity_safe])
+  safe_def <- bind_rows(lapply(names(safe_list), function(s) if (length(safe_list[[s]])) data.frame(signature = s, gene = safe_list[[s]]) ))
+  write.csv(safe_def, file.path(OUT, "B2_purity_safe_signatures.csv"), row.names = FALSE)
+
+  ## ---- re-score (comp_33 method) original + safe, incl. control AOIs (scored in the Archival universe of the segment)
+  all_sets <- c(sig_list, safe_list, list(AR_Hallmark = msig$H$HALLMARK_ANDROGEN_RESPONSE))
+  sc <- list(); qual <- list(); lcs <- list()
+  for (sg in names(code)) for (tp in c(tps, "Control")) {
+    sid <- paste0(code[sg], "__", tp); usid <- if (tp == "Control") paste0(code[sg], "__Archival") else sid
+    g <- intersect(uni[[usid]]$g10, rownames(counts_all))
+    idx <- which(cd$segment_name == sg & (if (tp == "Control") is_ctrl else (!is_ctrl & cd$timepoint == tp)))
+    lc <- cpm(calcNormFactors(DGEList(counts_all[g, idx])), log = TRUE, prior.count = 1); rk <- rankGenes(lc); lcs[[sid]] <- lc
+    S <- sapply(all_sets, function(gs) { gg <- intersect(gs, rownames(lc)); if (length(gg) >= 5) simpleScore(rk, upSet = gg)$TotalScore else rep(NA, ncol(lc)) })
+    sc[[sid]] <- data.frame(aoi = colnames(lc), stratum = sid, segment = sg, timepoint = cd$timepoint[idx], subject_id = cd$subject_id[idx],
+      response = cd$response_group_neat[idx], batch = cd$study_batch[idx], pct_above_LOQ_std = loq_aoi[colnames(lc), "pct_above_LOQ_std"],
+      FOLH1 = lc["FOLH1", ], AR = if ("AR" %in% rownames(lc)) lc["AR", ] else NA, S, check.names = FALSE)
+    ## lenient supplementary score for purity-safe sets: mean within-stratum z of logCPM over ALL panel genes of the safe set
+    ## (>= 2 genes, LOQ not required; n genes above LOQ reported) -- for interpretation only, below-LOQ genes add noise
+    lf <- cpm(calcNormFactors(DGEList(counts_all[, idx])), log = TRUE, prior.count = 1); zf <- t(scale(t(lf)))
+    for (s in names(safe_list)) { gg <- intersect(safe_list[[s]], rownames(zf))
+      sc[[sid]][[paste0(s, "_meanz")]] <- if (length(gg) >= 2) colMeans(zf[gg, , drop = FALSE], na.rm = TRUE) else NA
+      sc[[sid]][[paste0(s, "_nLOQ")]] <- length(intersect(gg, g)) }
+    qual[[sid]] <- data.frame(stratum = sid, signature = names(all_sets), n_genes = lengths(all_sets),
+      n_above_LOQ = sapply(all_sets, function(gs) length(intersect(gs, g)))) }
+  scores <- bind_rows(sc); write.csv(scores, file.path(OUT, "B2_PRINCE_aoi_scores_original_and_safe.csv"), row.names = FALSE)
+
+  ## ---- coherence vs expression-matched random sets (batch-centred logCPM, patient AOIs only)
+  set.seed(7); coh <- list()
+  for (sid in grep("Control", names(lcs), invert = TRUE, value = TRUE)) {
+    lc <- lcs[[sid]]; b <- scores$batch[scores$stratum == sid]
+    lcc <- lc; for (bb in unique(b)) lcc[, b == bb] <- lcc[, b == bb] - rowMeans(lcc[, b == bb, drop = FALSE])
+    mu <- rowMeans(lc); bins <- cut(rank(mu), 20, labels = FALSE); names(bins) <- rownames(lc)
+    mpc <- function(gg) { C <- cor(t(lcc[gg, , drop = FALSE])); mean(C[upper.tri(C)], na.rm = TRUE) }
+    for (s in c(names(sig_list), names(safe_list))) { gg <- intersect(all_sets[[s]], rownames(lc)); if (length(gg) < 3) next
+      obs <- mpc(gg); nul <- replicate(500, mpc(unlist(lapply(bins[gg], function(bi) sample(names(bins)[bins == bi], 1)))))
+      coh[[paste(sid, s)]] <- data.frame(stratum = sid, signature = s, n_genes_scored = length(gg), mean_pairwise_r = obs,
+        null_mean = mean(nul), null_sd = sd(nul), z = (obs - mean(nul)) / sd(nul), p_emp = (sum(nul >= obs) + 1) / 501) } }
+  coh <- bind_rows(coh)
+
+  ## ---- association with deconvolution and AOI quality
+  lin <- rbind(cbind(as.data.frame(dec$lineage_primary)[, c("Epithelial_tumour", "Myeloid", "T_NK")], Erythroid_progenitor = NA, Bone_cells = NA),
+               as.data.frame(dec$lineage_bone)[, c("Epithelial_tumour", "Myeloid", "T_NK", "Erythroid_progenitor", "Bone_cells")])
+  lin$aoi <- c(rownames(dec$lineage_primary), rownames(dec$lineage_bone)); lin$Marrow <- lin$Myeloid + ifelse(is.na(lin$Erythroid_progenitor), 0, lin$Erythroid_progenitor)
+  sd2 <- left_join(scores %>% filter(timepoint != "ControlTissue", response != "Control"), lin, by = "aoi")
+  cov <- c("Epithelial_tumour", "Myeloid", "Marrow", "T_NK", "Erythroid_progenitor", "pct_above_LOQ_std")
+  assoc <- bind_rows(lapply(unique(sd2$stratum), function(sid) { d <- sd2[sd2$stratum == sid, ]
+    bind_rows(lapply(c(names(sig_list), names(safe_list), "AR_Hallmark"), function(s) { x <- d[[s]]; if (all(is.na(x))) return(NULL)
+      data.frame(stratum = sid, signature = s, t(sapply(cov, function(v) if (sum(!is.na(d[[v]]) & !is.na(x)) >= 10 && sd(d[[v]], na.rm = TRUE) > 0) cor(x, d[[v]], method = "spearman", use = "complete") else NA))) })) }))
+  names(assoc)[-(1:2)] <- paste0("rho_", cov)
+
+  ## ---- technical noise: control-tissue AOIs (technical replicates) vs patient Archival AOIs
+  noise <- bind_rows(lapply(names(code), function(sg) { c0 <- scores[scores$stratum == paste0(code[sg], "__Control"), ]
+    p0 <- scores[scores$stratum == paste0(code[sg], "__Archival"), ]
+    bind_rows(lapply(c(names(sig_list), names(safe_list), "AR_Hallmark"), function(s) if (all(is.na(p0[[s]]))) NULL else
+      data.frame(segment = sg, signature = s, sd_control = sd(c0[[s]], na.rm = TRUE), sd_patient_archival = sd(p0[[s]], na.rm = TRUE),
+        reliability = 1 - var(c0[[s]], na.rm = TRUE) / var(p0[[s]], na.rm = TRUE)))) }))
+
+  qtab <- bind_rows(qual) %>% mutate(frac_above_LOQ = n_above_LOQ / n_genes) %>%
+    left_join(coh %>% dplyr::select(stratum, signature, mean_pairwise_r, z, p_emp), by = c("stratum", "signature")) %>%
+    left_join(assoc, by = c("stratum", "signature"))
+  write.csv(qtab, file.path(OUT, "B2_measurement_quality_by_stratum.csv"), row.names = FALSE)
+  write.csv(noise, file.path(OUT, "B2_control_tissue_reliability.csv"), row.names = FALSE)
+
+  ## =============================== STAGE 3: direct search ==========================================
+  ne_g <- intersect(c("CHGA", "CHGB", "SYP", "SCG3", "SCG2", "INSM1", "ASCL1", "ENO2", "NCAM1", "KRT7"), rownames(above))
+  ne_call <- as.data.frame(t(above[ne_g, ])); colnames(ne_call) <- paste0(ne_g, "_aboveLOQ"); ne_call$aoi <- rownames(ne_call)
+  ne_call$n_core_NE_aboveLOQ <- rowSums(ne_call[, paste0(intersect(c("CHGA", "CHGB", "SYP", "INSM1", "ASCL1", "SCG2"), ne_g), "_aboveLOQ")])
+  ne_cnt <- as.data.frame(t(as.matrix(counts_all[intersect(c("CHGA", "CHGB", "SYP"), rownames(counts_all)), ]))); colnames(ne_cnt) <- paste0(colnames(ne_cnt), "_count"); ne_cnt$aoi <- rownames(ne_cnt)
+  nefr <- data.frame(aoi = c(rownames(dec$prop_bone), rownames(dec$prop_primary)),
+    NE_fraction = c(dec$prop_bone[, "Tumour_NE"], dec$prop_primary[, "NE"]))
+  full3 <- scores %>% left_join(ne_call, by = "aoi") %>% left_join(ne_cnt, by = "aoi") %>% left_join(nefr, by = "aoi") %>% left_join(lin, by = "aoi")
+  tumour <- full3 %>% filter(segment %in% c("PSMA+", "PanCK+PSMA-"), response != "Control") %>% group_by(stratum) %>%
+    mutate(FOLH1_pct = percent_rank(FOLH1), ARH_pct = percent_rank(AR_Hallmark), AR_pct = percent_rank(AR),
+           double_low_d10 = FOLH1_pct <= 0.10 & ARH_pct <= 0.10, double_low_q25 = FOLH1_pct <= 0.25 & ARH_pct <= 0.25) %>% ungroup()
+  safe_cols <- intersect(paste0(key, "_safe"), names(tumour))
+  ## percentile of each safe score within stratum (for profiling)
+  for (s in c(safe_cols, key)) if (s %in% names(tumour)) tumour <- tumour %>% group_by(stratum) %>% mutate(!!paste0(s, "_pct") := percent_rank(.data[[s]])) %>% ungroup()
+  dl <- tumour %>% filter(double_low_q25)
+  write.csv(tumour, file.path(OUT, "B3_tumour_aoi_profile.csv"), row.names = FALSE)
+  write.csv(dl, file.path(OUT, "B3_double_low_AOIs_q25.csv"), row.names = FALSE)
+  ## NE evidence across all patient AOIs + controls
+  ne_all <- full3 %>% mutate(CHGA_CHGB_SYP_all = CHGA_aboveLOQ & CHGB_aboveLOQ & SYP_aboveLOQ)
+  write.csv(ne_all %>% filter(n_core_NE_aboveLOQ >= 2 | CHGA_CHGB_SYP_all) %>% arrange(desc(n_core_NE_aboveLOQ)),
+            file.path(OUT, "B3_NE_positive_AOIs.csv"), row.names = FALSE)
+  ne_rate <- ne_all %>% mutate(grp = ifelse(response == "Control", "Control", stratum)) %>% group_by(grp) %>%
+    summarise(n = n(), across(all_of(paste0(ne_g, "_aboveLOQ")), mean), CHGA_CHGB_SYP_all = sum(CHGA_CHGB_SYP_all), ge2_core = sum(n_core_NE_aboveLOQ >= 2))
+  write.csv(ne_rate, file.path(OUT, "B3_NE_gene_detection_rates.csv"), row.names = FALSE)
+  ## patient-level enrichment of double-low AOIs and response
+  pat_dl <- tumour %>% group_by(subject_id, response) %>% summarise(n_tumour_aoi = n(), n_double_low_d10 = sum(double_low_d10), n_double_low_q25 = sum(double_low_q25),
+    max_NE_core = max(n_core_NE_aboveLOQ), n_CHGA_aboveLOQ = sum(CHGA_aboveLOQ), .groups = "drop") %>% arrange(desc(n_double_low_q25))
+  write.csv(pat_dl, file.path(OUT, "B3_patient_double_low_summary.csv"), row.names = FALSE)
+  ## double-low vs other tumour AOIs: profile contrasts
+  prof_vars <- c(paste0(safe_cols), key, "Myeloid", "Marrow", "Epithelial_tumour", "pct_above_LOQ_std", "NE_fraction", "KRT7_aboveLOQ", "CHGA_aboveLOQ", "n_core_NE_aboveLOQ")
+  prof <- bind_rows(lapply(intersect(prof_vars, names(tumour)), function(v) { x <- as.numeric(tumour[[v]])
+    data.frame(variable = v, median_double_low_q25 = median(x[tumour$double_low_q25], na.rm = TRUE), median_other = median(x[!tumour$double_low_q25], na.rm = TRUE),
+      wilcox_p = tryCatch(wilcox.test(x[tumour$double_low_q25], x[!tumour$double_low_q25])$p.value, error = function(e) NA)) }))
+  write.csv(prof, file.path(OUT, "B3_double_low_vs_other_profile.csv"), row.names = FALSE)
+  qs::qsave(list(gene_tab = gene_tab, safe = safe_list, scores = scores, coh = coh, assoc = assoc, noise = noise, qtab = qtab,
+                 tumour = tumour, ne_rate = ne_rate, pat_dl = pat_dl, prof = prof), file.path(OUT, "B2_B3_results.qs"))
+  cat("Stage 2/3 done\n")
+}
+```

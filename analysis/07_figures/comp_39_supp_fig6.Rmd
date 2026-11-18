@@ -1,0 +1,180 @@
+---
+title: "Supplementary figure: Bayesian pooling, purity-split AOI models, selection models and radiobiology"
+subtitle: "PRINCE spatial transcriptomics: `comp_39_supp_fig6`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+Figure script that assembles the robustness and patient-selection analyses added after the v4 figure set into one six-panel figure. Panels: (a) pooled response effects from the Bayesian hierarchical model; (b) shrunken stratum-specific *FOLH1* effects; (c) *FOLH1* patient-permutation P from AOI-level mixed models with between- and within-patient purity terms; (d) cross-validated ROC curves for PSA50 failure; (e) decision curve; (f) the pre-specified radiobiology panel. The file is written as `Manuscript_v4/SupplementaryFig6` and becomes Supplementary Fig. 1 of the manuscript. No statistics are computed here; every value is read from the R13–R16 outputs.
+
+**Manuscript items supported**
+
+- Supplementary Fig. 1a–f (released as `Manuscript_v4/SupplementaryFig6`, copied to `manuscript/figures/` by `tools/assemble_figures.sh`)
+
+**Pipeline step:** `./run_pipeline.sh --only 39_supp_fig6`. Approximate runtime: seconds.
+
+**Inputs**
+
+- `results/R15_bayes_hierarchical/A_pooled_effect_mu.csv`
+- `results/R15_bayes_hierarchical/A_stratum_shrunken_beta.csv`
+- `results/R13_aoi_dream_purity/B_feature_models.csv`
+- `results/R13_aoi_dream_purity/B_feature_models_cycle1.csv`
+- `results/R16_prediction/oof_predictions.qs`
+- `results/R16_prediction/A_model_performance.csv`
+- `results/R16_prediction/B_decision_curve.csv`
+- `results/R14_radiobiology/B_radiobiology_vs_response.csv`
+- `results/R14_radiobiology/A_set_coherence.csv`
+
+**Outputs**
+
+- `results/Manuscript_v4/SupplementaryFig6.pdf`
+- `results/Manuscript_v4/SupplementaryFig6.png`
+
+**Depends on**: `comp_35_aoi_dream_purity`, `comp_36_radiobiology`, `comp_37_bayes_hierarchical`, `comp_38_prediction`
+
+## Analysis
+
+Header: the six panels and their source analyses (R13–R16).
+
+Shared theme, compartment colours and stratum labels, then panels a–c:
+- **a**, posterior mean and 95% credible interval of the pooled effect μ (τ prior scale 0.5) for each feature, for pre-treatment (6 strata) and all (9 strata) models. The number shown is the posterior probability of the observed direction over all strata.
+- **b**, shrunken *FOLH1* effect per stratum from the nine-stratum model, with the between-stratum s.d. τ in the subtitle.
+- **c**, −log₁₀ patient-permutation P for *FOLH1* under models M0–M3 (no purity, + SpatialDecon, + ESTIMATE, + SpatialDecon + signal depth), combining the Archival/Screening and Cycle1 runs.
+
+```{r comp-39-supp-fig6-01}
+## ============================================================================
+## PRINCE manuscript v4 -- Supplementary Fig. 6: robustness and translational analyses added after v4
+##  a. Bayesian hierarchical pooling across strata (R15): pooled PSA effect per feature
+##  b. FOLH1 shrunken stratum effects (R15, all nine strata)
+##  c. AOI-level mixed models with within/between-patient purity terms (R13): FOLH1 patient-permutation P
+##  d. Patient-selection models (R16): cross-validated ROC for PSA50 failure
+##  e. Decision curve (R16)
+##  f. Pre-specified radiobiology panel (R14): association with PSA change
+## Inputs: results/R13..R16; output: Manuscript_v4/SupplementaryFig6.{pdf,png}
+## ============================================================================
+
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({ library(dplyr); library(tidyr); library(ggplot2); library(patchwork); library(scales); library(ragg); library(qs); library(pROC) })
+fig_dir <- file.path(COMP_DIR, "Manuscript_v4")
+seg_cols <- c("CD45+" = "#7B9E3E", "PSMA+" = "#B5338A", "PanCK+PSMA-" = "#2C8C99")
+seg_lab <- c("CD45+" = "CD45+", "PSMA+" = "PSMA+", "PanCK+PSMA-" = "PanCK+PSMA−")
+code <- c("CD45+" = "CD45", "PSMA+" = "PSMA", "PanCK+PSMA-" = "PanCKPSMA"); seg_from_code <- setNames(names(code), code)
+tp_levels <- c("Archival", "Screening", "Cycle1")
+tp_lab <- c(Archival = "Primary", Screening = "Bone pre", Cycle1 = "Bone on")
+div_pal <- c("#2B5C8A", "#F7F7F7", "#B2412E")
+theme_set(theme_classic(base_size = 7, base_family = "Helvetica") +
+  theme(axis.line = element_line(linewidth = 0.3), axis.ticks = element_line(linewidth = 0.3), axis.text = element_text(colour = "grey15"),
+        strip.background = element_blank(), strip.text = element_text(size = 6.5, face = "bold"),
+        legend.key.size = unit(3, "mm"), legend.text = element_text(size = 6), legend.title = element_text(size = 6.5),
+        plot.title = element_text(size = 7, face = "bold"), plot.subtitle = element_text(size = 6, colour = "grey30"),
+        plot.tag = element_text(size = 9, face = "bold"), plot.title.position = "plot"))
+stars <- function(p) ifelse(is.na(p), "", ifelse(p < 0.001, "***", ifelse(p < 0.01, "**", ifelse(p < 0.05, "*", ""))))
+strat_lab <- function(s) paste0(seg_lab[seg_from_code[sub("__.*", "", s)]], " · ", tp_lab[sub(".*__", "", s)])
+strat_order <- as.vector(t(outer(names(code), tp_levels, function(a, b) paste0(code[a], "__", b))))
+p_ <- function(...) file.path(COMP_DIR, ...)
+
+feat_lab <- c(FOLH1 = "FOLH1", P53_core = "p53 core", FOLH1_rel_AR = "FOLH1 relative to AR", Metallothionein = "Metallothionein",
+              AR_Hallmark = "AR (Hallmark)", HLA_I = "HLA class I", Hallmark_IFNa = "IFN-α (Hallmark)", Hypoxia_Buffa = "Hypoxia (Buffa)", NRF2_targets = "NRF2 targets")
+
+## a. pooled effect
+mu <- read.csv(p_("R15_bayes_hierarchical", "A_pooled_effect_mu.csv")) %>% filter(tau_scale == 0.5) %>%
+  mutate(set = factor(ifelse(set == "baseline", "Pre-treatment (6 strata)", "All (9 strata)"), c("Pre-treatment (6 strata)", "All (9 strata)")),
+         feature = factor(feat_lab[feature], rev(feat_lab)), Pdir = pmax(P_mu_neg, 1 - P_mu_neg))
+pa <- ggplot(mu, aes(mu_mean, feature, colour = set)) + geom_vline(xintercept = 0, linewidth = 0.3, colour = "grey60") +
+  geom_errorbarh(aes(xmin = mu_lo, xmax = mu_hi), height = 0, linewidth = 0.4, position = position_dodge(0.6)) +
+  geom_point(size = 1.3, position = position_dodge(0.6)) +
+  geom_text(data = mu %>% filter(set == "All (9 strata)"), aes(x = 0.5, label = sprintf("%.2f", Pdir)), colour = "grey20", size = 1.9, hjust = 0) +
+  scale_colour_manual(values = c("Pre-treatment (6 strata)" = "#3B6FB6", "All (9 strata)" = "grey25"), name = NULL) +
+  scale_x_continuous(limits = c(-0.55, 0.62), breaks = c(-0.4, -0.2, 0, 0.2, 0.4)) +
+  labs(x = "Pooled effect μ (s.d. per 50% worse PSA change)", y = NULL, title = "Bayesian pooling across strata",
+       subtitle = "Posterior mean, 95% CrI; number = P(direction), all strata") +
+  theme(legend.position = "bottom", axis.text.y = element_text(size = 6))
+
+## b. FOLH1 shrunken stratum effects
+be <- read.csv(p_("R15_bayes_hierarchical", "A_stratum_shrunken_beta.csv")) %>% filter(feature == "FOLH1", set == "all", tau_scale == 0.5) %>%
+  mutate(seg = seg_from_code[sub("__.*", "", stratum)], lab = factor(strat_lab(stratum), rev(strat_lab(strat_order))))
+pb <- ggplot(be, aes(beta_mean, lab, colour = seg)) + geom_vline(xintercept = 0, linewidth = 0.3, colour = "grey60") +
+  geom_errorbarh(aes(xmin = beta_lo, xmax = beta_hi), height = 0, linewidth = 0.4) + geom_point(size = 1.3) +
+  scale_colour_manual(values = seg_cols, guide = "none") + labs(x = "Shrunken FOLH1 effect (95% CrI)", y = NULL, title = "FOLH1 by stratum",
+  subtitle = sprintf("Between-stratum s.d. τ = %.2f", read.csv(p_("R15_bayes_hierarchical", "A_pooled_effect_mu.csv")) %>% filter(feature == "FOLH1", set == "all", tau_scale == 0.5) %>% pull(tau_mean)))
+
+## c. AOI-level purity-split models
+r13 <- bind_rows(read.csv(p_("R13_aoi_dream_purity", "B_feature_models.csv")),
+                 if (file.exists(p_("R13_aoi_dream_purity", "B_feature_models_cycle1.csv"))) read.csv(p_("R13_aoi_dream_purity", "B_feature_models_cycle1.csv"))) %>%
+  filter(feature == "FOLH1") %>% distinct(stratum, model, .keep_all = TRUE) %>%
+  mutate(model = factor(model, c("M0", "M1", "M2", "M3"), c("No purity", "+ SpatialDecon", "+ ESTIMATE", "+ SpatialDecon + depth")),
+         seg = seg_from_code[sub("__.*", "", stratum)], lab = factor(strat_lab(stratum), rev(strat_lab(strat_order))))
+pc <- ggplot(r13, aes(-log10(p_perm), lab, shape = model)) + geom_vline(xintercept = -log10(c(0.05)), linetype = 2, linewidth = 0.3, colour = "grey50") +
+  geom_point(aes(colour = seg), size = 1.4, position = position_dodge(0.6)) + scale_colour_manual(values = seg_cols, guide = "none") +
+  scale_shape_manual(values = c(1, 16, 17, 15), name = NULL) +
+  labs(x = "−log₁₀ patient-permutation P (FOLH1)", y = NULL, title = "AOI-level mixed models, within/between purity",
+       subtitle = "FOLH1 ~ PSA + batch + purity_between + purity_within + (1 | patient)") +
+  theme(legend.position = "bottom") + guides(shape = guide_legend(nrow = 2))
+
+```
+
+Panels d–f and assembly:
+- **d**, ROC curves from repeated stratified CV out-of-fold probabilities (*FOLH1* from either source) for SUVmean, tissue *FOLH1* and SUV + *FOLH1* + ctDNA, with CV and leave-pair-out AUC.
+- **e**, decision-curve net benefit against flagging all patients.
+- **f**, radiobiology heatmap of β for PSA change per stratum; * marks P < 0.05, and the median gene–gene correlation of each set across pre-treatment strata is shown in brackets.
+
+The panels are combined with patchwork and saved as PDF (cairo) and PNG (300 dpi).
+
+```{r comp-39-supp-fig6-02}
+## d. ROC (repeated stratified CV out-of-fold probabilities, FOLH1 from either source)
+oof <- qs::qread(p_("R16_prediction", "oof_predictions.qs"))$either
+perf <- read.csv(p_("R16_prediction", "A_model_performance.csv")) %>% filter(folh1_source == "either")
+mods <- c(SUV = "PSMA-PET SUVmean", FOLH1 = "Tissue FOLH1", SUV_FOLH1_ctDNA = "SUV + FOLH1 + ctDNA")
+mcol <- c("PSMA-PET SUVmean" = "grey45", "Tissue FOLH1" = "#B5338A", "SUV + FOLH1 + ctDNA" = "#3B6FB6")
+rocd <- bind_rows(lapply(names(mods), function(m) { r <- roc(oof$fail, oof[[paste0("pr_", m)]], quiet = TRUE, direction = "<")
+  data.frame(model = mods[m], fpr = 1 - r$specificities, tpr = r$sensitivities) %>% arrange(fpr, tpr) }))
+lab_d <- perf %>% filter(model %in% names(mods)) %>% mutate(model = mods[model],
+  txt = sprintf("%s  %.2f / %.2f", c("PSMA-PET SUVmean" = "SUVmean", "Tissue FOLH1" = "FOLH1", "SUV + FOLH1 + ctDNA" = "SUV+FOLH1+ctDNA")[model], AUC_rep_strat_CV, AUC_leave_pair_out))
+pd <- ggplot(rocd, aes(fpr, tpr, colour = model)) + geom_abline(linetype = 2, linewidth = 0.3, colour = "grey60") + geom_step(linewidth = 0.5) +
+  annotate("text", x = 1, y = 0.28, label = "AUC: CV / LPO", hjust = 1, size = 1.9, colour = "grey20") +
+  annotate("text", x = 1, y = c(0.19, 0.11, 0.03), label = lab_d$txt[match(mods, lab_d$model)], hjust = 1, size = 1.9, colour = mcol[mods]) +
+  scale_colour_manual(values = mcol, guide = "none") + coord_equal() +
+  labs(x = "1 − specificity", y = "Sensitivity", title = "Predicting PSA50 failure (8/32)", subtitle = "Out-of-fold, 50 × stratified 4-fold CV")
+
+## e. decision curve
+dca <- read.csv(p_("R16_prediction", "B_decision_curve.csv")) %>% filter(folh1_source == "either", strategy %in% c("flag_all", names(mods))) %>%
+  mutate(strategy = ifelse(strategy == "flag_all", "Flag all", mods[strategy]))
+pe <- ggplot(dca, aes(threshold, net_benefit, colour = strategy)) + geom_hline(yintercept = 0, linewidth = 0.3, colour = "grey60") +
+  geom_line(linewidth = 0.5) + scale_colour_manual(values = c(mcol, "Flag all" = "grey80"), name = NULL) +
+  coord_cartesian(ylim = c(-0.1, 0.25)) + scale_x_continuous(labels = percent) +
+  labs(x = "Risk threshold for flagging non-response", y = "Net benefit", title = "Decision curve", subtitle = "Out-of-fold probabilities") +
+  theme(legend.position = c(0.98, 0.98), legend.justification = c(1, 1), legend.background = element_blank())
+
+## f. radiobiology panel
+rb <- read.csv(p_("R14_radiobiology", "B_radiobiology_vs_response.csv"))
+coh <- read.csv(p_("R14_radiobiology", "A_set_coherence.csv")) %>% filter(!grepl("Cycle1", stratum)) %>% group_by(set) %>% summarise(coh = median(coherence, na.rm = TRUE))
+set_lab <- c(Hypoxia_Buffa = "Hypoxia (Buffa)", Hypoxia_Winter = "Hypoxia (Winter)", Hypoxia_Hallmark = "Hypoxia (Hallmark)", RSI = "Radiosensitivity index",
+  DNA_repair_Hallmark = "DNA repair (Hallmark)", NHEJ_KEGG = "NHEJ (KEGG)", HR_KEGG = "HR (KEGG)", ROS_Hallmark = "ROS (Hallmark)", NRF2_targets = "NRF2 targets",
+  Glutathione_KEGG = "Glutathione (KEGG)", Metallothionein = "Metallothioneins", G2M_Hallmark = "G2M (Hallmark)")
+cv <- coh$coh[match(names(set_lab), coh$set)]
+set_full <- setNames(paste0(set_lab, ifelse(is.na(cv), "", sprintf("  [%.2f]", cv))), names(set_lab))
+rb <- rb %>% mutate(setl = factor(set_full[set], rev(set_full)), lab = factor(strat_lab(stratum), strat_lab(strat_order)))
+pf <- ggplot(rb, aes(lab, setl, fill = beta_psa)) + geom_tile(colour = "white", linewidth = 0.3) + geom_text(aes(label = stars(p_psa)), size = 2, vjust = 0.75) +
+  scale_fill_gradient2(low = div_pal[1], mid = div_pal[2], high = div_pal[3], limits = c(-0.5, 0.5), oob = squish, name = "β (s.d. per\n50% PSA)") +
+  labs(x = NULL, y = NULL, title = "Pre-specified radiobiology panel", subtitle = "Positive = higher with worse response\n[median gene–gene ρ]; * P < 0.05; none FDR < 0.1") +
+  theme(axis.line = element_blank(), axis.ticks = element_blank(), axis.text.x = element_text(angle = 40, hjust = 1, size = 5.6), axis.text.y = element_text(size = 5.8), plot.title.position = "panel")
+
+fig <- (pa | pb | pc) / ((pd | pe | wrap_elements(full = pf)) + plot_layout(widths = c(1, 1, 1.45))) + plot_layout(heights = c(1, 1.05)) + plot_annotation(tag_levels = "a")
+ggsave(file.path(fig_dir, "SupplementaryFig6.pdf"), fig, width = 183 * 1.25, height = 175, units = "mm", device = cairo_pdf)
+ggsave(file.path(fig_dir, "SupplementaryFig6.png"), fig, width = 183 * 1.25, height = 175, units = "mm", dpi = 300, device = agg_png)
+cat("saved SupplementaryFig6\n")
+```

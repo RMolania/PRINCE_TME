@@ -1,0 +1,273 @@
+---
+title: "Patient-level clinical and outcome table"
+subtitle: "PRINCE spatial transcriptomics: `comp_01_clinical`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+This script builds the single patient table that all later analyses join to. Outcomes, laboratory values and PET measures are taken from the GeoMx sample annotation, one row per patient, with control tissue excluded. They are joined to the trial's translational dataset: cycle-5 PSMA-PET, ctDNA fraction, tumour mutational burden and ctDNA genomic alterations. The primary continuous outcome is `psa_change_capped` = min(maximal PSA change, +100%). PSA rises are unbounded while falls stop at −100%, so the cap keeps one or two progressors from dominating the fits. PSA50 is re-derived as maximal PSA change ≤ −50%; this corrects one inconsistent source record (PMC-005), as confirmed by the investigators. A ctDNA alteration is coded as unknown when ctDNA was undetected.
+
+The script also tabulates AOI availability per patient × timepoint × compartment and the numbers of patients with matched timepoints. It then runs clinical-only associations: Spearman correlation with continuous maximal PSA change, non-responder versus responder comparisons (Wilcoxon or Fisher test; intermediate patients excluded), and Cox models for rPFS and PSA-PFS (hazard ratio per s.d., or altered versus not; likelihood-ratio P). Right-skewed quantities are log-transformed, and BH-FDR is applied per outcome.
+
+**Manuscript items supported**
+
+- Supplementary Table 1 (patient table), Supplementary Table 2 (AOI availability) and Supplementary Table 13 (clinical and ctDNA feature associations), written to the workbook by comp_11
+- Supplementary Fig. 2a (univariable Cox hazard ratios, drawn by comp_11)
+- Methods: Patients, samples and outcomes (capped PSA change, PSA50 correction, ctDNA alteration coding)
+- The patient table is used by nearly every downstream script
+
+**Pipeline step:** `./run_pipeline.sh --only 01_clinical`. Approximate runtime: under a minute.
+
+**Inputs**
+
+- `data/PRINCE_GeoMx_SE_RawCount_SampleAnnot_Filtered.qs`
+- `data/phase2_se_qc_filtered.qs`
+- `data/raw/PRINCE_translational_data_DECRYPTED.xlsx`
+
+**Outputs**
+
+- `results/C1_clinical/patient_table.qs`
+- `results/C1_clinical/patient_table.csv`
+- `results/C1_clinical/aoi_availability_patient_x_timepoint_segment.csv`
+- `results/C1_clinical/matched_sample_availability.csv`
+- `results/C1_clinical/clinical_feature_associations.csv`
+- `results/C1_clinical/km_rPFS_psaPFS_by_response.pdf`
+- `results/C1_clinical/psa_waterfall.pdf`
+
+**Depends on**: `comp_00b_bone_cohort`
+
+## Analysis
+
+Script header: contents of the patient layer and the definition of the capped PSA outcome.
+
+Sources the shared set-up, loads packages and checks available memory.
+
+```{r comp-01-clinical-01}
+## ============================================================================
+## PRINCE comprehensive analysis -- C1: clinical / patient layer
+##   * one patient table: GeoMx colData outcomes + labs + PET, joined to the
+##     translational sheet (PET C5D1, ctDNA, TMB, ctDNA genomic alterations)
+##   * AOI availability matrix (patient x timepoint x segment) + matched subsets
+##   * clinical-only associations with: continuous max PSA change (Spearman),
+##     NR vs R (Wilcoxon / Fisher; Intermediate excluded), rPFS and PSA-PFS (Cox)
+## Primary continuous outcome used downstream: psa_change_capped =
+## min(max_psa_change, +100) -- PSA rises are unbounded (up to ~+300%) while
+## declines stop at -100%, so the cap stops 1-2 progressors dominating fits.
+## ============================================================================
+
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({
+  library(qs); library(SummarizedExperiment); library(dplyr); library(tidyr)
+  library(readxl); library(survival); library(ggplot2)
+})
+setwd(PRINCE_DIR)
+check_ram_or_stop(20)
+
+```
+
+### Patient table
+Extracts one row per patient from the bone-only GeoMx annotation: response group, PSA outcomes, survival times, baseline laboratory values, PET measures, BRCA status and number of doses. Adds the capped PSA change and re-derives PSA50 from maximal PSA change, printing any patient whose source code changes. Joins the translational sheet: FDG and PSMA-PET, RECIP, ctDNA, TMB and 13 alteration columns. Alterations are coded 1/0, or NA when ctDNA was undetected.
+
+```{r comp-01-clinical-02}
+## ---- patient table ---------------------------------------------------------
+se_full <- qs::qread("PRINCE_GeoMx_SE_RawCount_SampleAnnot_Filtered.qs")
+cd <- as.data.frame(colData(se_full))
+num <- function(v) suppressWarnings(as.numeric(as.character(v)))
+
+pt_cols <- c("subject_id", "response_group_neat", "max_psa_change", "best_psa_response",
+             "PSA_50_response_.1.Yes.", "PSA_90_response_.1.Yes.",
+             "r_pfstime", "r_pfsevent", "psa_pfstime", "psa_pfsevent", "ostime", "osevent",
+             "bor_radiological", "recist_progression", "age", "ecog", "psa", "initial_psa_level",
+             "neu_lborres", "lym_lborres", "hgb_lborres", "lborres_alp", "lborres_alb", "lborres_ldh",
+             "psma_vol_trorres", "psma_suvmax_trorres", "psma_suvmean_trorres",
+             "fdg_vol_trorres", "fdg_suvmax_trorres", "fdg_suvmean_trorres",
+             "dsmh_brca_trorres", "number_of_doses")
+pt <- cd[!is.na(cd$subject_id) & cd$response_group_neat != "Control", pt_cols] %>%
+  distinct() %>%
+  rename(PSA50 = `PSA_50_response_.1.Yes.`, PSA90 = `PSA_90_response_.1.Yes.`)
+stopifnot(!anyDuplicated(pt$subject_id))
+num_cols <- setdiff(names(pt), c("subject_id", "response_group_neat", "bor_radiological",
+                                 "recist_progression", "dsmh_brca_trorres"))
+pt[num_cols] <- lapply(pt[num_cols], num)
+pt$psa_change_capped <- pmin(pt$max_psa_change, 100)
+# PSA50 re-derived from max PSA change: the source field codes PMC-005 (max PSA
+# change +297%, Non_Responder) as PSA50 = 1 -- a data error confirmed by the user
+# (2026-10-25). All other patients already agree with this rule.
+pt$PSA50_source <- pt$PSA50
+pt$PSA50 <- as.integer(pt$max_psa_change <= -50)
+cat("PSA50 recoded for:", paste(pt$subject_id[pt$PSA50 != pt$PSA50_source], collapse = ", "), "\n")
+
+tr <- read_excel("raw/PRINCE_translational_data_DECRYPTED.xlsx")
+tr$subject_id <- sub("^PRI-", "", tr$PATIENT)
+alt_cols <- c("AR", "TP53", "PTEN", "RB1", "TSG_alt", "PIK3CA", "SPOP", "DDR_alt",
+              "BRCA2", "ATM", "CHEK2", "CDK12", "MMRd")
+# ctDNA-undetected => alteration status unknown; "Altered (NULL)" = null/biallelic => altered
+alt_code <- function(v) ifelse(grepl("undetected", v, ignore.case = TRUE) | is.na(v), NA,
+                         as.integer(grepl("^Altered|^Yes", v)))
+tr_clean <- tr %>%
+  transmute(subject_id,
+            FDG_BL_positive = as.integer(FDGPET_BL_result == "Positive"),
+            PSMAPET_BL_vol = num(PSMAPET_BL_total_tumor_volume),
+            PSMAPET_BL_SUVmax = num(PSMAPET_BL_SUVmax),
+            PSMAPET_BL_SUVmean = num(PSMAPET_BL_SUVmean),
+            PSMAPET_C5D1_vol = num(PSMAPET_C5D1_total_tumor_volume),
+            PSMAPET_C5D1_SUVmean = num(PSMAPET_C5D1_SUVmean),
+            PSMAPET_vol_change_pct = num(PSMAPET_BL_to_C5D1_change),
+            RECIP,
+            ctDNA_BL = num(ctDNA_BL), ctDNA_BL_detected = as.integer(ctDNA_BL_cat == "Detected"),
+            ctDNA_C5D1 = num(ctDNA_C5D1),
+            TMB_ctDNA = num(TMB_ctDNA), TMB_tissue = num(TMB_tissue),
+            across(all_of(alt_cols), alt_code, .names = "alt_{.col}"))
+pt <- left_join(pt, tr_clean, by = "subject_id")
+cat("Patients:", nrow(pt), "| matched to translational sheet:",
+    sum(pt$subject_id %in% tr_clean$subject_id), "\n")
+print(table(pt$response_group_neat))
+
+```
+
+### AOI availability
+Counts QC-passing AOIs per patient × timepoint × compartment. Summarises, by response group, how many patients have archival and screening, screening and cycle-1, or all three timepoints. These matched sets define the paired analyses.
+
+```{r comp-01-clinical-03}
+## ---- AOI availability (QC-filtered set used downstream) ----------------------
+se <- qs::qread("phase2_se_qc_filtered.qs")
+acd <- as.data.frame(colData(se)) %>% filter(response_group_neat != "Control")
+avail <- acd %>% count(subject_id, response_group_neat, timepoint, segment_name) %>%
+  pivot_wider(names_from = c(timepoint, segment_name), values_from = n, values_fill = 0)
+has_tp <- acd %>% distinct(subject_id, timepoint) %>% mutate(v = 1L) %>%
+  pivot_wider(names_from = timepoint, values_from = v, values_fill = 0L)
+matched <- has_tp %>% left_join(pt[, c("subject_id", "response_group_neat")], by = "subject_id") %>%
+  # pair counts first: summarise() would otherwise see the already-summed columns
+  summarise(.by = response_group_neat,
+            n_patients = n(),
+            Arch_and_Scr = sum(Archival & Screening), Scr_and_C1 = sum(Screening & Cycle1),
+            Arch_and_C1 = sum(Archival & Cycle1), all_three = sum(Archival & Screening & Cycle1),
+            n_Archival = sum(Archival), n_Screening = sum(Screening), n_Cycle1 = sum(Cycle1))
+cat("\nMatched-sample availability by response group:\n"); print(as.data.frame(matched))
+
+```
+
+### Clinical associations
+For each continuous or binary feature (log1p for right-skewed quantities):
+- Spearman correlation with maximal PSA change;
+- non-responder versus responder (Wilcoxon for continuous, Fisher for binary; intermediate patients excluded);
+- Cox models for rPFS and PSA-PFS with the hazard ratio per s.d. (or altered versus not), likelihood-ratio P, and no fit when there are fewer than three events.
+
+BH-FDR is applied separately for each outcome.
+
+```{r comp-01-clinical-04}
+## ---- clinical associations -------------------------------------------------------
+cont_feats <- c("age", "ecog", "psa", "initial_psa_level", "neu_lborres", "lym_lborres",
+                "hgb_lborres", "lborres_alp", "lborres_alb", "lborres_ldh",
+                "psma_vol_trorres", "psma_suvmax_trorres", "psma_suvmean_trorres",
+                "fdg_vol_trorres", "fdg_suvmax_trorres", "fdg_suvmean_trorres",
+                "PSMAPET_BL_SUVmean", "PSMAPET_BL_vol", "PSMAPET_vol_change_pct",
+                "ctDNA_BL", "TMB_ctDNA", "TMB_tissue")
+bin_feats <- c("FDG_BL_positive", "ctDNA_BL_detected", paste0("alt_", alt_cols))
+# right-skewed quantities modelled on log scale
+log_feats <- c("psa", "initial_psa_level", "lborres_alp", "lborres_ldh", "psma_vol_trorres",
+               "fdg_vol_trorres", "PSMAPET_BL_vol", "ctDNA_BL")
+
+nrr <- pt %>% filter(response_group_neat %in% c("Responder", "Non_Responder"))
+cox_lrt <- function(time, event, x) {
+  ok <- !is.na(time) & !is.na(event) & !is.na(x)
+  if (sum(event[ok]) < 3 || length(unique(x[ok])) < 2) return(c(HR = NA, lo = NA, hi = NA, p = NA))
+  f <- coxph(Surv(time[ok], event[ok]) ~ x[ok])
+  ci <- exp(confint(f))
+  c(HR = unname(exp(coef(f))), lo = ci[1], hi = ci[2],
+    p = unname(anova(f)[["Pr(>|Chi|)"]][2]))
+}
+assoc <- bind_rows(lapply(c(cont_feats, bin_feats), function(f) {
+  x <- pt[[f]]
+  is_bin <- f %in% bin_feats
+  if (!is_bin && f %in% log_feats) x <- log1p(pmax(x, 0))
+  xs <- if (is_bin) x else as.numeric(scale(x))   # Cox HR per SD (continuous) or altered vs not
+  sp <- suppressWarnings(cor.test(x, pt$max_psa_change, method = "spearman", exact = FALSE))
+  xg <- nrr[[f]]; if (!is_bin && f %in% log_feats) xg <- log1p(pmax(xg, 0))
+  g <- nrr$response_group_neat
+  p_grp <- tryCatch(if (is_bin) fisher.test(table(xg, g))$p.value else
+    wilcox.test(xg[g == "Non_Responder"], xg[g == "Responder"], exact = FALSE)$p.value,
+    error = function(e) NA)
+  rp <- cox_lrt(pt$r_pfstime, pt$r_pfsevent, xs)
+  pp <- cox_lrt(pt$psa_pfstime, pt$psa_pfsevent, xs)
+  data.frame(feature = f, type = ifelse(is_bin, "binary", ifelse(f %in% log_feats, "log-continuous", "continuous")),
+             n = sum(!is.na(x)), n_NR = sum(!is.na(xg[g == "Non_Responder"])),
+             rho_psa_change = unname(sp$estimate), p_psa_change = sp$p.value,
+             p_NR_vs_R = p_grp,
+             HR_rPFS = rp["HR"], HR_rPFS_lo = rp["lo"], HR_rPFS_hi = rp["hi"], p_rPFS = rp["p"],
+             HR_psaPFS = pp["HR"], HR_psaPFS_lo = pp["lo"], HR_psaPFS_hi = pp["hi"], p_psaPFS = pp["p"])
+})) %>%
+  mutate(across(c(p_psa_change, p_NR_vs_R, p_rPFS, p_psaPFS), ~p.adjust(.x, "BH"),
+                .names = "fdr_{sub('p_', '', .col)}")) %>%
+  arrange(p_psa_change)
+rownames(assoc) <- NULL
+
+options(width = 220)
+cat("\nClinical associations (HR per SD for continuous; altered vs unaltered for binary):\n")
+print(assoc %>% mutate(across(where(is.numeric), ~signif(.x, 3))), row.names = FALSE)
+
+```
+
+### Outcome consistency checks
+Prints the PSA-change range per response group, the Spearman correlation of maximal PSA change with rPFS time, and Kaplan–Meier event counts and medians by response group.
+
+```{r comp-01-clinical-05}
+## ---- outcome concordance sanity --------------------------------------------------
+cat("\nOutcome checks:\n")
+print(with(pt, tapply(max_psa_change, response_group_neat, range)))
+cat("Spearman(max PSA change, rPFS time):",
+    round(cor(pt$max_psa_change, pt$r_pfstime, method = "spearman", use = "complete"), 2), "\n")
+km <- survfit(Surv(r_pfstime, r_pfsevent) ~ response_group_neat, data = pt)
+print(summary(km)$table[, c("records", "events", "median")])
+
+```
+
+### Diagnostic plots
+Kaplan–Meier curves of rPFS and PSA-PFS by response group, and a PSA waterfall plot.
+
+```{r comp-01-clinical-06}
+## ---- plots ------------------------------------------------------------------------
+pdf(out_path("C1_clinical", "km_rPFS_psaPFS_by_response.pdf"), width = 10, height = 4.5)
+par(mfrow = c(1, 2))
+for (o in list(c("r_pfstime", "r_pfsevent", "rPFS"), c("psa_pfstime", "psa_pfsevent", "PSA-PFS"))) {
+  f <- survfit(as.formula(sprintf("Surv(%s, %s) ~ response_group_neat", o[1], o[2])), data = pt)
+  plot(f, col = c("orange", "red", "steelblue"), lwd = 2, xlab = "months", ylab = o[3], main = o[3])
+  legend("topright", legend = sub("response_group_neat=", "", names(f$strata)),
+         col = c("orange", "red", "steelblue"), lwd = 2, bty = "n")
+}
+dev.off()
+p_wf <- ggplot(pt %>% arrange(max_psa_change) %>% mutate(rank = row_number()),
+               aes(rank, max_psa_change, fill = response_group_neat)) +
+  geom_col() + geom_hline(yintercept = c(-50, 0), linetype = c("dashed", "solid")) +
+  scale_fill_manual(values = c(Responder = "steelblue", Intermediate = "orange", Non_Responder = "red")) +
+  theme_bw() + labs(x = "patient", y = "max PSA change (%)", fill = "", title = "PSA waterfall (GeoMx patients)")
+ggsave(out_path("C1_clinical", "psa_waterfall.pdf"), p_wf, width = 8, height = 4)
+
+```
+
+### Save
+Writes the patient table (qs and csv), the AOI availability and matched-sample tables, and the clinical association table.
+
+```{r comp-01-clinical-07}
+## ---- save ---------------------------------------------------------------------------
+qs::qsave(pt, out_path("C1_clinical", "patient_table.qs"))
+write.csv(pt, out_path("C1_clinical", "patient_table.csv"), row.names = FALSE)
+write.csv(avail, out_path("C1_clinical", "aoi_availability_patient_x_timepoint_segment.csv"), row.names = FALSE)
+write.csv(matched, out_path("C1_clinical", "matched_sample_availability.csv"), row.names = FALSE)
+write.csv(assoc, out_path("C1_clinical", "clinical_feature_associations.csv"), row.names = FALSE)
+cat("\nC1 complete.\n")
+```

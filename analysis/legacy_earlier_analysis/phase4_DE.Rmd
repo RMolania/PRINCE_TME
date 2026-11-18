@@ -1,0 +1,280 @@
+---
+title: "Legacy: AOI-level non-responder versus responder differential expression with RUV covariates"
+subtitle: "PRINCE spatial transcriptomics: `phase4_DE`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "results_legacy"))
+```
+
+## Overview
+
+This is a legacy script from the earlier all-site analysis (primary tumours plus metastatic biopsies from bone, lymph node and soft tissue). It is included for transparency and is not part of the bone-only pipeline. In each of the six archival and pre-treatment strata, it tested non-responders against responders at AOI level with limma-voom. Patient was treated as a blocking factor through two-pass `duplicateCorrelation` with `voomWithQualityWeights`, and the RUV-4 factors from phase3 were included as covariates. Models with and without the RUV covariates were compared, and a pseudobulk-by-patient model was run on one stratum (archival CD45⁺) as a cross-check of the blocking approach.
+
+These AOI-level results produced the large gene counts reported earlier. The current manuscript re-evaluates them at patient level (Extended Data Fig. 8a). Its frozen top tables with RUV covariates (`data/previous_analysis/Phase4_DE/*_toptable_with_RUV.csv`) are read by comp_18.
+
+**Manuscript items supported**
+
+- Extended Data Fig. 8a (earlier AOI-level gene counts at FDR < 0.05), via comp_18 reading the frozen `data/previous_analysis/Phase4_DE/*_toptable_with_RUV.csv`
+- Results: Re-evaluation of earlier neuroendocrine, purity and bone-niche findings
+
+**Pipeline step:** `./run_pipeline.sh --legacy` (optional; not needed to reproduce the manuscript, whose frozen inputs are in `data/previous_analysis/`). Approximate runtime: minutes to tens of minutes (two-pass duplicateCorrelation per model).
+
+**Inputs**
+
+- `results_legacy/phase3_ruv_results.rds`
+
+**Outputs**
+
+- `results_legacy/previous_analysis/Phase4_DE/*_toptable_with_RUV.csv (frozen copies in data/previous_analysis/Phase4_DE/)`
+- `results_legacy/previous_analysis/Phase4_DE/*_toptable_without_RUV.csv`
+- `results_legacy/previous_analysis/Phase4_DE/*_{pval_hist_with_vs_without,volcano,MA}.pdf`
+- `results_legacy/Results/Phase4_DE/CD45__Archival_toptable_pseudobulk.csv`
+- `results_legacy/phase4_de_results.rds`
+- `results_legacy/phase4_summary_table.csv`
+
+**Depends on**: `phase3_normalization`
+
+## Analysis
+
+### Legacy AOI-level differential expression
+
+The header describes the contrast, how the intermediate group was handled, the RUV sensitivity comparison and patient blocking.
+
+Sets the working directory to `results_legacy/` and loads the phase3 results. `run_limma_voom()` builds a cell-means design `~ 0 + response group`, optionally with RUV factors W. It applies TMM, then voom, estimates the intra-patient correlation, refits with `voomWithQualityWeights` and re-estimates the correlation. It then fits the blocked model, forms the non-responder − responder contrast and applies robust eBayes.
+
+```{r phase4-DE-01}
+## ============================================================================
+## PRINCE Trial GeoMx DSP -- Phase 4: Differential Expression
+##
+## Primary contrast (Q1): Non_Responder vs Responder, within each of the 6
+## Phase 3 strata (segment x {Archival, Screening}). Intermediate is retained
+## as its own coefficient where present (not tested) rather than dropped, to
+## match the starter Rmd's ~0+bio / NRvsR contrast convention. Excluded
+## entirely for PSMA+ (see phase3b -- Intermediate is 100% aliased with
+## study_batch there, so it was dropped upstream of normalization already).
+##
+## Per user instruction: test RUV-4(/RUV-III-PRPS) W covariates + limma-voom
+## (already the pattern in Prince_Archival_CD45.Rmd), and COMPARE the DE
+## results with vs without the RUV covariates as a sensitivity check, before
+## proceeding to downstream analysis (Phase 5+).
+##
+## Nesting: multiple ROIs/AOIs per patient are not independent (see master
+## plan's "ROI-nesting trap"). Primary approach = limma duplicateCorrelation
+## with patient (subject_id) as a blocking factor, 2-pass as in the starter
+## Rmd. Cross-validated against a pseudobulk-by-patient approach on one
+## representative stratum (CD45+/Archival) per the master plan's requirement.
+## ============================================================================
+
+suppressMessages({
+  library(SummarizedExperiment); library(dplyr)
+  library(edgeR); library(limma); library(ggplot2)
+})
+
+PRINCE_ROOT <- normalizePath(Sys.getenv("PRINCE_ROOT", "."))
+RAW_DIR <- file.path(PRINCE_ROOT, "data", "interim")     # all-site QC'd objects written by comp_00a_qc
+dir.create(file.path(PRINCE_ROOT, "results_legacy"), showWarnings = FALSE)
+setwd(file.path(PRINCE_ROOT, "results_legacy"))           # legacy outputs; frozen copies used downstream are in data/previous_analysis
+dir.create("Results/Phase4_DE", showWarnings = FALSE, recursive = TRUE)
+
+phase3 <- readRDS("phase3_ruv_results.rds")
+
+get_W <- function(entry) {
+  if (!is.null(entry$W)) return(entry$W)
+  aname <- paste0("RUVIIIprps_k_", entry$chosen_k)
+  entry$se@metadata$RUVIII$W[[aname]]
+}
+
+run_limma_voom <- function(counts, bio, pid, W = NULL, contrast_name = "NRvsR") {
+  design_base <- model.matrix(~0 + bio)
+  colnames(design_base) <- make.names(colnames(design_base))
+  if (!is.null(W)) {
+    colnames(W) <- paste0("W", seq_len(ncol(W)))
+    design <- cbind(design_base, W)
+  } else {
+    design <- design_base
+  }
+  dge <- DGEList(counts)
+  dge <- calcNormFactors(dge, method = "TMM")
+  v1 <- voom(dge, design, plot = FALSE)
+  dupcor1 <- duplicateCorrelation(v1, design, block = pid)
+  v2 <- voomWithQualityWeights(dge, design, block = pid, correlation = dupcor1$consensus, plot = FALSE)
+  dupcor2 <- duplicateCorrelation(v2, design, block = pid)
+  fit <- lmFit(v2, design, block = pid, correlation = dupcor2$consensus)
+  bio_cols <- colnames(design_base)
+  # NRvsR contrast: Non_Responder - Responder (robust to exact make.names spelling)
+  nr_col <- bio_cols[grepl("Non_Responder", bio_cols)]
+  r_col  <- bio_cols[grepl("^bioResponder$|Responder$", bio_cols) & !grepl("Non_Responder", bio_cols)]
+  stopifnot(length(nr_col) == 1, length(r_col) == 1)
+  cm <- makeContrasts(contrasts = paste0(nr_col, " - ", r_col), levels = design)
+  fit2 <- contrasts.fit(fit, cm)
+  fit2 <- eBayes(fit2, robust = TRUE)
+  tt <- topTable(fit2, number = Inf, sort.by = "P")
+  list(fit = fit2, toptable = tt, design = design, consensus = dupcor2$consensus)
+}
+
+summary_rows <- list()
+de_results <- list()
+
+```
+
+### Per-stratum fits
+
+For each stratum the script fits the model with and without RUV covariates. It counts genes at FDR < 0.05 and their overlap, estimates π₀ (convest), saves P-value histograms, volcano and MA plots, and writes both top tables. Patient numbers per response group are printed because the patient, not the AOI, is the true sample size.
+
+```{r phase4-DE-02}
+for (stratum_id in names(phase3)) {
+  entry <- phase3[[stratum_id]]
+  cat("\n\n================ DE STRATUM:", stratum_id, "(", entry$segment, "/", entry$timepoint, ") ================\n")
+
+  cd <- entry$cd
+  counts <- assay(entry$se, "all_count")
+  bio <- droplevels(factor(cd$response_group_neat))
+  pid <- factor(cd$subject_id)
+  cat("Response levels in this stratum:", paste(levels(bio), collapse = ", "), "\n")
+  n_by_group <- cd %>% distinct(subject_id, response_group_neat) %>% count(response_group_neat)
+  cat("Patients per response group (true n, not AOI n):\n"); print(as.data.frame(n_by_group))
+  cat("N AOIs:", ncol(entry$se), " N patients:", length(unique(cd$subject_id)), "\n")
+
+  W <- get_W(entry)
+  cat("W dim (RUV covariates, chosen k =", entry$chosen_k, "):", paste(dim(W), collapse = "x"), "\n")
+
+  fit_with <- run_limma_voom(counts, bio, pid, W = W)
+  fit_without <- run_limma_voom(counts, bio, pid, W = NULL)
+
+  n_sig_with <- sum(fit_with$toptable$adj.P.Val < 0.05)
+  n_sig_without <- sum(fit_without$toptable$adj.P.Val < 0.05)
+  sig_with <- rownames(fit_with$toptable)[fit_with$toptable$adj.P.Val < 0.05]
+  sig_without <- rownames(fit_without$toptable)[fit_without$toptable$adj.P.Val < 0.05]
+  overlap <- length(intersect(sig_with, sig_without))
+  cat("DE genes (FDR<0.05) WITH RUV covariates:", n_sig_with, "\n")
+  cat("DE genes (FDR<0.05) WITHOUT RUV covariates:", n_sig_without, "\n")
+  cat("Overlap:", overlap, "\n")
+
+  pi0_with <- tryCatch(limma::propTrueNull(fit_with$toptable$P.Value, method = "convest"), error = function(e) NA)
+  pi0_without <- tryCatch(limma::propTrueNull(fit_without$toptable$P.Value, method = "convest"), error = function(e) NA)
+  cat("pi0 (proportion null) with covariates:", round(pi0_with, 3), " without:", round(pi0_without, 3), "\n")
+
+  # diagnostic plots: p-value histograms + volcano (with-covariates model, primary)
+  p_hist <- ggplot() +
+    geom_histogram(aes(x = fit_with$toptable$P.Value, fill = "with RUV covariates"), alpha = 0.5, bins = 40) +
+    geom_histogram(aes(x = fit_without$toptable$P.Value, fill = "without RUV covariates"), alpha = 0.5, bins = 40) +
+    theme_bw() + labs(title = paste("P-value histogram:", stratum_id), x = "p-value", fill = "")
+  ggsave(file.path("Results/Phase4_DE", paste0(stratum_id, "_pval_hist_with_vs_without.pdf")), p_hist, width = 7, height = 4.5)
+
+  vp <- fit_with$toptable
+  vp$sig <- vp$adj.P.Val < 0.05
+  p_volcano <- ggplot(vp, aes(logFC, -log10(P.Value), color = sig)) +
+    geom_point(alpha = 0.6, size = 0.8) + theme_bw() +
+    scale_color_manual(values = c("grey60", "firebrick")) +
+    labs(title = paste("Volcano (NRvsR, with RUV covariates):", stratum_id), color = "FDR<0.05")
+  ggsave(file.path("Results/Phase4_DE", paste0(stratum_id, "_volcano.pdf")), p_volcano, width = 6, height = 5)
+
+  ma <- ggplot(vp, aes(AveExpr, logFC, color = sig)) +
+    geom_point(alpha = 0.6, size = 0.8) + geom_hline(yintercept = 0, linetype = "dashed") +
+    theme_bw() + scale_color_manual(values = c("grey60", "firebrick")) +
+    labs(title = paste("MA plot (NRvsR, with RUV covariates):", stratum_id), color = "FDR<0.05")
+  ggsave(file.path("Results/Phase4_DE", paste0(stratum_id, "_MA.pdf")), ma, width = 6, height = 5)
+
+  write.csv(fit_with$toptable, file.path("Results/Phase4_DE", paste0(stratum_id, "_toptable_with_RUV.csv")))
+  write.csv(fit_without$toptable, file.path("Results/Phase4_DE", paste0(stratum_id, "_toptable_without_RUV.csv")))
+
+  de_results[[stratum_id]] <- list(fit_with = fit_with, fit_without = fit_without,
+                                    bio = bio, pid = pid, counts = counts)
+  summary_rows[[stratum_id]] <- data.frame(
+    stratum = stratum_id, segment = entry$segment, timepoint = entry$timepoint,
+    n_aoi = ncol(entry$se), n_patients = length(unique(cd$subject_id)),
+    n_patients_NR = n_by_group$n[n_by_group$response_group_neat == "Non_Responder"],
+    n_patients_R = n_by_group$n[n_by_group$response_group_neat == "Responder"],
+    n_sig_with_RUV = n_sig_with, n_sig_without_RUV = n_sig_without, overlap = overlap,
+    pi0_with = round(pi0_with, 3), pi0_without = round(pi0_without, 3)
+  )
+}
+
+```
+
+Collects and prints the per-stratum summary.
+
+```{r phase4-DE-03}
+summary_tab <- bind_rows(summary_rows)
+cat("\n\n================ PHASE 4 SUMMARY ACROSS STRATA ================\n")
+print(summary_tab, row.names = FALSE)
+
+```
+
+### Blocking versus pseudobulk cross-check
+
+In archival CD45⁺, counts are summed per patient and the RUV factors averaged per patient. The script fits limma-voom on the pseudobulk and compares it with the blocked AOI-level fit: number of genes at FDR < 0.05, overlap of the top 500 genes and logFC correlation. All results are saved.
+
+```{r phase4-DE-04}
+## ---------------------------------------------------------------------------
+## Nesting cross-validation: duplicateCorrelation vs pseudobulk-by-patient
+## on CD45+/Archival (representative, well-behaved RUV-4 stratum)
+## ---------------------------------------------------------------------------
+cat("\n\n================ NESTING CROSS-VALIDATION: CD45+/Archival ================\n")
+entry <- phase3[["CD45__Archival"]]
+cd <- entry$cd
+counts <- assay(entry$se, "all_count")
+bio <- droplevels(factor(cd$response_group_neat))
+pid <- factor(cd$subject_id)
+W <- get_W(entry)
+
+# pseudobulk: sum counts per patient (within this segment+timepoint stratum)
+pb_groups <- split(seq_len(ncol(counts)), pid)
+pb_counts <- sapply(pb_groups, function(idx) rowSums(counts[, idx, drop = FALSE]))
+pb_bio <- sapply(pb_groups, function(idx) as.character(bio[idx[1]]))
+pb_bio <- droplevels(factor(pb_bio, levels = levels(bio)))
+# pseudobulk W: average W across each patient's AOIs
+pb_W <- t(sapply(pb_groups, function(idx) colMeans(W[idx, , drop = FALSE])))
+colnames(pb_W) <- paste0("W", seq_len(ncol(pb_W)))
+
+cat("Pseudobulk: N patients =", ncol(pb_counts), "\n")
+design_pb <- model.matrix(~0 + pb_bio)
+colnames(design_pb) <- make.names(colnames(design_pb))
+design_pb_full <- cbind(design_pb, pb_W)
+dge_pb <- DGEList(pb_counts); dge_pb <- calcNormFactors(dge_pb, method = "TMM")
+v_pb <- voom(dge_pb, design_pb_full, plot = FALSE)
+fit_pb <- lmFit(v_pb, design_pb_full)
+nr_col <- colnames(design_pb)[grepl("Non_Responder", colnames(design_pb))]
+r_col  <- colnames(design_pb)[grepl("Responder", colnames(design_pb)) & !grepl("Non_Responder", colnames(design_pb))]
+cm_pb <- makeContrasts(contrasts = paste0(nr_col, " - ", r_col), levels = design_pb_full)
+fit_pb2 <- eBayes(contrasts.fit(fit_pb, cm_pb), robust = TRUE)
+tt_pb <- topTable(fit_pb2, number = Inf, sort.by = "P")
+
+tt_dupcor <- de_results[["CD45__Archival"]]$fit_with$toptable
+n_sig_dupcor <- sum(tt_dupcor$adj.P.Val < 0.05)
+n_sig_pb <- sum(tt_pb$adj.P.Val < 0.05)
+common_genes <- intersect(rownames(tt_dupcor), rownames(tt_pb))
+overlap_top500 <- length(intersect(
+  rownames(tt_dupcor)[order(tt_dupcor$P.Value)][1:min(500, nrow(tt_dupcor))],
+  rownames(tt_pb)[order(tt_pb$P.Value)][1:min(500, nrow(tt_pb))]
+))
+logfc_cor <- cor(tt_dupcor[common_genes, "logFC"], tt_pb[common_genes, "logFC"])
+
+cat("DE genes (FDR<0.05): duplicateCorrelation =", n_sig_dupcor, " | pseudobulk =", n_sig_pb, "\n")
+cat("Overlap of top 500 genes by p-value between methods:", overlap_top500, "/ 500\n")
+cat("Correlation of logFC estimates between methods (shared genes):", round(logfc_cor, 3), "\n")
+
+write.csv(tt_pb, "Results/Phase4_DE/CD45__Archival_toptable_pseudobulk.csv")
+
+saveRDS(list(de_results = de_results, summary_table = summary_tab,
+             nesting_crossval = list(tt_dupcor = tt_dupcor, tt_pb = tt_pb,
+                                      n_sig_dupcor = n_sig_dupcor, n_sig_pb = n_sig_pb,
+                                      overlap_top500 = overlap_top500, logfc_cor = logfc_cor)),
+        "phase4_de_results.rds")
+write.csv(summary_tab, "phase4_summary_table.csv", row.names = FALSE)
+
+cat("\nSaved phase4_de_results.rds, phase4_summary_table.csv, and per-stratum",
+    "topTables/plots under Results/Phase4_DE/\n")
+cat("Phase 4 script complete.\n")
+```

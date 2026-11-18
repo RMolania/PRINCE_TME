@@ -1,0 +1,81 @@
+---
+title: "Figure: the standR workflow and its calibration (Extended Data Fig. 10)"
+subtitle: "PRINCE spatial transcriptomics: `comp_24_ed_standR`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+Draws the two-panel figure comparing the standR workflow with the patient-level primary analysis. Panel a shows, per stratum, the number of genes at FDR < 0.05 for non-responders versus responders under standR with AOIs independent, standR with patient blocking and patient pseudobulk (counts + 0.5 on a log scale; pseudobulk counts are not shown for on-treatment strata). Panel b shows, for the pre-treatment bone strata, the observed standR counts against the distribution from 50 patient-shuffled label sets (cross, null median; bar, to the 90th percentile; permutation P).
+
+The figure is saved as `ExtendedDataFig5` in `results/Manuscript_v3/` (its v3 numbering). The final Extended Data Fig. 10 is the title-free render of this script made by `comp_44_run_notitle`.
+
+**Manuscript items supported**
+
+- Extended Data Fig. 10a,b (notitle render of this script by `comp_44_run_notitle`)
+
+**Pipeline step:** `./run_pipeline.sh --only 24_ed_standR`. Approximate runtime: seconds.
+
+**Inputs**
+
+- `results/R5_standR/standR_vs_primary_summary.csv`
+- `results/R5_standR/standR_permutation_calibration.csv`
+
+**Outputs**
+
+- `results/Manuscript_v3/ExtendedDataFig5.pdf`
+- `results/Manuscript_v3/ExtendedDataFig5.png`
+
+**Depends on**: `comp_22_standR_arm`, `comp_23_standR_permutation`
+
+## Analysis
+
+Read the standR summary and permutation tables, relabel strata (Primary, pre-treatment bone, on-treatment bone; CD45+, PSMA+, PanCK+PSMA−), build panel a (dodged bars of significant-gene counts for the three approaches) and panel b (observed count against the permutation median-to-90th-percentile range, annotated with the permutation P), and save the stacked figure as PDF and PNG at 183 mm width.
+
+```{r comp-24-ed-standR-01}
+## PRINCE manuscript v3 -- Extended Data Fig. 5: the standR workflow and its calibration
+##  a  genes at FDR < 0.05 (NR vs R) per stratum: standR AOI-independent, standR patient-blocked,
+##     patient-level pseudobulk (primary)
+##  b  standR counts with real labels vs the same chain run on patient-shuffled labels (50x)
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({ library(dplyr); library(tidyr); library(ggplot2); library(patchwork); library(ragg) })
+fig_dir <- file.path(COMP_DIR, "Manuscript_v3")
+seg_lab <- c(CD45 = "CD45+", PSMA = "PSMA+", PanCKPSMA = "PanCK+PSMA−")
+theme_set(theme_classic(base_size = 7, base_family = "Helvetica") + theme(strip.background = element_blank(),
+  strip.text = element_text(face = "bold"), plot.title = element_text(size = 6.5), plot.tag = element_text(size = 9, face = "bold"),
+  axis.line = element_line(linewidth = 0.3), legend.key.size = unit(3, "mm")))
+s <- read.csv(file.path(COMP_DIR, "R5_standR", "standR_vs_primary_summary.csv")) %>%
+  mutate(seg = factor(seg_lab[sub("__.*", "", stratum)], seg_lab), tp = factor(sub(".*__", "", stratum), c("Archival", "Screening", "Cycle1"),
+                                                                              c("Primary", "Pre-treatment bone", "On-treatment bone")))
+a <- s %>% select(seg, tp, `standR, AOIs independent` = fdr05_AOI_independent, `standR, patient-blocked` = fdr05_patient_blocked,
+                  `Patient pseudobulk (primary)` = fdr05_patient_pseudobulk) %>% pivot_longer(-c(seg, tp)) %>%
+  mutate(name = factor(name, c("standR, AOIs independent", "standR, patient-blocked", "Patient pseudobulk (primary)")))
+ea <- ggplot(a %>% filter(!is.na(value)), aes(seg, value + 0.5, fill = name)) + geom_col(position = position_dodge(0.85), width = 0.8) +
+  geom_text(aes(label = value), position = position_dodge(0.85), vjust = -0.3, size = 1.6) + facet_wrap(~tp) + scale_y_log10(labels = scales::label_comma()) +
+  scale_fill_manual(values = c("#C9A3B8", "#8E4A79", "#1F3A5F"), name = NULL) +
+  labs(x = NULL, y = "Genes at FDR < 0.05, NR vs R (+0.5, log)", title = "standR (Bioconductor) workflow vs patient-level analysis") +
+  theme(legend.position = "bottom", axis.text.x = element_text(angle = 25, hjust = 1))
+p <- read.csv(file.path(COMP_DIR, "R5_standR", "standR_permutation_calibration.csv")) %>%
+  mutate(seg = seg_lab[sub("__.*", "", stratum)], lab = paste0(seg, ", pre-treatment bone\n", analysis))
+eb <- ggplot(p, aes(lab)) + geom_linerange(aes(ymin = perm_median + 0.5, ymax = perm_90pct + 0.5), linewidth = 2.5, colour = "grey75") +
+  geom_point(aes(y = perm_median + 0.5), shape = 4, size = 2, colour = "grey40") + geom_point(aes(y = observed + 0.5), size = 2.2, colour = "#8E4A79") +
+  geom_text(aes(y = observed + 0.5, label = sprintf("observed %d\nperm. P = %.2f", observed, perm_p)), hjust = -0.2, size = 1.8, lineheight = 0.9) +
+  scale_y_log10(labels = scales::label_comma()) + expand_limits(y = 60000) + coord_flip() +
+  labs(x = NULL, y = "Genes at FDR < 0.05 (+0.5, log)", title = "Same standR chain on patient-shuffled labels (50×): cross = median, bar = to 90th percentile")
+ggsave(file.path(fig_dir, "ExtendedDataFig5.pdf"), ea / eb + plot_layout(heights = c(1.3, 1)) + plot_annotation(tag_levels = "a"), width = 183, height = 150, units = "mm", device = cairo_pdf)
+ggsave(file.path(fig_dir, "ExtendedDataFig5.png"), ea / eb + plot_layout(heights = c(1.3, 1)) + plot_annotation(tag_levels = "a"), width = 183, height = 150, units = "mm", dpi = 300, device = agg_png)
+cat("saved ExtendedDataFig5\n")
+```

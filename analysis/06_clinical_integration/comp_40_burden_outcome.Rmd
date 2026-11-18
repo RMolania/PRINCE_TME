@@ -1,0 +1,339 @@
+---
+title: "Clinical-outcome framing: tumour burden, PET and ctDNA cut-points, genotype and prognosis"
+subtitle: "PRINCE spatial transcriptomics: `comp_40_burden_outcome`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+This script places the tissue findings in the clinical framework of the TheraP ctDNA analysis (Kwan et al., Nat Med 2025). It asks whether low tissue *FOLH1* is just a marker of tumour burden, how tissue relates to the published PSMA-PET (SUVmean ≥10) and ctDNA-fraction (2% and 30%) cut-points, whether ctDNA genotype is reflected in tissue phenotype, and which clinical, PET, ctDNA and tissue variables are prognostic.
+
+It first builds a patient-level feature table. Tissue composites are the mean within-stratum z-score over the patient's available PSMA⁺ and PanCK⁺PSMA⁻ pseudobulk (all three compartments for p53, IFN-α and HLA class I). On-treatment induction is the mean standardised paired change. Burden correlations are Spearman with Bonferroni correction across the ten burden variables. *FOLH1* is related to PSA change (linear), PSA50 failure (Firth-penalised logistic) and rPFS and overall survival (Cox), unadjusted and adjusted for log ctDNA fraction alone or with log PSA or SUVmean. PSA50 rates carry exact Clopper–Pearson intervals. ctDNA alterations are related to tissue *FOLH1*, AR and PI3K–AKT–mTOR scores and to SUVmean, with and without ctDNA-fraction adjustment. The script also computes the magnitude of the on-treatment transcriptional shift and univariable hazard ratios.
+
+**Manuscript items supported**
+
+- Fig. 1b (per-patient tissue, ctDNA, PET, RECIP and batch tracks, from `patient_features.qs`)
+- Fig. 2b–d (waterfall coloured by tissue *FOLH1*; PSA50 and rPFS by SUVmean × *FOLH1*) and Fig. 2g (burden-adjusted *FOLH1* models)
+- Fig. 3a–d (tissue vs burden; ctDNA categories; univariable Cox forest; genotype → tissue)
+- Fig. 4g (transcriptional shift vs PSA change)
+- Fig. 6a,b (DNA-repair/SPOP/MMR-altered patients and their tissue percentiles)
+- Supplementary Tables 86–95
+- Results: Tumour burden, genotype and tissue phenotype in the context of TheraP; burden paragraph of the *FOLH1* section; transcriptional shift
+- Methods: Patient-level outcome analyses
+
+**Pipeline step:** `./run_pipeline.sh --only 40_burden_outcome`. Approximate runtime: seconds.
+
+**Inputs**
+
+- `data/phase2_se_qc_filtered.qs`
+- `data/reference/msigdb_gene_sets.rds`
+- `results/C1_clinical/patient_table.qs`
+- `results/C13_pseudobulk_LOQ/pseudobulk_strata.qs`
+- `results/C13_pseudobulk_LOQ/paired_induction_per_patient_deltas.csv`
+- `results/R1_loq/loq_gene_universes.qs`
+
+**Outputs**
+
+- `results/R17_kwan/patient_features.qs`
+- `results/R17_kwan/patient_features.csv`
+- `results/R17_kwan/A_*.csv`
+- `results/R17_kwan/B_*.csv`
+- `results/R17_kwan/C_*.csv`
+- `results/R17_kwan/D_*.csv`
+- `results/R17_kwan/F_*.csv`
+- `results/R17_kwan/I_univariable_cox.csv`
+
+**Depends on**: `comp_00b_bone_cohort`, `comp_01_clinical`, `comp_13b_pseudobulk_loq`, `comp_16_loq_filter`
+
+## Analysis
+
+Header: sections P (patient feature table), A (burden), B (SUVmean × *FOLH1*), C (ctDNA categories), D (alterations → tissue), F (transcriptional shift) and H/I (univariable hazard ratios).
+
+Set-up. Programmes are Hallmark androgen response, Hallmark PI3K–AKT–mTOR, HLA class I, Hallmark IFN-α and p53 core. `score` returns *FOLH1* log-CPM and programme mean z-scores for a pseudobulk stratum.
+
+```{r comp-40-burden-outcome-01}
+## ============================================================================
+## PRINCE -- R17: clinical-outcome framing of the tissue findings (after Kwan et al., Nat Med 2025)
+##  P. Patient-level feature table (baseline composites, on-treatment levels and induction) -> pf.qs
+##  A. Burden: tissue FOLH1 vs ctDNA fraction, PET volume/avidity and labs (Spearman, Bonferroni);
+##     FOLH1 -> PSA change / PSA50 (Firth) / rPFS / OS, unadjusted and adjusted for ctDNA% (+ SUVmean);
+##     per-stratum FOLH1 ~ PSA + batch (+ ctDNA%)
+##  B. PSMA-PET SUVmean >= 10 (published TheraP cut-point) x tissue FOLH1 (cohort median): PSA50, rPFS, OS
+##  C. Baseline ctDNA% categories <2%, 2-30%, >30% (published cut-points): PSA50, rPFS, OS, tissue features
+##  D. ctDNA alterations (TP53, PTEN, RB1, AR, TSG) -> tissue FOLH1 / AR / PI3K-AKT-mTOR, adjusted for ctDNA%;
+##     PTEN vs PSMA SUVmean (Kwan et al. replication)
+##  F. Magnitude of on-treatment transcriptional shift per patient vs response
+##  H/I. Univariable rPFS and OS hazard ratios for clinical, PET, ctDNA and tissue features (forest)
+## Outputs: results/R17_kwan/
+## ============================================================================
+
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({ library(qs); library(SummarizedExperiment); library(dplyr); library(tidyr); library(edgeR); library(survival) })
+setwd(PRINCE_DIR)
+check_ram_or_stop(20)
+out_dir <- file.path(COMP_DIR, "R17_kwan"); dir.create(out_dir, showWarnings = FALSE)
+se <- qs::qread("phase2_se_qc_filtered.qs"); cd <- as.data.frame(colData(se))
+pt <- qs::qread(out_path("C1_clinical", "patient_table.qs"))
+pbs <- qs::qread(out_path("C13_pseudobulk_LOQ", "pseudobulk_strata.qs"))
+uni <- qs::qread(file.path(COMP_DIR, "R1_loq", "loq_gene_universes.qs"))
+msig <- readRDS(file.path(PMCC_DIR, "msigdb_gene_sets.rds"))
+code <- c("CD45+" = "CD45", "PSMA+" = "PSMA", "PanCK+PSMA-" = "PanCKPSMA")
+progs <- list(AR_Hallmark = msig$H$HALLMARK_ANDROGEN_RESPONSE, PI3K_AKT_mTOR = msig$H$HALLMARK_PI3K_AKT_MTOR_SIGNALING,
+  HLA_I = c("HLA-A", "HLA-B", "HLA-C", "B2M", "TAP1", "TAP2", "TAPBP"), Hallmark_IFNa = msig$H$HALLMARK_INTERFERON_ALPHA_RESPONSE,
+  P53_core = c("CDKN1A", "MDM2", "DDB2", "PHLDA3", "GDF15", "TNFRSF10B", "SESN1", "ZMAT3", "RRM2B", "TP53I3"))
+score <- function(lc) { z <- t(scale(t(lc))); cbind(FOLH1 = lc["FOLH1", ], sapply(progs, function(g) colMeans(z[intersect(g, rownames(z)), , drop = FALSE]))) }
+zc <- function(v) as.numeric(scale(v))
+
+```
+
+### P. Patient-level feature table
+- Score every pseudobulk stratum, z-score within stratum, and average over tumour compartments to form *FOLH1* composites: primary, pre-treatment bone, baseline (either) and on-treatment. Baseline AR and PI3K composites, baseline p53, and on-treatment IFN-α and HLA class I are formed the same way.
+- Paired induction of Hallmark p53, IFN-α and MHC class I comes from the per-patient deltas of `comp_13b`, each divided by its s.d. and averaged over compartments.
+- Add AOI counts per timepoint, sequencing batch and the clinical variables (PSA, response, PSA50, rPFS, OS, ctDNA fraction and TheraP category, PET, laboratory values, ECOG, RECIP, ctDNA alterations).
+- Helpers: Firth-penalised logistic regression (iteratively reweighted with the Jeffreys-prior correction; Wald inference), and wrappers for Cox and linear models.
+
+```{r comp-40-burden-outcome-02}
+## ---- P. patient-level features ------------------------------------------------------------------
+long <- bind_rows(lapply(names(pbs), function(sid) { p <- pbs[[sid]]; S <- score(p$lcpm)
+  data.frame(stratum = sid, subject_id = p$meta$subject_id, batch = p$meta$study_batch, S, check.names = FALSE) })) %>%
+  pivot_longer(-c(stratum, subject_id, batch), names_to = "feature", values_to = "value") %>%
+  group_by(stratum, feature) %>% mutate(z = zc(value)) %>% ungroup() %>%
+  mutate(segment = sub("__.*", "", stratum), timepoint = sub(".*__", "", stratum))
+comp_z <- function(feat, tps, segs = c("PSMA", "PanCKPSMA")) long %>% filter(feature == feat, timepoint %in% tps, segment %in% segs) %>%
+  group_by(subject_id) %>% summarise(v = mean(z), .groups = "drop")
+pf <- pt %>% select(subject_id) %>%
+  left_join(comp_z("FOLH1", "Archival") %>% rename(FOLH1_arch = v), by = "subject_id") %>%
+  left_join(comp_z("FOLH1", "Screening") %>% rename(FOLH1_bone = v), by = "subject_id") %>%
+  left_join(comp_z("FOLH1", c("Archival", "Screening")) %>% rename(FOLH1_base = v), by = "subject_id") %>%
+  left_join(comp_z("FOLH1", "Cycle1") %>% rename(FOLH1_on = v), by = "subject_id") %>%
+  left_join(comp_z("AR_Hallmark", c("Archival", "Screening")) %>% rename(AR_base = v), by = "subject_id") %>%
+  left_join(comp_z("AR_Hallmark", "Cycle1") %>% rename(AR_on = v), by = "subject_id") %>%
+  left_join(comp_z("PI3K_AKT_mTOR", c("Archival", "Screening")) %>% rename(PI3K_base = v), by = "subject_id") %>%
+  left_join(comp_z("P53_core", c("Archival", "Screening"), code) %>% rename(P53_base = v), by = "subject_id") %>%
+  left_join(comp_z("Hallmark_IFNa", "Cycle1", code) %>% rename(IFNa_on = v), by = "subject_id") %>%
+  left_join(comp_z("HLA_I", "Cycle1", code) %>% rename(HLA_on = v), by = "subject_id")
+dl <- read.csv(out_path("C13_pseudobulk_LOQ", "paired_induction_per_patient_deltas.csv"))
+ind <- dl %>% filter(programme %in% c("Hallmark_P53", "Hallmark_IFNa", "MHC_I")) %>% group_by(programme) %>% mutate(dz = delta / sd(delta)) %>%
+  group_by(subject_id, programme) %>% summarise(d = mean(dz), .groups = "drop") %>%
+  pivot_wider(names_from = programme, values_from = d) %>% rename(dP53 = Hallmark_P53, dIFNa = Hallmark_IFNa, dHLA = MHC_I)
+pf <- pf %>% left_join(ind, by = "subject_id")
+## tissue availability
+av <- cd %>% filter(response_group_neat != "Control", timepoint %in% c("Archival", "Screening", "Cycle1", "DiseaseProgression")) %>%
+  count(subject_id, timepoint) %>% pivot_wider(names_from = timepoint, values_from = n, values_fill = 0, names_prefix = "nAOI_")
+batch_pt <- cd %>% filter(response_group_neat != "Control") %>% distinct(subject_id, study_batch) %>% group_by(subject_id) %>% summarise(batch = first(study_batch))
+pf <- pf %>% left_join(av, by = "subject_id") %>% left_join(batch_pt, by = "subject_id")
+
+cl <- pt %>% transmute(subject_id, PSA0 = psa, response_group_neat, max_psa_change, psa = psa_change_capped / 50, PSA50, fail = as.integer(PSA50 == 0),
+  r_pfstime, r_pfsevent, ostime, osevent, ctDNA = ctDNA_BL * 100, lctDNA = log10(ctDNA_BL * 100 + 1),
+  ct_cat = cut(ctDNA_BL * 100, c(-Inf, 2, 30, Inf), labels = c("<2%", "2–30%", ">30%"), right = FALSE),
+  SUVmean = PSMAPET_BL_SUVmean, SUV10 = PSMAPET_BL_SUVmean >= 10, SUVmax = PSMAPET_BL_SUVmax, PSMA_TTV = PSMAPET_BL_vol,
+  FDG_MTV = fdg_vol_trorres, FDG_SUVmean = fdg_suvmean_trorres, ALP = lborres_alp, LDH = lborres_ldh, Hb = hgb_lborres,
+  age, ecog, RECIP, ctDNA_C5D1, alt_AR, alt_TP53, alt_PTEN, alt_RB1, alt_TSG_alt, alt_DDR_alt, alt_ATM, alt_SPOP, alt_MMRd, alt_BRCA2, alt_CDK12, alt_CHEK2)
+pf <- cl %>% left_join(pf, by = "subject_id")
+qs::qsave(pf, file.path(out_dir, "patient_features.qs")); write.csv(pf, file.path(out_dir, "patient_features.csv"), row.names = FALSE)
+
+## Firth-penalised logistic regression (Wald inference from the penalised information)
+firth <- function(X, y, it = 100) { b <- rep(0, ncol(X))
+  for (k in 1:it) { p <- plogis(X %*% b)[, 1]; W <- p * (1 - p); XtWX <- crossprod(X * sqrt(W)); Vi <- solve(XtWX)
+    h <- rowSums((X * sqrt(W)) %*% Vi * (X * sqrt(W))); U <- crossprod(X, y - p + h * (0.5 - p)); st <- Vi %*% U; b <- b + st
+    if (max(abs(st)) < 1e-8) break }
+  se <- sqrt(diag(Vi)); cbind(est = b[, 1], se = se, p = 2 * pnorm(-abs(b[, 1] / se))) }
+or_firth <- function(d, v) { d <- d[complete.cases(d[, c("fail", v)]), ]; X <- cbind(1, as.matrix(d[, v])); r <- firth(X, d$fail)[2, ]
+  c(OR = exp(r[1]), lo = exp(r[1] - 1.96 * r[2]), hi = exp(r[1] + 1.96 * r[2]), p = r[3], n = nrow(d)) }
+cox1 <- function(f, d) { s <- tryCatch(summary(coxph(f, d)), error = function(e) NULL); if (is.null(s)) return(c(NA, NA, NA, NA, NA))
+  c(HR = s$conf.int[1, 1], lo = s$conf.int[1, 3], hi = s$conf.int[1, 4], p = s$coefficients[1, 5], n = s$n) }
+lm1 <- function(f, d) { s <- summary(lm(f, d))$coefficients; c(beta = s[2, 1], p = s[2, 4], n = nrow(model.frame(f, d))) }
+
+```
+
+### A. Tumour burden
+- Spearman correlation of ten tissue features with ten burden variables (ctDNA fraction, PSMA SUVmean, SUVmax and TTV, FDG MTV and SUVmean, ALP, LDH, Hb, PSA), Bonferroni-corrected within each tissue feature, requiring ≥6 patients.
+- Kruskal–Wallis test of *FOLH1* across ctDNA categories.
+- *FOLH1* (per s.d.) against PSA change, PSA50 failure (Firth), rPFS and OS: unadjusted, + log ctDNA, + log ctDNA + log PSA, + log ctDNA + SUVmean.
+- Per stratum, *FOLH1* ~ PSA change + batch, with and without log ctDNA fraction.
+
+```{r comp-40-burden-outcome-03}
+## ---- A. burden ------------------------------------------------------------------------------------
+bvars <- c(ctDNA = "ctDNA", SUVmean = "SUVmean", SUVmax = "SUVmax", PSMA_TTV = "PSMA_TTV", FDG_MTV = "FDG_MTV", FDG_SUVmean = "FDG_SUVmean",
+           ALP = "ALP", LDH = "LDH", Hb = "Hb", PSA0 = "PSA0")
+tvars <- c("FOLH1_arch", "FOLH1_bone", "FOLH1_on", "AR_base", "AR_on", "P53_base", "dP53", "dIFNa", "IFNa_on", "HLA_on")
+a_cor <- expand.grid(tissue = tvars, clin = names(bvars), stringsAsFactors = FALSE) %>% rowwise() %>% mutate(
+  n = sum(complete.cases(pf[[tissue]], pf[[clin]])),
+  rho = if (n >= 6) suppressWarnings(cor.test(pf[[tissue]], pf[[clin]], method = "spearman", exact = FALSE))$estimate else NA,
+  p = if (n >= 6) suppressWarnings(cor.test(pf[[tissue]], pf[[clin]], method = "spearman", exact = FALSE))$p.value else NA) %>% ungroup() %>%
+  group_by(tissue) %>% mutate(p_bonf = pmin(1, p * n())) %>% ungroup()
+a_cat <- bind_rows(lapply(c("FOLH1_arch", "FOLH1_bone", "FOLH1_base"), function(v) { d <- pf %>% filter(!is.na(.data[[v]]))
+  data.frame(feature = v, ct_cat = levels(d$ct_cat), n = as.integer(table(d$ct_cat)), median = tapply(d[[v]], d$ct_cat, median),
+             p_KW = kruskal.test(d[[v]] ~ d$ct_cat)$p.value) }))
+## FOLH1 outcome models with and without burden adjustment
+a_adj <- bind_rows(lapply(c("FOLH1_arch", "FOLH1_bone", "FOLH1_base"), function(v) { d <- pf; d$f <- zc(d[[v]]); d$c <- zc(d$lctDNA); d$s <- zc(d$SUVmean); d$q <- zc(log10(d$PSA0))
+  d <- d[!is.na(d$f), ]
+  bind_rows(lapply(list(none = character(0), ctDNA = "c", ctDNA_PSA = c("c", "q"), ctDNA_SUV = c("c", "s")), function(cv) {
+    rhs <- paste(c("f", cv), collapse = " + ")
+    psa <- lm1(as.formula(paste("psa ~", rhs)), d); orr <- or_firth(d, c("f", cv))
+    rp <- cox1(as.formula(paste("Surv(r_pfstime, r_pfsevent) ~", rhs)), d); os <- cox1(as.formula(paste("Surv(ostime, osevent) ~", rhs)), d)
+    data.frame(beta_PSA = psa[1], p_PSA = psa[2], OR_PSA50fail = orr[1], OR_lo = orr[2], OR_hi = orr[3], p_PSA50 = orr[4],
+               HR_rPFS = rp[1], HR_rPFS_lo = rp[2], HR_rPFS_hi = rp[3], p_rPFS = rp[4], HR_OS = os[1], HR_OS_lo = os[2], HR_OS_hi = os[3], p_OS = os[4], n = nrow(d)) }), .id = "adjustment") %>%
+    mutate(feature = v, .before = 1) }))
+a_strat <- bind_rows(lapply(names(pbs), function(sid) { p <- pbs[[sid]]; d <- p$meta %>% left_join(pf %>% select(subject_id, lctDNA, SUVmean), by = "subject_id")
+  d$f <- zc(p$lcpm["FOLH1", ]); d$psa <- d$psa_change_capped / 50; d$batch <- factor(d$study_batch); d$c <- zc(d$lctDNA)
+  r0 <- summary(lm(f ~ psa + batch, d))$coefficients["psa", ]; r1 <- summary(lm(f ~ psa + batch + c, d))$coefficients["psa", ]
+  data.frame(stratum = sid, n = nrow(d), beta = r0[1], p = r0[4], beta_adj_ctDNA = r1[1], p_adj_ctDNA = r1[4]) }))
+
+```
+
+### B. PSMA-PET SUVmean ≥10 × tissue *FOLH1*
+Patients are grouped by SUVmean ≥10 and by *FOLH1* (archival or baseline composite) at the cohort median, and by their combination. For each group the script reports PSA50 rate with exact 95% CI and median rPFS and OS. Fisher, log-rank and Cox tests are run for each grouping, and a two-variable Cox model fits SUVmean ≥10 plus baseline *FOLH1* per s.d.
+
+```{r comp-40-burden-outcome-04}
+## ---- B. SUVmean >= 10 x tissue FOLH1 ---------------------------------------------------------------
+cp <- function(x, n) if (n == 0) c(NA, NA) else as.numeric(binom.test(x, n)$conf.int)
+med_surv <- function(t, e) { f <- survfit(Surv(t, e) ~ 1); unname(summary(f)$table["median"]) }
+grp_tab <- function(d, g) d %>% filter(!is.na(.data[[g]])) %>% group_by(group = .data[[g]]) %>% group_modify(~ {
+  ci <- cp(sum(.x$PSA50 == 1), nrow(.x))
+  data.frame(n = nrow(.x), PSA50 = sum(.x$PSA50 == 1), PSA50_pct = mean(.x$PSA50 == 1), PSA50_lo = ci[1], PSA50_hi = ci[2],
+             median_rPFS = med_surv(.x$r_pfstime, .x$r_pfsevent), median_OS = med_surv(.x$ostime, .x$osevent)) }) %>% ungroup()
+pf <- pf %>% mutate(FOLH1_arch_hi = ifelse(is.na(FOLH1_arch), NA, ifelse(FOLH1_arch >= median(FOLH1_arch, na.rm = TRUE), "FOLH1 high", "FOLH1 low")),
+                    FOLH1_base_hi = ifelse(is.na(FOLH1_base), NA, ifelse(FOLH1_base >= median(FOLH1_base, na.rm = TRUE), "FOLH1 high", "FOLH1 low")),
+                    SUVgrp = ifelse(SUV10, "SUVmean ≥10", "SUVmean <10"),
+                    combo = ifelse(is.na(FOLH1_base_hi), NA, paste(SUVgrp, FOLH1_base_hi, sep = " · ")))
+b_tab <- bind_rows(grp_tab(pf, "SUVgrp") %>% mutate(stratifier = "SUVmean"), grp_tab(pf, "FOLH1_arch_hi") %>% mutate(stratifier = "FOLH1 archival"),
+                   grp_tab(pf, "FOLH1_base_hi") %>% mutate(stratifier = "FOLH1 baseline"), grp_tab(pf, "combo") %>% mutate(stratifier = "SUVmean x FOLH1"))
+b_tests <- bind_rows(lapply(c("SUVgrp", "FOLH1_arch_hi", "FOLH1_base_hi"), function(g) { d <- pf %>% filter(!is.na(.data[[g]])); d$g <- factor(d[[g]])
+  d$g <- relevel(d$g, ref = grep("high|≥", levels(d$g), value = TRUE)[1])
+  data.frame(stratifier = g, p_PSA50_fisher = fisher.test(table(d$g, d$PSA50))$p.value,
+             p_logrank_rPFS = 1 - pchisq(survdiff(Surv(r_pfstime, r_pfsevent) ~ g, d)$chisq, 1), HR_rPFS = exp(coef(coxph(Surv(r_pfstime, r_pfsevent) ~ g, d))),
+             p_logrank_OS = 1 - pchisq(survdiff(Surv(ostime, osevent) ~ g, d)$chisq, 1), HR_OS = exp(coef(coxph(Surv(ostime, osevent) ~ g, d)))) }))
+d2 <- pf %>% filter(!is.na(FOLH1_base)) %>% mutate(f = zc(FOLH1_base), s = as.numeric(SUV10))
+b_mv <- bind_rows(lapply(list(rPFS = Surv(d2$r_pfstime, d2$r_pfsevent), OS = Surv(d2$ostime, d2$osevent)), function(S) {
+  s <- summary(coxph(S ~ s + f, d2)); data.frame(term = c("SUVmean ≥10", "FOLH1 per s.d."), HR = s$conf.int[, 1], lo = s$conf.int[, 3], hi = s$conf.int[, 4], p = s$coefficients[, 5]) }), .id = "endpoint")
+
+```
+
+### C. Baseline ctDNA categories
+PSA50 and survival by ctDNA fraction <2%, 2–30% and >30%. A Fisher test is used for PSA50 and Cox trend models (category as numeric) for rPFS and OS.
+
+```{r comp-40-burden-outcome-05}
+## ---- C. ctDNA% categories ---------------------------------------------------------------------------
+c_tab <- grp_tab(pf, "ct_cat")
+c_tests <- data.frame(p_PSA50_fisher = fisher.test(table(pf$ct_cat, pf$PSA50))$p.value,
+  p_trend_rPFS = summary(coxph(Surv(r_pfstime, r_pfsevent) ~ as.numeric(ct_cat), pf))$coefficients[1, 5],
+  HR_trend_rPFS = exp(coef(coxph(Surv(r_pfstime, r_pfsevent) ~ as.numeric(ct_cat), pf))),
+  p_trend_OS = summary(coxph(Surv(ostime, osevent) ~ as.numeric(ct_cat), pf))$coefficients[1, 5],
+  HR_trend_OS = exp(coef(coxph(Surv(ostime, osevent) ~ as.numeric(ct_cat), pf))))
+
+```
+
+### D. ctDNA alterations and tissue phenotype
+In each baseline stratum, the difference in z-scored *FOLH1*, AR and PI3K–AKT–mTOR between patients with and without each alteration (*TP53*, *PTEN*, *RB1*, *AR*, any tumour-suppressor), unadjusted and adjusted for log ctDNA fraction. Comparisons need ≥3 patients per group, with BH across strata. The same is done at patient level for the baseline composites and PSMA SUVmean, with a Wilcoxon test.
+
+```{r comp-40-burden-outcome-06}
+## ---- D. alterations -> tissue phenotype (adjusted for ctDNA%) ---------------------------------------
+alts <- c("alt_TP53", "alt_PTEN", "alt_RB1", "alt_AR", "alt_TSG_alt")
+d_tab <- bind_rows(lapply(names(pbs)[!grepl("Cycle1", names(pbs))], function(sid) { p <- pbs[[sid]]; S <- score(p$lcpm)
+  m <- p$meta %>% left_join(pf %>% select(subject_id, lctDNA, all_of(alts)), by = "subject_id"); m$batch <- factor(m$study_batch)
+  bind_rows(lapply(alts, function(a) bind_rows(lapply(c("FOLH1", "AR_Hallmark", "PI3K_AKT_mTOR"), function(f) {
+    d <- m; d$y <- zc(S[, f]); d$a <- d[[a]]; d <- d[!is.na(d$a), ]; if (length(unique(d$a)) < 2 || min(table(d$a)) < 3) return(NULL)
+    r0 <- summary(lm(y ~ a, d))$coefficients["a", ]; r1 <- summary(lm(y ~ a + lctDNA, d))$coefficients["a", ]
+    data.frame(stratum = sid, alteration = a, feature = f, n_alt = sum(d$a == 1), n_wt = sum(d$a == 0), diff = r0[1], p = r0[4], diff_adj_ctDNA = r1[1], p_adj_ctDNA = r1[4]) })))) })) %>%
+  group_by(alteration, feature) %>% mutate(fdr_adj = p.adjust(p_adj_ctDNA, "BH")) %>% ungroup()
+d_pool <- bind_rows(lapply(alts, function(a) bind_rows(lapply(c("FOLH1_base", "AR_base", "PI3K_base", "SUVmean"), function(f) {
+  d <- pf; d$y <- zc(d[[f]]); d$a <- d[[a]]; d <- d[complete.cases(d$y, d$a, d$lctDNA), ]
+  r0 <- summary(lm(y ~ a, d))$coefficients["a", ]; r1 <- summary(lm(y ~ a + lctDNA, d))$coefficients["a", ]
+  data.frame(alteration = a, feature = f, n_alt = sum(d$a == 1), n_wt = sum(d$a == 0), diff = r0[1], p = r0[4], diff_adj_ctDNA = r1[1], p_adj_ctDNA = r1[4],
+             p_wilcox = suppressWarnings(wilcox.test(d$y[d$a == 1], d$y[d$a == 0], exact = FALSE))$p.value) }))))
+
+```
+
+### F. Magnitude of on-treatment transcriptional shift
+Per compartment, patients with paired biopsies are pseudobulked over the union of both LOQ universes and TMM-normalised jointly. The 2,000 most variable genes are standardised across samples. The shift is 1 − Pearson r between each patient's pre- and on-treatment profiles; the reference is the median distance to other patients at pre-treatment. The shift is related to PSA change by Spearman correlation, by a linear model adjusted for the absolute change in signal depth, and by Cox regression for rPFS. The patient mean shift over compartments is added to the feature table, which is saved again.
+
+```{r comp-40-burden-outcome-07}
+## ---- F. magnitude of on-treatment transcriptional shift ----------------------------------------------
+f_rows <- list()
+for (sg in names(code)) {
+  g <- intersect(union(uni$universes[[paste0(code[sg], "__Screening")]]$g10, uni$universes[[paste0(code[sg], "__Cycle1")]]$g10), rownames(se))
+  idx <- which(cd$response_group_neat != "Control" & cd$segment_name == sg & cd$timepoint %in% c("Screening", "Cycle1")); d <- cd[idx, ]
+  key <- paste(d$subject_id, d$timepoint, sep = "|")
+  mm <- sapply(split(seq_along(key), key), function(i) rowSums(assay(se, "all_count")[g, idx[i], drop = FALSE]))
+  q <- tapply(uni$aoi[rownames(d), "pct_above_LOQ_std"], key, mean)
+  sid <- sub("\\|.*", "", colnames(mm)); both <- names(which(table(sid) == 2)); mm <- mm[, sid %in% both]
+  lc <- cpm(calcNormFactors(DGEList(mm)), log = TRUE, prior.count = 1)
+  hv <- names(sort(apply(lc, 1, var), decreasing = TRUE))[1:2000]; zz <- t(scale(t(lc[hv, ])))
+  s_ <- sub("\\|.*", "", colnames(lc)); t_ <- sub(".*\\|", "", colnames(lc))
+  pre <- zz[, t_ == "Screening", drop = FALSE]; colnames(pre) <- s_[t_ == "Screening"]; pre <- pre[, both]
+  on <- zz[, t_ == "Cycle1", drop = FALSE]; colnames(on) <- s_[t_ == "Cycle1"]; on <- on[, both]
+  shift <- 1 - sapply(both, function(k) cor(pre[, k], on[, k]))
+  ## reference: distance between different patients at the same timepoint (median per patient)
+  between <- sapply(both, function(k) median(1 - cor(pre[, k], pre[, setdiff(both, k)])))
+  f_rows[[sg]] <- data.frame(segment = sg, subject_id = both, shift = shift, between_patient = between,
+    dq = abs(q[paste(both, "Cycle1", sep = "|")] - q[paste(both, "Screening", sep = "|")])) }
+f_pp <- bind_rows(f_rows) %>% left_join(pf %>% select(subject_id, max_psa_change, psa, response_group_neat, r_pfstime, r_pfsevent), by = "subject_id")
+f_tab <- f_pp %>% group_by(segment) %>% group_modify(~ { ct <- suppressWarnings(cor.test(.x$shift, .x$max_psa_change, method = "spearman", exact = FALSE))
+  r1 <- summary(lm(shift ~ psa + dq, .x))$coefficients["psa", ]
+  data.frame(n = nrow(.x), median_shift = median(.x$shift), median_between = median(.x$between_patient), rho_psa = unname(ct$estimate), p_psa = ct$p.value,
+             p_psa_adj_quality = r1[4], HR_rPFS_per_sd = exp(coef(coxph(Surv(r_pfstime, r_pfsevent) ~ scale(shift), .x)))) }) %>% ungroup()
+f_mean <- f_pp %>% group_by(subject_id) %>% summarise(shift = mean(shift), n_seg = n(), .groups = "drop") %>% left_join(pf %>% select(subject_id, max_psa_change), by = "subject_id")
+f_all <- suppressWarnings(cor.test(f_mean$shift, f_mean$max_psa_change, method = "spearman", exact = FALSE))
+pf <- pf %>% left_join(f_mean %>% select(subject_id, shift), by = "subject_id")
+qs::qsave(pf, file.path(out_dir, "patient_features.qs")); write.csv(pf, file.path(out_dir, "patient_features.csv"), row.names = FALSE)
+
+```
+
+### H/I. Univariable prognostic factors
+Cox hazard ratios for rPFS and OS for clinical, PET, ctDNA, baseline-tissue and on-treatment-tissue variables. Continuous variables are per s.d. (laboratory values and volumes on log scale); binary variables compare altered or present against not. All tables are written and key results printed.
+
+```{r comp-40-burden-outcome-08}
+## ---- H/I. univariable rPFS and OS hazard ratios --------------------------------------------------------
+fv <- list(Clinical = c(age = "Age (per s.d.)", ecog = "ECOG ≥1", lPSA0 = "log PSA", lALP = "log ALP", lLDH = "log LDH", Hb = "Haemoglobin"),
+  `PET` = c(SUVmean = "PSMA SUVmean", SUV10 = "PSMA SUVmean ≥10", lPSMA_TTV = "log PSMA TTV", lFDG_MTV = "log FDG MTV"),
+  ctDNA = c(lctDNA = "log ctDNA%", alt_TP53 = "TP53 altered", alt_PTEN = "PTEN altered", alt_RB1 = "RB1 altered", alt_TSG_alt = "TP53/PTEN/RB1 altered", alt_AR = "AR altered", alt_DDR_alt = "DDR altered"),
+  `Tissue, baseline` = c(FOLH1_arch = "FOLH1, primary", FOLH1_bone = "FOLH1, bone pre", AR_base = "AR activity", P53_base = "p53 core"),
+  `Tissue, on-treatment` = c(FOLH1_on = "FOLH1, bone on", AR_on = "AR activity, on", dP53 = "Δ p53", dIFNa = "Δ IFN-α", HLA_on = "HLA-I, on", shift = "Transcriptional shift"))
+hd <- pf %>% mutate(ecog = as.numeric(ecog >= 1), lPSA0 = log10(PSA0), lALP = log10(ALP), lLDH = log10(LDH), lPSMA_TTV = log10(PSMA_TTV + 1), lFDG_MTV = log10(FDG_MTV + 1), SUV10 = as.numeric(SUV10))
+i_tab <- bind_rows(lapply(names(fv), function(blk) bind_rows(lapply(names(fv[[blk]]), function(v) {
+  x <- hd[[v]]; bin <- length(unique(na.omit(x))) <= 2; if (!bin) x <- zc(x); d <- hd; d$x <- x
+  r <- cox1(Surv(r_pfstime, r_pfsevent) ~ x, d); o <- cox1(Surv(ostime, osevent) ~ x, d)
+  data.frame(block = blk, variable = v, label = fv[[blk]][[v]], binary = bin, n = r[5], HR_rPFS = r[1], lo_rPFS = r[2], hi_rPFS = r[3], p_rPFS = r[4],
+             HR_OS = o[1], lo_OS = o[2], hi_OS = o[3], p_OS = o[4]) }))))
+
+write.csv(a_cor, file.path(out_dir, "A_tissue_vs_burden_correlations.csv"), row.names = FALSE)
+write.csv(a_cat, file.path(out_dir, "A_FOLH1_by_ctDNA_category.csv"), row.names = FALSE)
+write.csv(a_adj, file.path(out_dir, "A_FOLH1_outcomes_adjusted_for_burden.csv"), row.names = FALSE)
+write.csv(a_strat, file.path(out_dir, "A_FOLH1_per_stratum_adjusted_for_ctDNA.csv"), row.names = FALSE)
+write.csv(b_tab, file.path(out_dir, "B_SUV_FOLH1_groups.csv"), row.names = FALSE)
+write.csv(b_tests, file.path(out_dir, "B_SUV_FOLH1_tests.csv"), row.names = FALSE)
+write.csv(b_mv, file.path(out_dir, "B_SUV_FOLH1_multivariable_cox.csv"), row.names = FALSE)
+write.csv(c_tab, file.path(out_dir, "C_ctDNA_categories.csv"), row.names = FALSE); write.csv(c_tests, file.path(out_dir, "C_ctDNA_tests.csv"), row.names = FALSE)
+write.csv(d_tab, file.path(out_dir, "D_alterations_tissue_by_stratum.csv"), row.names = FALSE)
+write.csv(d_pool, file.path(out_dir, "D_alterations_tissue_patient.csv"), row.names = FALSE)
+write.csv(f_pp, file.path(out_dir, "F_shift_per_patient.csv"), row.names = FALSE); write.csv(f_tab, file.path(out_dir, "F_shift_vs_response.csv"), row.names = FALSE)
+write.csv(i_tab, file.path(out_dir, "I_univariable_cox.csv"), row.names = FALSE)
+
+options(width = 230); f2 <- function(x) as.data.frame(mutate(x, across(where(is.numeric), ~signif(.x, 2))))
+cat("\n==== A. FOLH1 composites vs burden (P < 0.1) ====\n"); print(f2(a_cor %>% filter(grepl("FOLH1", tissue), p < 0.1)), row.names = FALSE)
+cat("\n==== A. other tissue vs burden, p_bonf < 0.05 ====\n"); print(f2(a_cor %>% filter(p_bonf < 0.05)), row.names = FALSE)
+cat("\n==== A. FOLH1 by ctDNA category ====\n"); print(f2(a_cat), row.names = FALSE)
+cat("\n==== A. FOLH1 outcome models, adjusted ====\n"); print(f2(a_adj), row.names = FALSE)
+cat("\n==== A. per stratum, + ctDNA ====\n"); print(f2(a_strat), row.names = FALSE)
+cat("\n==== B ====\n"); print(f2(b_tab), row.names = FALSE); print(f2(b_tests), row.names = FALSE); print(f2(b_mv), row.names = FALSE)
+cat("\n==== C ====\n"); print(f2(c_tab), row.names = FALSE); print(f2(c_tests), row.names = FALSE)
+cat("\n==== D. patient-level ====\n"); print(f2(d_pool), row.names = FALSE)
+cat("\n==== D. per stratum adjusted P < 0.05 ====\n"); print(f2(d_tab %>% filter(p_adj_ctDNA < 0.05)), row.names = FALSE)
+cat("\n==== F ====\n"); print(f2(f_tab), row.names = FALSE); cat(sprintf("mean shift vs PSA: rho %.2f P %.3f n %d\n", f_all$estimate, f_all$p.value, nrow(f_mean)))
+cat("\n==== I ====\n"); print(f2(i_tab), row.names = FALSE)
+cat("R17 complete.\n")
+```

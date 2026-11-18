@@ -1,0 +1,291 @@
+---
+title: "Primary tumour to bone metastasis remodelling and comparison with Owen et al."
+subtitle: "PRINCE spatial transcriptomics: `comp_27_owen_bone`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+Tests whether the immune differences between primary prostate cancer and bone metastases reported by Owen et al. (Cancer Res 2026) are reproduced in PRINCE. In this bone-only cohort every Archival sample is a primary tumour and every Screening/Cycle1 biopsy is a bone metastasis. Each patient's Archival and Screening AOIs were run in the same sequencing batch, so the paired primary-versus-bone contrast is free of batch. It is, however, confounded with tissue type (decalcification, block age), which is why the quality controls in part B matter.
+
+- **A.** Paired patient pseudobulk per compartment over the union LOQ gene universe, limma-voom ~ patient + site (robust); Owen et al. marker genes and programme scores.
+- **B.** Quality sensitivity: adjustment for per-sample AOI quality (mean % genes above LOQ); an expression-matched null (each gene's log fold change relative to the median of the 200 genes nearest in mean expression, and programme changes against 2,000 expression-matched random gene sets); and exclusion of AOIs with < 5% of genes above LOQ.
+- **C.** AOI-level versions with patient blocking (limma-voom) and lmer(score ~ site + (1 | patient)).
+- **D.** Within-patient association of *CD276* (B7-H3) with IFN-I and HLA-I programmes in the tumour compartments, AOI-level lmer(target ~ *CD276* + (1 | patient)) on standardised values, plus patient-level Spearman correlation.
+- **E.** Owen et al. markers and programmes versus PSA response per stratum (patient pseudobulk: Spearman, lm with batch, excluding batch 3, worst leave-one-patient-out P).
+
+**Manuscript items supported**
+
+- Fig. 5a–d (primary-to-bone programmes, Owen et al. markers, *CD276* associations, programme–response associations), drawn by `comp_28_figures_v4` and assembled in `comp_41_figures_v5`
+- Extended Data Fig. 6a–d (primary-vs-bone quality controls), via `comp_28` (v4 ExtendedDataFig8)
+- Extended Data Fig. 7 (Owen et al. marker genes vs PSA response), via `comp_28` (v4 ExtendedDataFig10)
+- Supplementary Tables 43–49 (S43_bone_programmes to S49_Owen_vs_response), via `comp_29_supp_tables_v4`
+- Supplementary Data 2 (primary-to-bone gene-level results), via `comp_29_supp_tables_v4`
+- Methods: Paired on-treatment and primary-to-bone analyses
+
+**Pipeline step:** `./run_pipeline.sh --only 27_owen_bone`.
+
+**Inputs**
+
+- `data/phase2_se_qc_filtered.qs`
+- `results/C1_clinical/patient_table.qs`
+- `results/R1_loq/loq_gene_universes.qs`
+- `data/reference/msigdb_gene_sets.rds`
+- `data/reference/ProstateCancer_GeneSignatures.R`
+- `results/C13_pseudobulk_LOQ/pseudobulk_strata.qs`
+
+**Outputs**
+
+- `results/R7_owen_bone/A_primary_vs_bone_owen_genes.csv`
+- `results/R7_owen_bone/A_primary_vs_bone_programmes.csv`
+- `results/R7_owen_bone/A_primary_vs_bone_all_genes.qs`
+- `results/R7_owen_bone/B_primary_vs_bone_global_quality.csv`
+- `results/R7_owen_bone/C_aoi_primary_vs_bone_owen_genes.csv`
+- `results/R7_owen_bone/C_aoi_primary_vs_bone_programmes.csv`
+- `results/R7_owen_bone/D_CD276_vs_IFN_HLA.csv`
+- `results/R7_owen_bone/E_owen_markers_vs_response.csv`
+
+**Depends on**: `comp_00b_bone_cohort`, `comp_01_clinical`, `comp_16_loq_filter`, `comp_13b_pseudobulk_loq`
+
+## Analysis
+
+### Primary to bone, and Owen et al.
+The header explains why the paired contrast is batch-free but tissue-confounded, and lists parts A–E.
+
+Load inputs and define the marker genes reported by Owen et al. and the programmes used for comparison (IFN-I core, Hallmark IFN-α/γ, HLA-I/II, checkpoints, CD8 cytotoxic, Treg, the bone TAM/TIM programme of Kfoury et al., M2 macrophage, cDC2/mDC and an LN-like DC-priming set). Low-signal AOIs (< 5% of genes above the standard LOQ) are flagged for part B, and a housekeeping panel is defined to check for a global shift. Programmes are scored as the mean z-score over at least three detected genes.
+
+```{r comp-27-owen-bone-01}
+## ============================================================================
+## PRINCE -- R7: primary tumour -> bone metastasis immune remodelling, and comparison with
+## Owen et al. (Cancer Res 2026; CAN-26-2386). In PRINCE every Archival sample is the primary
+## tumour and every Screening / Cycle1 biopsy is a bone metastasis; each patient's Archival and
+## Screening AOIs were run in the same batch, so the paired contrast is free of batch but is
+## confounded with tissue type (decalcification, block age).
+##  A. Paired primary vs bone (Archival vs Screening), per compartment, patient pseudobulk on the
+##     union LOQ universe: limma-voom ~ patient + site (robust). Owen markers and programmes.
+##  B. Quality sensitivity: (1) + per-sample AOI quality (mean % genes above LOQ);
+##     (2) expression-matched null: each gene's / programme's change relative to genes of
+##     matched average expression (removes a global decline from RNA degradation);
+##     (3) excluding AOIs with < 5% genes above LOQ.
+##  C. AOI-level version: limma-voom ~ site, patient blocking (duplicateCorrelation);
+##     programme scores lmer(score ~ site + (1 | patient)).
+##  D. B7-H3 (CD276) vs IFN-I / HLA-I in tumour compartments, primary vs bone:
+##     AOI-level within-patient association lmer(target ~ CD276 + (1 | patient)) and
+##     patient-level Spearman.
+##  E. Owen markers vs response in each stratum (patient pseudobulk; Spearman, lm + batch,
+##     excluding batch_3, leave-one-patient-out).
+## Outputs: results/R7_owen_bone/
+## ============================================================================
+
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({ library(qs); library(SummarizedExperiment); library(dplyr); library(tidyr); library(edgeR)
+  library(limma); library(lme4); library(lmerTest) })
+setwd(PRINCE_DIR)
+check_ram_or_stop(20)
+set.seed(2026)
+out_dir <- file.path(COMP_DIR, "R7_owen_bone"); dir.create(out_dir, showWarnings = FALSE)
+
+se <- qs::qread("phase2_se_qc_filtered.qs"); cd <- as.data.frame(colData(se))
+pt <- qs::qread(out_path("C1_clinical", "patient_table.qs"))
+loq <- qs::qread(file.path(COMP_DIR, "R1_loq", "loq_gene_universes.qs")); uni <- loq$universes
+msig <- readRDS(file.path(PMCC_DIR, "msigdb_gene_sets.rds"))
+sig_env <- new.env(); sys.source(file.path(PMCC_DIR, "ProstateCancer_GeneSignatures.R"), envir = sig_env)
+pbs <- qs::qread(out_path("C13_pseudobulk_LOQ", "pseudobulk_strata.qs"))
+artefact_re <- "^(USP17L|PRAMEF|NBPF|OR[0-9]+[A-Z]+[0-9]+)"
+code <- c("CD45+" = "CD45", "PSMA+" = "PSMA", "PanCK+PSMA-" = "PanCKPSMA")
+keep_aoi <- cd$response_group_neat != "Control" & cd$timepoint %in% c("Archival", "Screening", "Cycle1")
+counts_all <- assay(se, "all_count"); counts_all <- counts_all[!grepl(artefact_re, rownames(counts_all)), ]
+low_aoi <- rownames(loq$aoi)[loq$aoi$pct_above_LOQ_std < 5]
+
+## Owen et al. markers (protein / mIHC / RNA in the paper) and programmes
+owen_genes <- c("IRF9", "STAT1", "STAT2", "STING1", "IRF7", "B2M", "HLA-A", "HLA-B", "HLA-C", "HLA-DRA", "HLA-DPA1",
+  "CD274", "CD276", "PDCD1", "CTLA4", "LAG3", "TNFRSF9", "CD68", "CD163", "MRC1", "ITGAX", "FOXP3", "CD8A", "CD4",
+  "GZMB", "LAMP3", "CCL19", "CCL21", "IL33", "CD44", "EPCAM", "TP53", "SPP1", "C1QA", "FCN1")
+owen_progs <- list(
+  IFN_I_core = c("IRF9", "STAT1", "STAT2", "IRF7", "STING1", "TMEM173", "OAS1", "ISG15", "MX1", "IFIT1", "IFI6"),
+  Hallmark_IFNa = msig$H$HALLMARK_INTERFERON_ALPHA_RESPONSE, Hallmark_IFNg = msig$H$HALLMARK_INTERFERON_GAMMA_RESPONSE,
+  HLA_I = c("HLA-A", "HLA-B", "HLA-C", "B2M", "TAP1", "TAP2", "TAPBP"),
+  HLA_II = c("HLA-DRA", "HLA-DRB1", "HLA-DPA1", "HLA-DPB1", "HLA-DQA1", "HLA-DQB1", "HLA-DMA", "HLA-DMB", "CD74"),
+  Checkpoints = c("CD274", "PDCD1", "CTLA4", "LAG3", "TNFRSF9", "HAVCR2", "TIGIT"),
+  CD8_cytotoxic = c("CD8A", "CD8B", "GZMB", "GZMA", "PRF1", "NKG7"),
+  Treg = c("FOXP3", "IL2RA", "CTLA4", "IKZF2"),
+  TAM_TIM_Kfoury = c("FOLR2", "SIGLEC1", "LYVE1", "SPP1", "IL4R", "CD200R1", "CD101", "LYZ", "S100A9", "S100A12",
+                     "APOE", "TGFB1", "C1QA", "C1QB", "C1QC", "FN1", "MMP9", "IL1RN", "CD163", "CLEC7A", "TREM1",
+                     "FCN1", "CSTA", "VCAN", "PLAUR"),
+  M2_macrophage = c("CD163", "MRC1", "MSR1", "F13A1", "STAB1", "CD209", "LYVE1", "FOLR2"),
+  cDC2_tolerogenic = c("ITGAM", "SIRPA", "CLEC4A", "GRN", "MNDA", "CD1C", "FCER1A", "CLEC10A"),
+  DC_priming = c("CCL19", "CCL21", "IL33", "LAMP3", "FSCN1", "CCR7", "CD40", "CD80", "CD86"))
+hk <- c("GAPDH", "ACTB", "RPLP0", "PPIA", "TBP", "HPRT1", "PGK1", "B2M")[-8]
+
+aoi_q <- loq$aoi$pct_above_LOQ_std; names(aoi_q) <- rownames(loq$aoi)
+zscore_progs <- function(lc, progs) { z <- t(scale(t(lc)))
+  sapply(progs, function(g) { g <- intersect(g, rownames(z)); if (length(g) >= 3) colMeans(z[g, , drop = FALSE]) else rep(NA_real_, ncol(z)) }) }
+
+```
+
+### A + B. Paired pseudobulk, primary vs bone
+For each compartment, run with all AOIs and again without low-signal AOIs: sum counts per patient × site in patients with both, TMM-normalise, and fit limma-voom ~ patient + site and ~ patient + site + log(AOI quality). The expression-matched relative change subtracts from each gene's log fold change the median log fold change of the 200 genes closest in average expression, which removes a global, intensity-dependent decline such as RNA degradation. Programme change is tested by Wilcoxon signed-rank test on per-patient Δz and against 2,000 random gene sets matched on expression bin. BH-FDR is applied within analysis and compartment. Global quality summaries are also written: median log fold change, the fraction of genes down, AOI signal depth by site with a paired Wilcoxon P, and housekeeping log fold change.
+
+```{r comp-27-owen-bone-02}
+## ---- A + B. paired primary vs bone, patient pseudobulk -----------------------------------------
+pair_rows <- list(); prog_rows <- list(); global_rows <- list(); all_genes <- list()
+for (excl in c(FALSE, TRUE)) for (sg in names(code)) {
+  g <- intersect(union(uni[[paste0(code[sg], "__Archival")]]$g10, uni[[paste0(code[sg], "__Screening")]]$g10), rownames(counts_all))
+  ok <- keep_aoi & cd$segment_name == sg & cd$timepoint %in% c("Archival", "Screening") & (!excl | !(rownames(cd) %in% low_aoi))
+  both <- intersect(cd$subject_id[ok & cd$timepoint == "Archival"], cd$subject_id[ok & cd$timepoint == "Screening"])
+  idx <- which(ok & cd$subject_id %in% both); d <- cd[idx, ]
+  key <- paste(d$subject_id, d$timepoint, sep = "|")
+  m <- sapply(split(seq_len(nrow(d)), key), function(i) rowSums(counts_all[g, rownames(d)[i], drop = FALSE]))
+  meta <- d %>% mutate(key = key, q = aoi_q[rownames(d)]) %>% group_by(key) %>%
+    summarise(subject_id = first(subject_id), site = ifelse(first(timepoint) == "Archival", "Primary", "Bone"),
+              q = mean(q), lib = sum(library_size), .groups = "drop")
+  meta <- meta[match(colnames(m), meta$key), ]; meta$site <- factor(meta$site, c("Primary", "Bone"))
+  dge <- calcNormFactors(DGEList(m)); lc <- cpm(dge, log = TRUE, prior.count = 1)
+  fitit <- function(X) topTable(eBayes(lmFit(voom(dge, X), X), robust = TRUE), coef = "siteBone", number = Inf, sort.by = "none")
+  tA <- fitit(model.matrix(~ subject_id + site, meta))
+  tQ <- fitit(model.matrix(~ subject_id + site + log(q), meta))
+  ## expression-matched relative change: logFC minus median logFC of the 200 genes nearest in mean expression
+  ord <- order(tA$AveExpr); rel <- numeric(nrow(tA)); names(rel) <- rownames(tA)
+  for (j in seq_along(ord)) { w <- ord[max(1, j - 100):min(length(ord), j + 100)]; rel[ord[j]] <- tA$logFC[ord[j]] - median(tA$logFC[w]) }
+  lab <- if (excl) "exclLow" else "all"
+  all_genes[[paste(lab, sg)]] <- data.frame(analysis = lab, segment = sg, gene = rownames(tA), logFC = tA$logFC, rel_logFC = rel,
+    AveExpr = tA$AveExpr, t = tA$t, P = tA$P.Value, FDR = tA$adj.P.Val, logFC_qadj = tQ$logFC, P_qadj = tQ$P.Value, FDR_qadj = tQ$adj.P.Val)
+  global_rows[[paste(lab, sg)]] <- data.frame(analysis = lab, segment = sg, n_patients = length(both), n_genes = nrow(tA),
+    median_logFC_all = median(tA$logFC), frac_genes_down = mean(tA$logFC < 0), fdr05_up = sum(tA$adj.P.Val < 0.05 & tA$logFC > 0),
+    fdr05_down = sum(tA$adj.P.Val < 0.05 & tA$logFC < 0), q_primary = mean(meta$q[meta$site == "Primary"]), q_bone = mean(meta$q[meta$site == "Bone"]),
+    p_q = wilcox.test(meta$q[meta$site == "Bone"], meta$q[meta$site == "Primary"], paired = TRUE, exact = FALSE)$p.value,
+    hk_median_logFC = median(tA[intersect(hk, rownames(tA)), "logFC"]))
+  ## programmes: paired change in z-mean; empirical P against expression-matched random gene sets
+  P <- zscore_progs(lc, owen_progs); wide_sub <- meta$subject_id
+  for (pr in colnames(P)) {
+    gs <- intersect(owen_progs[[pr]], rownames(tA)); if (length(gs) < 3) next
+    dlt <- sapply(both, function(s) P[wide_sub == s & meta$site == "Bone", pr] - P[wide_sub == s & meta$site == "Primary", pr])
+    obs <- mean(rel[gs]); bins <- cut(rank(tA$AveExpr), 20, labels = FALSE); names(bins) <- rownames(tA)
+    null <- replicate(2000, mean(rel[unlist(lapply(split(gs, bins[gs]), function(x) sample(names(bins)[bins == bins[x[1]]], length(x))))]))
+    prog_rows[[paste(lab, sg, pr)]] <- data.frame(analysis = lab, segment = sg, programme = pr, n_genes = length(gs), n_patients = length(both),
+      mean_delta_z = mean(dlt), n_down = sum(dlt < 0), p_wilcox = wilcox.test(dlt, exact = FALSE)$p.value,
+      mean_logFC = mean(tA[gs, "logFC"]), mean_rel_logFC = obs, p_expr_matched = (1 + sum(abs(null) >= abs(obs))) / 2001,
+      mean_logFC_qadj = mean(tQ[gs, "logFC"]))
+  }
+  gsel <- intersect(owen_genes, rownames(tA))
+  pair_rows[[paste(lab, sg)]] <- data.frame(analysis = lab, segment = sg, gene = gsel, logFC = tA[gsel, "logFC"], rel_logFC = rel[gsel],
+    P = tA[gsel, "P.Value"], FDR = tA[gsel, "adj.P.Val"], logFC_qadj = tQ[gsel, "logFC"], FDR_qadj = tQ[gsel, "adj.P.Val"])
+  message(lab, " ", sg, " paired primary vs bone done (n = ", length(both), ")")
+}
+pair_tab <- bind_rows(pair_rows); prog_tab <- bind_rows(prog_rows) %>% group_by(analysis, segment) %>%
+  mutate(fdr_wilcox = p.adjust(p_wilcox, "BH"), fdr_expr_matched = p.adjust(p_expr_matched, "BH")) %>% ungroup()
+global_tab <- bind_rows(global_rows)
+write.csv(pair_tab, file.path(out_dir, "A_primary_vs_bone_owen_genes.csv"), row.names = FALSE)
+write.csv(prog_tab, file.path(out_dir, "A_primary_vs_bone_programmes.csv"), row.names = FALSE)
+write.csv(global_tab, file.path(out_dir, "B_primary_vs_bone_global_quality.csv"), row.names = FALSE)
+qs::qsave(bind_rows(all_genes), file.path(out_dir, "A_primary_vs_bone_all_genes.qs"))
+
+```
+
+### C. AOI-level primary vs bone
+The same contrast at AOI level: limma-voom ~ site with two-pass patient blocking for the marker genes, and lmer(score ~ site + (1 | patient)) for programmes, with BH-FDR within compartment.
+
+```{r comp-27-owen-bone-03}
+## ---- C. AOI-level primary vs bone ----------------------------------------------------------------
+aoi_rows <- list(); aoi_prog <- list()
+for (sg in names(code)) {
+  g <- intersect(union(uni[[paste0(code[sg], "__Archival")]]$g10, uni[[paste0(code[sg], "__Screening")]]$g10), rownames(counts_all))
+  ok <- keep_aoi & cd$segment_name == sg & cd$timepoint %in% c("Archival", "Screening")
+  both <- intersect(cd$subject_id[ok & cd$timepoint == "Archival"], cd$subject_id[ok & cd$timepoint == "Screening"])
+  idx <- which(ok & cd$subject_id %in% both); d <- cd[idx, ]
+  site <- factor(ifelse(d$timepoint == "Archival", "Primary", "Bone"), c("Primary", "Bone")); subj <- d$subject_id
+  dge <- calcNormFactors(DGEList(counts_all[g, idx])); X <- model.matrix(~ site)
+  v <- voom(dge, X); dc <- duplicateCorrelation(v, X, block = subj); v <- voom(dge, X, block = subj, correlation = dc$consensus)
+  dc <- duplicateCorrelation(v, X, block = subj)
+  tt <- topTable(eBayes(lmFit(v, X, block = subj, correlation = dc$consensus), robust = TRUE), coef = "siteBone", number = Inf, sort.by = "none")
+  gsel <- intersect(owen_genes, rownames(tt))
+  aoi_rows[[sg]] <- data.frame(segment = sg, gene = gsel, logFC_aoi = tt[gsel, "logFC"], P_aoi = tt[gsel, "P.Value"], FDR_aoi = tt[gsel, "adj.P.Val"],
+    consensus_cor = dc$consensus, n_aoi = ncol(dge))
+  P <- zscore_progs(cpm(dge, log = TRUE, prior.count = 1), owen_progs)
+  for (pr in colnames(P)) { if (all(is.na(P[, pr]))) next
+    s <- summary(suppressMessages(lmerTest::lmer(y ~ site + (1 | subj), data.frame(y = P[, pr], site = site, subj = subj))))$coefficients
+    aoi_prog[[paste(sg, pr)]] <- data.frame(segment = sg, programme = pr, delta_aoi = s["siteBone", 1], p_aoi = s["siteBone", 5]) }
+  message(sg, " AOI-level primary vs bone done")
+}
+aoi_tab <- bind_rows(aoi_rows); aoi_prog_tab <- bind_rows(aoi_prog) %>% group_by(segment) %>% mutate(fdr_aoi = p.adjust(p_aoi, "BH")) %>% ungroup()
+write.csv(aoi_tab, file.path(out_dir, "C_aoi_primary_vs_bone_owen_genes.csv"), row.names = FALSE)
+write.csv(aoi_prog_tab, file.path(out_dir, "C_aoi_primary_vs_bone_programmes.csv"), row.names = FALSE)
+
+```
+
+### D. *CD276* (B7-H3) vs IFN-I / HLA-I
+In the PSMA+ and PanCK+PSMA− strata at each timepoint, regress standardised target scores (IFN-I core, HLA-I, Hallmark IFN-α, and *IRF9*, *HLA-B*, *B2M*, *STAT1*) on standardised *CD276* with a patient random intercept. This gives the within-lesion association that Owen et al. predict to be negative in bone. The patient-level Spearman correlation from the pseudobulk is reported alongside.
+
+```{r comp-27-owen-bone-04}
+## ---- D. CD276 vs IFN-I / HLA-I in tumour compartments ----------------------------------------------
+b7_rows <- list()
+for (sg in c("PSMA+", "PanCK+PSMA-")) for (tp in c("Archival", "Screening", "Cycle1")) {
+  sid <- paste0(code[sg], "__", tp); idx <- which(keep_aoi & cd$segment_name == sg & cd$timepoint == tp); d <- cd[idx, ]
+  g <- intersect(uni[[sid]]$g10, rownames(counts_all)); if (!"CD276" %in% g) next
+  lc <- cpm(calcNormFactors(DGEList(counts_all[g, idx])), log = TRUE, prior.count = 1)
+  P <- zscore_progs(lc, owen_progs[c("IFN_I_core", "HLA_I", "Hallmark_IFNa")])
+  tg <- cbind(P, t(lc[intersect(c("IRF9", "HLA-B", "B2M", "STAT1"), rownames(lc)), , drop = FALSE]))
+  x <- as.numeric(scale(lc["CD276", ])); subj <- d$subject_id
+  pbl <- pbs[[sid]]; Pp <- zscore_progs(pbl$lcpm, owen_progs[c("IFN_I_core", "HLA_I", "Hallmark_IFNa")])
+  tgp <- cbind(Pp, t(pbl$lcpm[intersect(c("IRF9", "HLA-B", "B2M", "STAT1"), rownames(pbl$lcpm)), , drop = FALSE]))
+  for (f in colnames(tg)) {
+    y <- as.numeric(scale(tg[, f]))
+    s <- tryCatch(summary(suppressMessages(lmerTest::lmer(y ~ x + (1 | subj), data.frame(y, x, subj))))$coefficients["x", ], error = function(e) rep(NA, 5))
+    ct <- if (f %in% colnames(tgp) && "CD276" %in% rownames(pbl$lcpm)) cor.test(pbl$lcpm["CD276", ], tgp[, f], method = "spearman", exact = FALSE) else list(estimate = NA, p.value = NA)
+    b7_rows[[paste(sid, f)]] <- data.frame(stratum = sid, segment = sg, timepoint = tp, site = ifelse(tp == "Archival", "Primary", "Bone"),
+      target = f, n_aoi = length(y), beta_within = s[1], p_within = s[5], rho_patient = unname(ct$estimate), p_patient = ct$p.value)
+  }
+}
+b7_tab <- bind_rows(b7_rows)
+write.csv(b7_tab, file.path(out_dir, "D_CD276_vs_IFN_HLA.csv"), row.names = FALSE)
+
+```
+
+### E. Owen et al. markers vs response
+For every pseudobulk stratum, relate each marker gene and programme to maximal PSA change: Spearman ρ, lm with batch (per 50 percentage points), lm excluding batch 3, and the largest P over leave-one-patient-out refits. BH-FDR on the Spearman P is applied within stratum and feature type. The chunk ends by printing the main summaries.
+
+```{r comp-27-owen-bone-05}
+## ---- E. Owen markers and programmes vs response, patient pseudobulk ---------------------------------
+fit_lm <- function(y, x, batch) { ok <- complete.cases(y, x); b <- droplevels(factor(batch[ok]))
+  f <- if (nlevels(b) > 1) lm(y[ok] ~ x[ok] + b) else lm(y[ok] ~ x[ok]); s <- summary(f)$coefficients; c(s[2, 1], s[2, 4]) }
+resp_rows <- list()
+for (sid in names(pbs)) {
+  p <- pbs[[sid]]; m <- p$meta
+  F <- cbind(t(p$lcpm[intersect(owen_genes, rownames(p$lcpm)), , drop = FALSE]), zscore_progs(p$lcpm, owen_progs))
+  psa <- m$psa_change_capped / 50; nb3 <- m$study_batch != "batch_3"
+  for (f in colnames(F)) { y <- F[, f]; if (all(is.na(y))) next
+    sp <- suppressWarnings(cor.test(y, m$max_psa_change, method = "spearman", exact = FALSE))
+    a <- fit_lm(y, psa, m$study_batch); a3 <- fit_lm(y[nb3], psa[nb3], m$study_batch[nb3])
+    lo <- sapply(seq_along(y), function(i) suppressWarnings(cor.test(y[-i], m$max_psa_change[-i], method = "spearman", exact = FALSE))$p.value)
+    resp_rows[[paste(sid, f)]] <- data.frame(stratum = sid, feature = f, type = ifelse(f %in% names(owen_progs), "programme", "gene"),
+      n = sum(!is.na(y)), rho = unname(sp$estimate), p_rho = sp$p.value, beta_batch = a[1], p_batch = a[2], p_no_b3 = a3[2], p_LOO_worst = max(lo)) }
+}
+resp_tab <- bind_rows(resp_rows) %>% group_by(stratum, type) %>% mutate(fdr_rho = p.adjust(p_rho, "BH")) %>% ungroup()
+write.csv(resp_tab, file.path(out_dir, "E_owen_markers_vs_response.csv"), row.names = FALSE)
+
+options(width = 220)
+cat("\n==== B. global shift and AOI quality, primary vs bone ====\n"); print(as.data.frame(global_tab %>% mutate(across(where(is.numeric), ~signif(.x, 3)))), row.names = FALSE)
+cat("\n==== A. programmes, primary -> bone (all AOIs) ====\n")
+print(as.data.frame(prog_tab %>% filter(analysis == "all") %>% select(segment, programme, n_patients, mean_delta_z, n_down, p_wilcox, fdr_wilcox, mean_logFC, mean_rel_logFC, p_expr_matched, fdr_expr_matched) %>%
+  mutate(across(where(is.numeric), ~signif(.x, 2)))), row.names = FALSE)
+cat("\n==== A. key genes ====\n")
+print(as.data.frame(pair_tab %>% filter(analysis == "all", gene %in% c("CD276", "B2M", "HLA-B", "IRF9", "STING1", "STAT1", "CD274", "CD68", "CD163", "SPP1", "EPCAM", "CD44", "TP53")) %>%
+  left_join(aoi_tab %>% select(segment, gene, logFC_aoi, FDR_aoi), by = c("segment", "gene")) %>% mutate(across(where(is.numeric), ~signif(.x, 2)))), row.names = FALSE)
+cat("\n==== D. CD276 vs IFN/HLA ====\n"); print(as.data.frame(b7_tab %>% mutate(across(where(is.numeric), ~signif(.x, 2)))), row.names = FALSE)
+cat("\n==== E. top response associations (programmes) ====\n")
+print(as.data.frame(resp_tab %>% filter(type == "programme", p_rho < 0.05) %>% mutate(across(where(is.numeric), ~signif(.x, 2)))), row.names = FALSE)
+cat("R7 complete.\n")
+```

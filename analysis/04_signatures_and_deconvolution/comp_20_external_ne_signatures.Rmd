@@ -1,0 +1,162 @@
+---
+title: "Externally defined neuroendocrine and AR signatures versus outcome"
+subtitle: "PRINCE spatial transcriptomics: `comp_20_external_ne_signatures`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+The neuroendocrine genes reported in the earlier analysis were selected on response in these same samples, so they cannot test whether non-responders have neuroendocrine features. This script scores neuroendocrine and AR programmes defined outside the PRINCE data and relates them to outcome at patient level.
+
+Neuroendocrine sets are MSigDB NOURUZI_NEPC_ASCL1_TARGETS, the top 50 PCCAT L2 neuroendocrine-cell markers, a 50-gene signature of PCCAT NEPC neuroendocrine cells versus castration-resistant luminal tumour cells (derived here from the atlas, independently of PRINCE), and the 13-gene literature marker set. AR sets are Hallmark androgen response, NELSON_RESPONSE_TO_ANDROGEN_UP and the five-gene AR panel. The earlier, response-selected neuroendocrine genes are kept only as a labelled circular reference and are excluded from the FDR correction.
+
+Scores are computed on patient pseudobulk restricted to LOQ-detected genes, with singscore as primary and mean z-score as secondary. Tests are Spearman correlation with PSA change, non-responder versus responder (Wilcoxon; linear model with batch; with batch + ESTIMATE purity), Cox regression for rPFS, Spearman correlation with PSMA-PET volume change and SUVmean, worst leave-one-out P and Spearman correlation excluding batch 3.
+
+**Manuscript items supported**
+
+- Fig. 3e (on-treatment PSMA⁺ Hallmark androgen score versus PSMA-PET tumour-volume change), via comp_28/comp_41
+- Extended Data Fig. 5d (AR programme associations with PSA change), via comp_28/comp_41
+- Extended Data Fig. 8b (external neuroendocrine signatures versus genes selected on these data), via comp_28/comp_41
+- Supplementary Table 35 (via comp_25)
+- Methods: Externally defined signatures
+- `PCCAT_NEPC_vs_CRPC_signature.txt` is reused by comp_26
+
+**Pipeline step:** `./run_pipeline.sh --only 20_external_ne_signatures`. Approximate runtime: a few minutes.
+
+**Inputs**
+
+- `data/phase2_se_qc_filtered.qs`
+- `results/C1_clinical/patient_table.qs`
+- `results/R1_loq/loq_gene_universes.qs`
+- `data/reference/msigdb_gene_sets.rds`
+- `data/reference/celltype_markers_AllLevels.xlsx`
+- `data/refs/pccat_subsample.qs`
+
+**Outputs**
+
+- `results/R3_nepc_purity/external_signatures_tests.csv`
+- `results/R3_nepc_purity/external_signatures_scores.csv`
+- `results/R3_nepc_purity/PCCAT_NEPC_vs_CRPC_signature.txt`
+
+**Depends on**: `comp_16_loq_filter`, `comp_01_clinical`, `comp_03a_build_refs`, `comp_00b_bone_cohort`
+
+## Analysis
+
+Header: why external signatures are needed, the signature list and the tests.
+
+### Signature definitions
+Loads inputs and derives the PCCAT neuroendocrine signature: mean counts per 10,000 in NEPC neuroendocrine cells and in castration-resistant luminal tumour cells, log₂ fold change with pseudocount 0.1, and the 50 genes with the largest fold change among those with mean > 0.5 in neuroendocrine cells. Assembles the four neuroendocrine sets, three AR sets and the circular reference set.
+
+```{r comp-20-external-ne-signatures-01}
+## ============================================================================
+## PRINCE -- R3b: neuroendocrine and AR programmes with signatures defined OUTSIDE
+## these data (the deck's NE genes were selected on response in the same samples, so
+## they cannot test the hypothesis).
+##   NE  : NOURUZI_NEPC_ASCL1_TARGETS (MSigDB CGP); PCCAT L2 "NE" cell markers (top 50);
+##         PCCAT NEPC-NE vs CRPC/mCRPC-luminal tumour cells (top 50 up, derived here
+##         from the external single-cell atlas); Beltran-style 13-gene NEPC set
+##   AR  : Hallmark androgen response; NELSON_RESPONSE_TO_ANDROGEN_UP; 5-gene AR panel
+##   (deck NE genes kept only as a labelled circular reference)
+## Patient-level pseudobulk on LOQ-filtered genes (comp_16); only detected genes scored.
+## Tests: Spearman vs PSA change; NR vs R (Wilcoxon; lm + batch; lm + batch + ESTIMATE
+## purity); Cox rPFS; Spearman vs PSMA-PET volume change and SUVmean; leave-one-out
+## worst P; Spearman excluding batch_3.
+## Outputs: results/R3_nepc_purity/external_signatures_*.csv
+## ============================================================================
+
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({ library(qs); library(SummarizedExperiment); library(dplyr); library(tidyr); library(edgeR)
+  library(singscore); library(survival); library(readxl); library(Matrix) })
+setwd(PRINCE_DIR)
+check_ram_or_stop(20)
+out_dir <- file.path(COMP_DIR, "R3_nepc_purity")
+
+se <- qs::qread("phase2_se_qc_filtered.qs"); cd <- as.data.frame(colData(se))
+pt <- qs::qread(out_path("C1_clinical", "patient_table.qs"))
+uni <- qs::qread(file.path(COMP_DIR, "R1_loq", "loq_gene_universes.qs"))$universes
+msig <- readRDS(file.path(PMCC_DIR, "msigdb_gene_sets.rds"))
+l2 <- read_excel(file.path(PMCC_DIR, "celltype_markers_AllLevels.xlsx"), sheet = "L2")
+
+## PCCAT-derived NEPC-NE vs CRPC-luminal tumour signature (external atlas)
+pc <- qs::qread(file.path(PRINCE_DIR, "refs/pccat_subsample.qs"), nthreads = 1)
+ne_i <- which(pc$meta$Group2 == "NEPC" & pc$meta$ct.L2 == "NE")
+lu_i <- which(pc$meta$Group2 %in% c("CRPC", "mCRPC") & pc$meta$ct.L2 == "Luminal")
+cpm10k <- function(i) { m <- pc$counts[, i]; as.numeric(m %*% (1e4 / pmax(colSums(m), 1))) / length(i) }
+mne <- cpm10k(ne_i); mlu <- cpm10k(lu_i); names(mne) <- names(mlu) <- rownames(pc$counts)
+lfc <- log2(mne + 0.1) - log2(mlu + 0.1)
+pccat_ne_vs_lum <- names(sort(lfc[mne > 0.5], decreasing = TRUE))[1:50]
+rm(pc); invisible(gc())
+cat("PCCAT NE vs CRPC-luminal top genes:", head(pccat_ne_vs_lum, 20), "\n")
+
+sigs <- list(
+  NE_Nouruzi_ASCL1_targets = msig$C2_CGP$NOURUZI_NEPC_ASCL1_TARGETS,
+  NE_PCCAT_NE_cell_markers = head(na.omit(l2$NE), 50),
+  NE_PCCAT_NEPC_vs_CRPC = pccat_ne_vs_lum,
+  NE_Beltran13 = c("ASCL1", "SOX2", "NKX2-1", "FOXA2", "INSM1", "CHGA", "CHGB", "SYP", "NCAM1", "EZH2", "AURKA", "MYCN", "PCSK1"),
+  AR_Hallmark = msig$H$HALLMARK_ANDROGEN_RESPONSE,
+  AR_Nelson_up = msig$C2_CGP$NELSON_RESPONSE_TO_ANDROGEN_UP,
+  AR_panel5 = c("AR", "KLK3", "FOLH1", "NKX3-1", "HOXB13"),
+  CIRCULAR_deck_NE = c("NEUROD1", "NCAM2", "BEX2", "ID2", "BCOR", "PLXNA3", "STXBP6"))
+
+```
+
+### Patient-level scoring and tests
+Per stratum, sums counts per patient on the ≥10% LOQ universe (control AOIs excluded), applies TMM log-CPM and scores every signature with at least three detected genes by singscore and by mean z-score. Each score is tested against PSA change, response group (with batch and with batch + library-size-weighted ESTIMATE purity), rPFS, PSMA-PET volume change and SUVmean, with leave-one-out and exclusion of batch 3. BH-FDR for PSA change is applied within stratum over the external signatures only. Writes the test table, per-patient scores and the derived PCCAT signature.
+
+```{r comp-20-external-ne-signatures-02}
+code <- c("CD45+" = "CD45", "PSMA+" = "PSMA", "PanCK+PSMA-" = "PanCKPSMA")
+keep_aoi <- cd$response_group_neat != "Control" & cd$timepoint %in% c("Archival", "Screening", "Cycle1")
+rows <- list(); scores_out <- list()
+for (sg in names(code)) for (tp in c("Archival", "Screening", "Cycle1")) {
+  sid <- paste0(code[sg], "__", tp); idx <- which(keep_aoi & cd$segment_name == sg & cd$timepoint == tp); d <- cd[idx, ]
+  g_ok <- uni[[sid]]$g10
+  cc <- assay(se, "all_count")[g_ok, idx]
+  m <- sapply(split(seq_len(nrow(d)), d$subject_id), function(i) rowSums(cc[, i, drop = FALSE]))
+  lc <- cpm(calcNormFactors(DGEList(m)), log = TRUE, prior.count = 1); z <- t(scale(t(lc))); rk <- rankGenes(lc)
+  meta <- d %>% group_by(subject_id) %>% summarise(batch = first(study_batch), purity = weighted.mean(tumour.purity.estimate, library_size), .groups = "drop")
+  meta <- meta[match(colnames(lc), meta$subject_id), ] %>% left_join(pt, by = "subject_id") %>% as.data.frame()
+  nr <- ifelse(meta$response_group_neat == "Non_Responder", 1, ifelse(meta$response_group_neat == "Responder", 0, NA))
+  for (s in names(sigs)) {
+    g <- intersect(sigs[[s]], rownames(lc)); if (length(g) < 3) next
+    y <- simpleScore(rk, upSet = g)$TotalScore; yz <- colMeans(z[g, , drop = FALSE])
+    scores_out[[paste(sid, s)]] <- data.frame(stratum = sid, signature = s, subject_id = meta$subject_id, singscore = y, zmean = yz)
+    sp <- function(v, yy = y) { ok <- complete.cases(yy, v); if (sum(ok) < 8) return(c(NA, NA))
+      ct <- cor.test(yy[ok], v[ok], method = "spearman", exact = FALSE); c(unname(ct$estimate), ct$p.value) }
+    a <- sp(meta$max_psa_change); az <- sp(meta$max_psa_change, yz)
+    lmp <- function(f, dd) { s_ <- summary(lm(f, dd))$coefficients; if ("nr" %in% rownames(s_)) s_["nr", 4] else NA }
+    dd <- data.frame(y = y, nr = nr, batch = meta$batch, purity = meta$purity)[!is.na(nr), ]
+    cx <- tryCatch({ f <- coxph(Surv(r_pfstime, r_pfsevent) ~ scale(y), data = cbind(meta, y = y))
+      c(exp(coef(f)), summary(f)$coefficients[1, 5]) }, error = function(e) c(NA, NA))
+    lo <- sapply(seq_along(y), function(i) sp(meta$max_psa_change[-i], y[-i])[2])
+    b3 <- meta$batch != "batch_3"
+    rows[[paste(sid, s)]] <- data.frame(stratum = sid, signature = s, n_genes = length(g), n = length(y), n_NR = sum(nr == 1, na.rm = TRUE),
+      rho_psa = a[1], p_psa = a[2], rho_psa_zmean = az[1], p_psa_zmean = az[2],
+      p_NR_wilcox = tryCatch(wilcox.test(y[nr %in% 1], y[nr %in% 0], exact = FALSE)$p.value, error = function(e) NA),
+      p_NR_batch = lmp(y ~ nr + batch, dd), p_NR_batch_purity = lmp(y ~ nr + batch + purity, dd),
+      HR_rPFS = cx[1], p_rPFS = cx[2], rho_PETvol = sp(meta$PSMAPET_vol_change_pct)[1], p_PETvol = sp(meta$PSMAPET_vol_change_pct)[2],
+      rho_SUVmean = sp(meta$PSMAPET_BL_SUVmean)[1], p_SUVmean = sp(meta$PSMAPET_BL_SUVmean)[2],
+      p_psa_LOO_worst = max(lo, na.rm = TRUE), rho_psa_no_b3 = sp(meta$max_psa_change[b3], y[b3])[1], p_psa_no_b3 = sp(meta$max_psa_change[b3], y[b3])[2])
+  }
+}
+tab <- bind_rows(rows) %>% group_by(stratum) %>% mutate(fdr_psa = p.adjust(ifelse(grepl("^CIRCULAR", signature), NA, p_psa), "BH")) %>% ungroup()
+options(width = 260)
+print(as.data.frame(tab %>% mutate(across(where(is.numeric), ~signif(.x, 2))) %>%
+  select(stratum, signature, n_genes, n, n_NR, rho_psa, p_psa, fdr_psa, p_NR_wilcox, p_NR_batch, p_NR_batch_purity, HR_rPFS, p_rPFS, rho_PETvol, p_PETvol, p_psa_LOO_worst, p_psa_no_b3)), row.names = FALSE)
+write.csv(tab, file.path(out_dir, "external_signatures_tests.csv"), row.names = FALSE)
+write.csv(bind_rows(scores_out), file.path(out_dir, "external_signatures_scores.csv"), row.names = FALSE)
+writeLines(pccat_ne_vs_lum, file.path(out_dir, "PCCAT_NEPC_vs_CRPC_signature.txt"))
+cat("R3b complete.\n")
+```

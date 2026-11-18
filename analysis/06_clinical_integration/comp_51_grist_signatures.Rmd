@@ -1,0 +1,151 @@
+---
+title: "STAMPEDE transcriptome signatures (Grist et al.) in PRINCE patient pseudobulk"
+subtitle: "PRINCE spatial transcriptomics: `comp_51_grist_signatures`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+This script tests whether the published transcriptome signatures from the STAMPEDE trials (Grist et al., Cell 2025, Table S4) relate to response to Lu-PSMA plus pembrolizumab. Table S4 gives gene lists without weights or directions. Single-direction gene sets are therefore scored as published, as the mean within-stratum z-score of LOQ-detected genes. A set is scored only when at least five of its genes, and at least 20% of the set, are detected.
+
+The two PTEN-loss classifiers have no published direction. They are scored exploratorily by signing each gene by its Spearman correlation with *PTEN* mRNA within the stratum, which uses no outcome information, and are checked against ctDNA *PTEN* status. Weighted, centroid and proprietary classifiers are listed as not scored. In each patient-pseudobulk stratum, each scored signature is tested for coherence, association with PSA change (Spearman, and lm with batch), rPFS (Cox, per s.d.), correlation with *FOLH1*, and differences by ctDNA *PTEN*, *TP53* and *AR* alteration. BH correction is applied across signatures within stratum.
+
+**Manuscript items supported**
+
+- Supplementary Table 102 (assembled by comp_47)
+- Results: STAMPEDE signatures not associated with PSA change in any pre-treatment stratum
+- Discussion: generic prognostic classifiers versus target-specific markers
+- Methods: Signatures (27 of 61 STAMPEDE signatures scorable)
+
+**Pipeline step:** `./run_pipeline.sh --only 51_grist_signatures`. Approximate runtime: under a minute.
+
+**Inputs**
+
+- `results/C13_pseudobulk_LOQ/pseudobulk_strata.qs`
+- `results/C1_clinical/patient_table.qs`
+- `data/ProstateMarkers/mmc4.xlsx`
+
+**Outputs**
+
+- `results/R23_grist_signatures/A_signature_tests_per_stratum.csv`
+- `results/R23_grist_signatures/B_pretreatment_consistency.csv`
+- `results/R23_grist_signatures/C_gene_coverage.csv`
+- `results/R23_grist_signatures/D_not_scored.csv`
+
+**Depends on**: `comp_01`, `comp_13b`
+
+## Analysis
+
+### STAMPEDE signatures
+
+The header sets out the scoring rules for single-direction sets, the PTEN-oriented classifiers and the classifiers that cannot be reproduced.
+
+Loads the patient pseudobulk strata and the clinical table, which includes rPFS and ctDNA alteration status.
+
+```{r comp-51-grist-signatures-01}
+## ============================================================================
+## PRINCE -- R23: STAMPEDE transcriptome signatures (Grist et al., Cell 2025; Table S4 gene lists) in PRINCE.
+## Table S4 gives gene lists without weights or directions, so:
+##   * unidirectional gene sets are scored as published: mean z-score of LOQ-detected genes (>= 5 genes and >= 20% of the set);
+##   * PTEN-loss classifiers (PTEN_loss_Liu, PTEN_loss_Saal; direction unknown) are scored exploratorily: each gene is
+##     signed by its Spearman correlation with PTEN mRNA across that stratum's patients (outcome-free; higher score = lower
+##     PTEN-associated expression = putative PTEN inactivity) and validated against ctDNA PTEN alteration;
+##   * weighted / proprietary / centroid classifiers (Decipher, PORTOS, PAM50, PSC, and other direction-unknown sets) are not scored.
+## Per patient-pseudobulk stratum (C13_pseudobulk_LOQ): coherence (mean pairwise gene correlation), Spearman with PSA change,
+## lm with batch, Cox rPFS per s.d., correlation with FOLH1, and comparison by ctDNA PTEN / TP53 / AR alteration.
+## BH across signatures within stratum. Outputs: results/R23_grist_signatures/
+## ============================================================================
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({ library(qs); library(dplyr); library(tidyr); library(survival); library(readxl) })
+setwd(PRINCE_DIR)
+out_dir <- file.path(COMP_DIR, "R23_grist_signatures"); dir.create(out_dir, showWarnings = FALSE)
+pbs <- qs::qread(out_path("C13_pseudobulk_LOQ", "pseudobulk_strata.qs"))
+pt <- qs::qread(out_path("C1_clinical", "patient_table.qs"))
+
+```
+
+### Scoring and tests
+
+Reads Table S4 and builds the gene list for each signature. It lists the single-direction sets and the two PTEN-loss classifiers explicitly; all other signatures are recorded as not scored. For each stratum and signature, gene coverage is recorded, and sets below the detection threshold are skipped. PTEN classifiers are oriented so that a higher score means expression moving against *PTEN* mRNA.
+
+Each score is then related to PSA change, rPFS, *FOLH1* and ctDNA alterations; alteration comparisons need at least three patients per group. BH correction is applied within stratum. The six pre-treatment strata (archival primary and pre-treatment bone) are summarised for consistency of direction and significance. All four tables are written.
+
+```{r comp-51-grist-signatures-02}
+## ---- Table S4 ----
+s4 <- read_excel("ProstateMarkers/mmc4.xlsx", col_names = FALSE, skip = 3, .name_repair = "minimal")
+s4 <- s4[!is.na(s4[[1]]) & !grepl("^a\\.", s4[[1]]), ]
+sigs <- setNames(lapply(seq_len(nrow(s4)), function(i) { g <- unlist(s4[i, 6:ncol(s4)]); g <- trimws(g[!is.na(g) & g != ""]); unique(g) }), s4[[1]])
+category <- setNames(s4[[4]], s4[[1]])
+unidirectional <- c("AR_HM", "AR-A_Spratt", "AR_Kumar", "GR", "ER_E_HM", "ER_L_HM", "CCP", "CIN70_Carter", "Persist", "TP53_loss_Donehower",
+                    "IFN_HM", "Inflammation_HM", "CD4_Act_IPS", "CD8_Act_IPS", "MDSC_IPS", "Treg_IPS", "TLS_Cabrita", "Imm190",
+                    "Hypoxia_HM", "Angiogenesis_Uhlik", "EST_Stromal", "EMT_HM", "Glycolysis_Ricketts", "FAM_HM", "Cholesterol_HM",
+                    "Mtorc1_HM", "PI3K_HM", "KRAS_HM", "NE_Kumar", "FA_Knijnenburg", "HRR_Knijnenburg")
+pten_classifiers <- c("PTEN_loss_Liu", "PTEN_loss_Saal")
+not_scored <- setdiff(names(sigs), c(unidirectional, pten_classifiers))
+stopifnot(all(c(unidirectional, pten_classifiers) %in% names(sigs)))
+
+coh <- function(m) { if (nrow(m) < 2) return(NA); r <- cor(t(m), method = "spearman"); mean(r[upper.tri(r)], na.rm = TRUE) }
+sp <- function(a, b) { ok <- complete.cases(a, b); t <- suppressWarnings(cor.test(a[ok], b[ok], method = "spearman", exact = FALSE)); c(unname(t$estimate), t$p.value) }
+res <- list(); cover <- list()
+for (sid in names(pbs)) {
+  p <- pbs[[sid]]; m <- p$meta; lc <- p$lcpm; z <- t(scale(t(lc)))
+  m <- left_join(m, pt %>% select(subject_id, alt_PTEN, alt_TP53, alt_AR), by = "subject_id")
+  psa <- m$psa_change_capped / 50; batch <- factor(m$study_batch); nb <- nlevels(droplevels(batch)) > 1
+  folh1 <- if ("FOLH1" %in% rownames(lc)) lc["FOLH1", ] else rep(NA, ncol(lc))
+  pten <- if ("PTEN" %in% rownames(lc)) lc["PTEN", ] else NULL
+  for (s in c(unidirectional, pten_classifiers)) {
+    g <- intersect(sigs[[s]], rownames(z)); frac <- length(g) / length(sigs[[s]])
+    cover[[paste(sid, s)]] <- data.frame(stratum = sid, signature = s, n_set = length(sigs[[s]]), n_detected = length(g), frac_detected = frac)
+    if (length(g) < 5 || frac < 0.2) next
+    if (s %in% pten_classifiers) {
+      if (is.null(pten)) next
+      g <- setdiff(g, "PTEN")
+      w <- sign(apply(lc[g, , drop = FALSE], 1, function(x) cor(x, pten, method = "spearman")))
+      sc <- colMeans(-w * z[g, , drop = FALSE])              # high = genes moving against PTEN mRNA
+      cg <- coh(-w * lc[g, , drop = FALSE])
+    } else { sc <- colMeans(z[g, , drop = FALSE]); cg <- coh(lc[g, , drop = FALSE]) }
+    r <- sp(sc, m$max_psa_change)
+    fl <- if (nb) lm(sc ~ psa + batch) else lm(sc ~ psa); b <- summary(fl)$coefficients["psa", c(1, 4)]
+    cx <- tryCatch(summary(coxph(Surv(m$r_pfstime, m$r_pfsevent) ~ scale(sc)))$coefficients[1, c(2, 5)], error = function(e) c(NA, NA))
+    alt <- function(a) { a <- m[[a]]; if (sum(a %in% 1) < 3 || sum(a %in% 0) < 3) return(c(NA, NA))
+      c(median(sc[a %in% 1]) - median(sc[a %in% 0]), wilcox.test(sc[a %in% 1], sc[a %in% 0], exact = FALSE)$p.value) }
+    ap <- alt("alt_PTEN"); at <- alt("alt_TP53"); aa <- alt("alt_AR")
+    res[[paste(sid, s)]] <- data.frame(stratum = sid, signature = s, category = category[s], scoring = ifelse(s %in% pten_classifiers, "PTEN-oriented (exploratory)", "as published"),
+      n = length(sc), n_genes = length(g), coherence = cg, rho_psa = r[1], p_psa = r[2], beta_psa_batch = b[1], p_psa_batch = b[2],
+      HR_rPFS = cx[1], p_rPFS = cx[2], rho_FOLH1 = sp(sc, folh1)[1], p_FOLH1 = sp(sc, folh1)[2],
+      diff_PTENalt = ap[1], p_PTENalt = ap[2], diff_TP53alt = at[1], p_TP53alt = at[2], diff_ARalt = aa[1], p_ARalt = aa[2])
+  }
+}
+res <- bind_rows(res) %>% group_by(stratum) %>% mutate(fdr_psa = p.adjust(p_psa, "BH"), fdr_rPFS = p.adjust(p_rPFS, "BH"), fdr_FOLH1 = p.adjust(p_FOLH1, "BH")) %>% ungroup()
+cover <- bind_rows(cover)
+## consistency across the six pre-treatment strata (archival primary + pre-treatment bone)
+base <- res %>% filter(!grepl("Cycle1", stratum)) %>% group_by(signature, category, scoring) %>%
+  summarise(n_strata = n(), median_coherence = median(coherence), n_neg_rho = sum(rho_psa < 0), n_p05 = sum(p_psa < 0.05), min_fdr_psa = min(fdr_psa),
+            median_rho_psa = median(rho_psa), median_rho_FOLH1 = median(rho_FOLH1), n_FOLH1_fdr10 = sum(fdr_FOLH1 < 0.1),
+            n_rPFS_p05 = sum(p_rPFS < 0.05), median_HR = median(HR_rPFS), .groups = "drop") %>% arrange(min_fdr_psa)
+write.csv(res, file.path(out_dir, "A_signature_tests_per_stratum.csv"), row.names = FALSE)
+write.csv(base, file.path(out_dir, "B_pretreatment_consistency.csv"), row.names = FALSE)
+write.csv(cover, file.path(out_dir, "C_gene_coverage.csv"), row.names = FALSE)
+write.csv(data.frame(signature = not_scored, category = category[not_scored], n_genes = lengths(sigs[not_scored]),
+                     reason = "weights/direction not available in Table S4 (classifier, centroid, proprietary or single gene)"), file.path(out_dir, "D_not_scored.csv"), row.names = FALSE)
+options(width = 230); f2 <- function(x) as.data.frame(mutate(x, across(where(is.numeric), ~signif(.x, 2))))
+cat("\n==== B. pre-treatment consistency (6 strata) ====\n"); print(f2(base), row.names = FALSE)
+cat("\n==== A. FDR < 0.1 for PSA change or rPFS (any stratum) ====\n")
+print(f2(res %>% filter(fdr_psa < 0.1 | fdr_rPFS < 0.1) %>% select(stratum, signature, n_genes, coherence, rho_psa, p_psa, fdr_psa, p_psa_batch, HR_rPFS, p_rPFS, fdr_rPFS, rho_FOLH1)), row.names = FALSE)
+cat("\n==== PTEN classifiers vs ctDNA PTEN alteration ====\n")
+print(f2(res %>% filter(signature %in% c(pten_classifiers, "PI3K_HM", "Mtorc1_HM", "Glycolysis_Ricketts", "FAM_HM")) %>% select(stratum, signature, n_genes, coherence, diff_PTENalt, p_PTENalt, rho_psa, p_psa, rho_FOLH1, p_FOLH1)), row.names = FALSE)
+cat("\nnot scored:", length(not_scored), "\nR23 complete.\n")
+```

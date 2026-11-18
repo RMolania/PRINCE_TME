@@ -1,0 +1,198 @@
+---
+title: "Legacy: corrected SpatialDecon proportions from beta.granular"
+subtitle: "PRINCE spatial transcriptomics: `phase6b_spatialdecon_fix`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "results_legacy"))
+```
+
+## Overview
+
+This is a legacy script from the earlier all-site analysis (primary tumours plus metastatic biopsies from bone, lymph node and soft tissue). It is included for transparency and is not part of the bone-only pipeline. It corrects phase6. SpatialDecon's merged proportions (`prop_of_all`, `prop_of_nontumor`) silently dropped the ten automatically estimated tumour clusters, because safeTME's cell-type merge table has no mapping for them. This script recomputes the proportions from the unmerged `beta.granular` matrix. The full 18 safeTME subtypes are kept, giving tumour fraction as tumour / (tumour + immune/stromal) and CD45⁺ immune composition renormalised without tumour clusters. The mask validation and the response and timepoint comparisons of phase6 are then repeated.
+
+No output of this script is used in the current analysis.
+
+**Manuscript items supported**
+
+- Not used by the manuscript (legacy; superseded by comp_03b/comp_17/comp_19)
+
+**Pipeline step:** `./run_pipeline.sh --legacy` (optional; not needed to reproduce the manuscript, whose frozen inputs are in `data/previous_analysis/`). Approximate runtime: under a minute.
+
+**Inputs**
+
+- `results_legacy/phase6_spatialdecon_results.rds`
+- `data/interim/phase2_se_with_qc_metrics.qs`
+
+**Outputs**
+
+- `results_legacy/Results/Phase6_SpatialDecon/mask_validation_FIXED.pdf`
+- `results_legacy/Results/Phase6_SpatialDecon/CD45_celltype_proportions_FIXED.csv`
+- `results_legacy/Results/Phase6_SpatialDecon/CD45_celltype_vs_response_FIXED.csv`
+- `results_legacy/Results/Phase6_SpatialDecon/CD45_celltype_vs_timepoint_FIXED.csv`
+- `results_legacy/Results/Phase6_SpatialDecon/CD45_composition_stacked_FIXED.pdf`
+
+**Depends on**: `phase6_spatialdecon`
+
+## Analysis
+
+### Legacy correction of SpatialDecon proportions
+
+The header explains why the merged proportions were wrong and why the finer 18-subtype resolution is kept.
+
+Loads the phase6 result and splits the rows of `beta.granular` into tumour clusters and immune/stromal types. It then checks that the AOI selection matches the columns of `beta.granular`.
+
+```{r phase6b-spatialdecon-fix-01}
+## ============================================================================
+## Phase 6b: recompute proportions from the clean beta.granular matrix
+## (spatialdecon's own cellmerges-based prop_of_all/prop_of_nontumor silently
+## dropped the 10 auto-estimated tumor.1..tumor.10 clusters since safeTME.matches
+## has no mapping for them -- beta.granular itself has zero NAs and is used here
+## directly instead, keeping the full 18 safeTME immune/stromal subtypes rather
+## than the coarser 14-category collapse, since finer subtype resolution
+## -- naive vs memory T cells, classical vs non-classical monocytes -- is more
+## informative for the CD45+ question asked).
+## ============================================================================
+suppressMessages({
+  library(qs); library(SummarizedExperiment); library(dplyr); library(tidyr); library(ggplot2)
+})
+PRINCE_ROOT <- normalizePath(Sys.getenv("PRINCE_ROOT", "."))
+RAW_DIR <- file.path(PRINCE_ROOT, "data", "interim")     # all-site QC'd objects written by comp_00a_qc
+dir.create(file.path(PRINCE_ROOT, "results_legacy"), showWarnings = FALSE)
+setwd(file.path(PRINCE_ROOT, "results_legacy"))           # legacy outputs; frozen copies used downstream are in data/previous_analysis
+
+res <- readRDS("phase6_spatialdecon_results.rds")
+bg <- res$beta.granular
+tumor_rows <- grep("^tumor\\.", rownames(bg))
+immune_rows <- setdiff(seq_len(nrow(bg)), tumor_rows)
+
+se <- qs::qread(file.path(RAW_DIR, "phase2_se_with_qc_metrics.qs"))
+cd_full <- as.data.frame(colData(se))
+idx <- cd_full$qc_status == "PASS" & cd_full$response_group_neat != "Control" & !is.na(cd_full$neg_probe_geomean)
+cd <- droplevels(cd_full[idx, ])
+stopifnot(identical(rownames(cd), colnames(bg)))
+
+```
+
+### Mask validation
+
+Computes the tumour fraction per AOI from the summed tumour-cluster and immune/stromal abundances. The fraction is summarised by compartment, and degenerate fits are counted.
+
+```{r phase6b-spatialdecon-fix-02}
+## ---- mask validation: total tumour vs total immune+stromal fraction, per AOI
+total_tumor <- colSums(bg[tumor_rows, , drop = FALSE])
+total_immune <- colSums(bg[immune_rows, , drop = FALSE])
+cd$tumor_fraction <- total_tumor / (total_tumor + total_immune)
+cd$nontumor_fraction <- 1 - cd$tumor_fraction
+
+cat("================ MASK VALIDATION: tumour vs non-tumour fraction by segment ================\n")
+print(cd %>% group_by(segment_name) %>%
+        summarise(n = n(), median_tumor_frac = median(tumor_fraction, na.rm=TRUE), mean_tumor_frac = mean(tumor_fraction, na.rm=TRUE),
+                  median_nontumor_frac = median(nontumor_fraction, na.rm=TRUE), n_degenerate_fit = sum(is.nan(tumor_fraction))))
+
+p_mask <- ggplot(cd, aes(segment_name, tumor_fraction, fill = segment_name)) +
+  geom_boxplot(outlier.size = 0.6) + theme_bw() +
+  labs(title = "SpatialDecon mask validation", subtitle = "Estimated tumour fraction by GeoMx segment (safeTME + auto tumour clusters)",
+       x = NULL, y = "Estimated tumour fraction") + theme(legend.position = "none")
+ggsave("Results/Phase6_SpatialDecon/mask_validation_FIXED.pdf", p_mask, width = 6, height = 5)
+
+```
+
+### CD45⁺ composition
+
+Renormalises the immune/stromal abundances in CD45⁺ AOIs to proportions. The script reports the tumour fraction in CD45⁺ AOIs, which indicates mis-segmentation, and repeats the AOI-level tests against response group and timepoint. It also prints macrophage, monocyte-subtype and naive/memory T-cell summaries.
+
+```{r phase6b-spatialdecon-fix-03}
+## ---- CD45+ immune composition (proportion of the 18 safeTME subtypes, renormalized to exclude tumour clusters)
+cd45_idx <- which(cd$segment_name == "CD45+")
+immune_mat <- bg[immune_rows, cd45_idx, drop = FALSE]
+prop_nontumor <- sweep(immune_mat, 2, colSums(immune_mat), "/")
+celltype_df <- as.data.frame(t(prop_nontumor))
+celltype_df$subject_id <- cd$subject_id[cd45_idx]
+celltype_df$timepoint <- cd$timepoint[cd45_idx]
+celltype_df$response_group_neat <- cd$response_group_neat[cd45_idx]
+celltype_df$tumor_fraction <- cd$tumor_fraction[cd45_idx]
+
+cat("\nCD45+ mean estimated tumour (mis-segmentation) fraction:", round(mean(cd$tumor_fraction[cd45_idx]), 4), "\n")
+
+write.csv(celltype_df, "Results/Phase6_SpatialDecon/CD45_celltype_proportions_FIXED.csv", row.names = FALSE)
+
+cat("\n================ CD45+ CELL TYPE COMPOSITION: mean proportion overall (18 subtypes) ================\n")
+ct_cols <- setdiff(colnames(celltype_df), c("subject_id", "timepoint", "response_group_neat", "tumor_fraction"))
+print(round(sort(colMeans(celltype_df[, ct_cols]), decreasing = TRUE), 4))
+
+cat("\n================ CD45+ CELL TYPE vs RESPONSE GROUP (Archival+Screening) ================\n")
+sub <- celltype_df %>% filter(timepoint %in% c("Archival", "Screening"))
+test_rows <- list()
+for (ct in ct_cols) {
+  fit <- lm(sub[[ct]] ~ sub$response_group_neat)
+  pval <- tryCatch(anova(fit)$`Pr(>F)`[1], error = function(e) NA)
+  r2 <- summary(fit)$r.squared
+  means <- tapply(sub[[ct]], sub$response_group_neat, mean)
+  test_rows[[ct]] <- data.frame(celltype = ct, R2 = round(r2,4), pval = pval,
+                                 mean_Intermediate = round(means["Intermediate"],4),
+                                 mean_NonResponder = round(means["Non_Responder"],4),
+                                 mean_Responder = round(means["Responder"],4))
+}
+test_tab <- bind_rows(test_rows) %>% arrange(pval)
+print(test_tab, row.names = FALSE)
+write.csv(test_tab, "Results/Phase6_SpatialDecon/CD45_celltype_vs_response_FIXED.csv", row.names = FALSE)
+
+cat("\n================ CD45+ CELL TYPE vs TIMEPOINT (all patients) ================\n")
+test_rows_tp <- list()
+for (ct in ct_cols) {
+  fit <- lm(celltype_df[[ct]] ~ celltype_df$timepoint)
+  pval <- tryCatch(anova(fit)$`Pr(>F)`[1], error = function(e) NA)
+  means <- tapply(celltype_df[[ct]], celltype_df$timepoint, mean)
+  test_rows_tp[[ct]] <- data.frame(celltype = ct, pval = pval,
+                                    Archival = round(means["Archival"],4), Screening = round(means["Screening"],4),
+                                    Cycle1 = round(means["Cycle1"],4), DiseaseProgression = round(means["DiseaseProgression"],4))
+}
+test_tab_tp <- bind_rows(test_rows_tp) %>% arrange(pval)
+print(test_tab_tp, row.names = FALSE)
+write.csv(test_tab_tp, "Results/Phase6_SpatialDecon/CD45_celltype_vs_timepoint_FIXED.csv", row.names = FALSE)
+
+cat("\n================ MACROPHAGE FRACTION: response x timepoint ================\n")
+print(celltype_df %>% group_by(timepoint, response_group_neat) %>%
+        summarise(n = n(), mean_macrophage = round(mean(macrophages),4), .groups = "drop"))
+
+cat("\n================ MONOCYTE SUBTYPES (classical vs non-classical): response x timepoint ================\n")
+print(celltype_df %>% group_by(timepoint, response_group_neat) %>%
+        summarise(n = n(), mean_mono_classical = round(mean(monocytes.C),4),
+                  mean_mono_nonclassical = round(mean(monocytes.NC.I),4), .groups = "drop"))
+
+cat("\n================ T-CELL NAIVE vs MEMORY: response x timepoint ================\n")
+print(celltype_df %>% group_by(timepoint, response_group_neat) %>%
+        summarise(n = n(), mean_CD8_naive = round(mean(T.CD8.naive),4), mean_CD8_memory = round(mean(T.CD8.memory),4),
+                  mean_CD4_naive = round(mean(T.CD4.naive),4), mean_CD4_memory = round(mean(T.CD4.memory),4), .groups = "drop"))
+
+```
+
+Saves the stacked composition plot.
+
+```{r phase6b-spatialdecon-fix-04}
+## stacked composition plot
+long <- celltype_df %>% select(-tumor_fraction) %>%
+  pivot_longer(-c(subject_id, timepoint, response_group_neat), names_to = "celltype", values_to = "prop")
+top_types <- names(sort(colMeans(celltype_df[, ct_cols]), decreasing = TRUE))[1:8]
+long$celltype_grp <- ifelse(long$celltype %in% top_types, long$celltype, "other")
+p_stack <- ggplot(long %>% filter(timepoint %in% c("Archival","Screening","Cycle1")),
+                   aes(x = response_group_neat, y = prop, fill = celltype_grp)) +
+  stat_summary(fun = mean, geom = "bar", position = "stack") +
+  facet_wrap(~timepoint) + theme_bw() +
+  labs(title = "CD45+ estimated immune composition (mean proportion, safeTME)", x = NULL, y = "Mean proportion", fill = "Cell type") +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+ggsave("Results/Phase6_SpatialDecon/CD45_composition_stacked_FIXED.pdf", p_stack, width = 10, height = 6)
+
+cat("\nPhase 6b (fixed) complete.\n")
+```

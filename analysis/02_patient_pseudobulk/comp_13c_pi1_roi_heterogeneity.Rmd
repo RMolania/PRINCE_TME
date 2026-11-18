@@ -1,0 +1,104 @@
+---
+title: "Non-null fraction (π₁) and ROI-level heterogeneity of FOLH1 and AR activity"
+subtitle: "PRINCE spatial transcriptomics: `comp_13c_pi1_roi_heterogeneity`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+Produces two small derived tables. (1) The estimated fraction of response-associated genes per stratum, π₁ = 1 − π₀, from the transcriptome-wide pseudobulk P values, by limma `propTrueNull` (local-FDR and histogram methods), together with the observed and expected number of genes at P < 0.01. (2) Whether low *FOLH1* or low AR activity in poor responders is lesion-wide or confined to a few regions: for patients with at least two ROIs in a stratum, AOI-level *FOLH1* and Hallmark androgen-response scores are summarised per patient as mean, minimum, maximum, s.d. and fraction of ROIs in the cohort's lowest quartile, and each summary is correlated with PSA change.
+
+Part (1) reads the interim `C13_pseudobulk` limma results (comp_13, `filterByExpr` genes); the π₁ values in the final Supplementary Table 17 are recomputed from the LOQ-universe results by comp_47. Part (2) uses the LOQ gene universe and is the version reported.
+
+**Manuscript items supported**
+
+- Extended Data Fig. 4b (ROI-level summaries of *FOLH1* and Hallmark androgen response versus PSA change), via comp_28
+- Supplementary Table 60 (via comp_29)
+- Methods: Composition and heterogeneity sensitivity analyses (spatial heterogeneity)
+- π₁ table: intermediate (used by comp_15; superseded in Supplementary Table 17 by comp_47)
+
+**Pipeline step:** `./run_pipeline.sh --only 13c_pi1_roi_heterogeneity`. Approximate runtime: about a minute.
+
+**Inputs**
+
+- `results/C13_pseudobulk/transcriptome_wide_limma_all_strata.csv`
+- `data/phase2_se_qc_filtered.qs`
+- `results/C1_clinical/patient_table.qs`
+- `results/R1_loq/loq_gene_universes.qs`
+- `data/reference/msigdb_gene_sets.rds`
+
+**Outputs**
+
+- `results/C13_pseudobulk/pi1_nonnull_fraction.csv`
+- `results/C13_pseudobulk_LOQ/ROI_summary_heterogeneity_FOLH1_AR.csv`
+
+**Depends on**: `comp_13_pseudobulk_primary`, `comp_16_loq_filter`, `comp_01_clinical`, `comp_00b_bone_cohort`
+
+## Analysis
+
+Header describing the two tables, which follow the bone-only cohort definition.
+
+### π₁ and ROI-level heterogeneity
+- π₁ per stratum from the pseudobulk limma P values (local-FDR and histogram estimators), with the observed versus expected number of genes at P < 0.01.
+- For each compartment × timepoint stratum (control AOIs excluded), AOI-level TMM log-CPM on the ≥10% LOQ universe; *FOLH1* is taken directly and AR activity as the mean z-score of Hallmark androgen-response genes.
+- Per patient with at least two AOIs: mean, minimum, maximum, s.d. and fraction of AOIs below the stratum's 25th percentile, each correlated with maximal PSA change (Spearman).
+
+```{r comp-13c-pi1-roi-heterogeneity-01}
+## ============================================================================
+## PRINCE -- two small derived tables previously produced by one-off code (Oct 2026),
+## now scripted so that they follow the PRINCE_BONE_ONLY switch:
+##  (1) C13_pseudobulk/pi1_nonnull_fraction.csv: non-null fraction (pi1) per stratum of the
+##      transcriptome-wide pseudobulk limma P values
+##  (2) C13_pseudobulk_LOQ/ROI_summary_heterogeneity_FOLH1_AR.csv: ROI-level FOLH1 / Hallmark AR
+##      summaries (mean, min, max, sd, fraction in cohort lowest quartile) vs PSA change,
+##      patients with >= 2 ROIs
+## ============================================================================
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({ library(SummarizedExperiment); library(edgeR); library(limma); library(dplyr) })
+
+## (1) pi1
+t <- read.csv(file.path(COMP_DIR, "C13_pseudobulk", "transcriptome_wide_limma_all_strata.csv"))
+r <- t %>% group_by(stratum) %>% summarise(pi1_lfdr = 1 - propTrueNull(P.Value, method = "lfdr"),
+  pi1_hist = 1 - propTrueNull(P.Value, method = "hist"), n_p01 = sum(P.Value < 0.01), exp_p01 = round(0.01 * n()))
+print(as.data.frame(r), digits = 2)
+write.csv(r, file.path(COMP_DIR, "C13_pseudobulk", "pi1_nonnull_fraction.csv"), row.names = FALSE)
+
+## (2) ROI-level heterogeneity
+se <- qs::qread(file.path(PRINCE_DIR, "phase2_se_qc_filtered.qs")); cd <- as.data.frame(colData(se))
+pt <- qs::qread(out_path("C1_clinical", "patient_table.qs"))
+uni <- qs::qread(file.path(COMP_DIR, "R1_loq", "loq_gene_universes.qs"))$universes
+msig <- readRDS(file.path(PMCC_DIR, "msigdb_gene_sets.rds"))
+code <- c("CD45+" = "CD45", "PSMA+" = "PSMA", "PanCK+PSMA-" = "PanCKPSMA"); out <- list()
+for (sg in names(code)) for (tp in c("Archival", "Screening", "Cycle1")) {
+  idx <- which(cd$segment_name == sg & cd$timepoint == tp & cd$response_group_neat != "Control"); d <- cd[idx, ]
+  g <- uni[[paste0(code[sg], "__", tp)]]$g10
+  lc <- cpm(calcNormFactors(DGEList(assay(se, "all_count")[g, idx])), log = TRUE, prior.count = 1)
+  z <- t(scale(t(lc))); ar <- colMeans(z[intersect(msig$H$HALLMARK_ANDROGEN_RESPONSE, rownames(z)), ])
+  for (f in c("FOLH1", "AR_Hallmark")) {
+    v <- if (f == "FOLH1") lc["FOLH1", ] else ar; q25 <- quantile(v, 0.25)
+    s <- data.frame(subject_id = d$subject_id, v = v) %>% group_by(subject_id) %>% filter(n() >= 2) %>%
+      summarise(n_roi = n(), mean = mean(v), min = min(v), max = max(v), sd = sd(v), frac_low = mean(v < q25), .groups = "drop") %>%
+      left_join(pt, by = "subject_id")
+    for (st in c("mean", "min", "max", "sd", "frac_low")) {
+      ct <- suppressWarnings(cor.test(s[[st]], s$max_psa_change, method = "spearman", exact = FALSE))
+      out[[paste(sg, tp, f, st)]] <- data.frame(segment = sg, timepoint = tp, feature = f, summary = st, n = nrow(s),
+        med_roi = median(s$n_roi), rho = unname(ct$estimate), p = ct$p.value) }
+  }
+}
+res <- bind_rows(out)
+write.csv(res, file.path(COMP_DIR, "C13_pseudobulk_LOQ", "ROI_summary_heterogeneity_FOLH1_AR.csv"), row.names = FALSE)
+cat("13c complete\n")
+```

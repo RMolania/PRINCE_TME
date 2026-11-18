@@ -1,0 +1,444 @@
+---
+title: "Association analyses of the PCCAT tumour-state scores"
+subtitle: "PRINCE spatial transcriptomics: `comp_33a_state_associations`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+The association analysis of the PCCAT tumour-state scores from `comp_33_pccat_states`, in the six tumour-compartment strata (PSMA+ and PanCK+PSMA− at each timepoint). The patient is the unit of inference. Patient-level analyses use the pseudobulk singscores. AOI-level analyses use mixed models with a patient random intercept and are judged by permutation: within-patient for the within-lesion slope, and across patients for response.
+
+It asks whether lower-PSMA, lower-AR tumours carry other lineage states: (1a) between-patient correlation of state scores with *FOLH1*, Hallmark androgen and *AR*; (1b) within-patient AOI-level association, with each predictor split into patient mean and within-patient deviation (a Mundlak-style decomposition); (1c) PanCK+PSMA− minus PSMA+ differences within patient. It then relates states to (2) PSA response, response group and rPFS, (3) the *FOLH1*–PSA association, (4) change between timepoints, and (5) ctDNA tumour-suppressor status and FDG uptake. Section 6 repeats the key tests adjusting for deconvolved epithelial-tumour fraction, because several non-luminal signatures contain stromal or myeloid genes.
+
+Two flags guard interpretation. `poorly_measured` marks signatures with < 40% of genes above LOQ in a stratum. `circular` marks tests where the signature contains the predictor (for example *FOLH1* in AR+/PSMA+ luminal sets). Associations are also repeated without batch 3, which contains all intermediate patients.
+
+**Manuscript items supported**
+
+- Supplementary Table 69 (S69_PCCAT_states_vs_response: section 2), via `comp_29_supp_tables_v4`
+- Supplementary Table 70 (S70_PCCAT_states_vs_FOLH1_AR: section 1a), via `comp_29_supp_tables_v4`
+- Section 2 results are reread by the critical-review analysis (`comp_33c_state_review`; Supplementary Tables 72–73)
+- Methods: Atlas-derived tumour-state signatures
+- Results: lineage-state paragraph of 'Re-evaluation of earlier neuroendocrine, purity and bone-niche findings' (within-patient, segment-difference and purity analyses)
+
+**Pipeline step:** `./run_pipeline.sh --only 33a_state_associations`.
+
+**Inputs**
+
+- `results/R11_pccat_states/C_scores.qs`
+- `results/R11_pccat_states/C_signature_detection.csv`
+- `results/C1_clinical/patient_table.qs`
+- `results/C3_deconvolution/deconvolution_proportions.qs`
+- `results/C13_pseudobulk_LOQ/pseudobulk_strata.qs`
+
+**Outputs**
+
+- `results/R11_pccat_states/state_association/0_response_by_batch.csv`
+- `results/R11_pccat_states/state_association/1a_between_patient_state_vs_FOLH1_AR.csv`
+- `results/R11_pccat_states/state_association/1b_within_patient_state_vs_FOLH1_AR_lmer.csv`
+- `results/R11_pccat_states/state_association/1c_PSMAneg_vs_PSMApos_segment_paired.csv`
+- `results/R11_pccat_states/state_association/2_state_vs_response.csv`
+- `results/R11_pccat_states/state_association/3_mediation_FOLH1_state_PSA.csv`
+- `results/R11_pccat_states/state_association/4_change_between_timepoints.csv`
+- `results/R11_pccat_states/state_association/5_state_vs_ctDNA_TSG_FDG.csv`
+- `results/R11_pccat_states/state_association/6a_purity_adjusted_response_and_FOLH1.csv`
+- `results/R11_pccat_states/state_association/6b_segment_difference_purity_adjusted.csv`
+- `results/R11_pccat_states/state_association/6b_purity_by_segment.csv`
+- `results/R11_pccat_states/state_association/6c_AOI_mixed_model_patient_permutation_hits.csv`
+- `results/R11_pccat_states/state_association/6d_gene_level_breakdown_hits.csv`
+
+**Depends on**: `comp_33_pccat_states`, `comp_01_clinical`, `comp_03b_deconv`, `comp_13b_pseudobulk_loq`
+
+## Analysis
+
+### Set-up
+Load the AOI- and patient-level state scores, signature detection and clinical variables. Define the 22 state signatures and two AR reference sets, the signatures that contain *FOLH1* (circular against *FOLH1*), the six tumour strata, the poorly-measured flag (< 40% of a signature's genes above LOQ), a minimum of six finite values per test and a z-score helper. PSA change is scaled per 50 percentage points and non-responder status is coded.
+
+```{r comp-33a-state-associations-01}
+## PRINCE R11 -- PCCAT lineage/plasticity states: association analyses
+## Unit of inference = patient. AOI-level models carry a patient random effect and
+## a within-patient permutation P. Outputs only to R11_pccat_states/state_association.
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressPackageStartupMessages({ library(lme4); library(lmerTest); library(survival) })
+set.seed(20261026)
+OUT <- "R11_pccat_states/state_association"
+op  <- function(f) out_path(OUT, f)
+
+X   <- qs::qread(file.path(COMP_DIR, "R11_pccat_states", "C_scores.qs"))
+aoi <- X$aoi; pat <- X$patient
+clin <- qs::qread(file.path(COMP_DIR, "C1_clinical", "patient_table.qs"))
+clin <- as.data.frame(clin)
+det  <- read.csv(file.path(COMP_DIR, "R11_pccat_states", "C_signature_detection.csv"), check.names = FALSE)
+
+STATE <- c("Lum_KLK4","Lum_ERG","Lum_DPP4","Lum_PCA3","Lum_FAM110B","Lum_ETV1","LPCs_HMMR",
+           "Club_PIGR+","Club_PIGR-","Hillock","Basal","NE_FOXA2","NE_EZH2","NE_CHG+",
+           "NE_all","LPCs_all","Club_all","Hillock_all","Basal_all","Luminal_all",
+           "DNPC_like","ARpos_PSMApos_luminal")
+ALLSIG <- c(STATE, "AR_Hallmark", "AR_panel5")
+# signatures containing FOLH1 / AR themselves -> circular vs FOLH1/AR
+CIRC_FOLH1 <- names(X$signatures)[sapply(X$signatures, function(g) "FOLH1" %in% g)]
+TUM <- c("PSMA__Archival","PSMA__Screening","PSMA__Cycle1",
+         "PanCKPSMA__Archival","PanCKPSMA__Screening","PanCKPSMA__Cycle1")
+POOR <- function(sig, st) { d <- det$n_detected_LOQ[det$stratum == st & det$signature == sig]
+  n <- det$n_genes[det$stratum == st & det$signature == sig]
+  if (!length(d)) return(NA); d / n < 0.4 }   # <40% of genes above LOQ -> poorly measured
+okv <- function(v) sum(is.finite(v)) >= 6
+zs <- function(v) (v - mean(v, na.rm = TRUE)) / sd(v, na.rm = TRUE)
+
+pat <- merge(pat, clin[, c("subject_id","response_group_neat","psa_change_capped","max_psa_change",
+                           "r_pfstime","r_pfsevent","alt_TSG_alt","fdg_suvmean_trorres",
+                           "PSMAPET_BL_SUVmean")], by = "subject_id", all.x = TRUE)
+pat$psa <- pat$psa_change_capped / 50
+pat$NR  <- pat$response_group_neat == "Non_Responder"
+
+```
+
+### 1a. Between-patient associations with *FOLH1* and AR
+Spearman correlation of each state score with *FOLH1*, Hallmark androgen and *AR* across patients, per tumour stratum, with and without batch 3. BH-FDR is applied within predictor across signature × stratum, and the poorly-measured and circular flags are added.
+
+```{r comp-33a-state-associations-02}
+## ---------------------------------------------------------------- 1a. between-patient
+res1a <- list()
+for (st in TUM) for (pred in c("FOLH1","AR_Hallmark","AR")) for (s in STATE) {
+  d <- pat[pat$stratum == st, ]; if (!okv(d[[s]])) next
+  ct <- suppressWarnings(cor.test(d[[s]], d[[pred]], method = "spearman", exact = FALSE))
+  d3 <- d[d$batch != "batch_3", ]
+  ct3 <- suppressWarnings(cor.test(d3[[s]], d3[[pred]], method = "spearman", exact = FALSE))
+  res1a[[length(res1a)+1]] <- data.frame(stratum = st, predictor = pred, signature = s, n = nrow(d),
+    rho = unname(ct$estimate), p = ct$p.value, rho_excl_b3 = unname(ct3$estimate), p_excl_b3 = ct3$p.value)
+}
+r1a <- do.call(rbind, res1a)
+r1a$fdr <- ave(r1a$p, r1a$predictor, FUN = function(p) p.adjust(p, "BH"))  # family = sig x stratum
+r1a$poorly_measured <- mapply(POOR, r1a$signature, r1a$stratum)
+r1a$circular <- (r1a$predictor == "FOLH1" & r1a$signature %in% CIRC_FOLH1) |
+                (r1a$predictor == "AR" & r1a$signature %in% c("ARpos_PSMApos_luminal","Luminal_all"))
+write.csv(r1a, op("1a_between_patient_state_vs_FOLH1_AR.csv"), row.names = FALSE)
+
+```
+
+### 1b. Within-patient (AOI-level) associations
+In patients with at least two AOIs, the standardised predictor is split into patient mean and within-patient deviation. The model is lmer(state ~ within + between + (1 | patient)). Inference on the within-patient slope uses 500 permutations that shuffle the predictor among each patient's own AOIs, applied to the demeaned slope. BH-FDR is computed within predictor.
+
+```{r comp-33a-state-associations-03}
+## ---------------------------------------------------------------- 1b. within-patient (AOI)
+NPERM <- 500
+res1b <- list()
+for (st in TUM) for (pred in c("FOLH1","AR_Hallmark")) {
+  d <- aoi[aoi$stratum == st, ]
+  d <- d[d$subject_id %in% names(which(table(d$subject_id) >= 2)), ]   # need >=2 AOIs
+  d$x  <- zs(d[[pred]])
+  d$xm <- ave(d$x, d$subject_id); d$xw <- d$x - d$xm
+  # within-patient permutation index sets
+  grps <- split(seq_len(nrow(d)), d$subject_id)
+  perms <- replicate(NPERM, { ix <- seq_len(nrow(d)); for (g in grps) ix[g] <- g[sample.int(length(g))]; ix })
+  for (s in STATE) {
+    if (!okv(d[[s]])) next
+    d$y <- zs(d[[s]])
+    fit <- tryCatch(suppressMessages(lmer(y ~ xw + xm + (1|subject_id), data = d, REML = TRUE)), error = function(e) NULL)
+    if (is.null(fit)) next
+    cf <- summary(fit)$coefficients
+    # within-patient permutation of the demeaned (fixed-effects) slope
+    yw <- d$y - ave(d$y, d$subject_id)
+    b_obs <- sum(yw * d$xw) / sum(d$xw^2)
+    b_perm <- apply(perms, 2, function(ix) { xp <- d$x[ix]; xpw <- xp - ave(xp, d$subject_id); sum(yw * xpw) / sum(xpw^2) })
+    res1b[[length(res1b)+1]] <- data.frame(stratum = st, predictor = pred, signature = s,
+      n_aoi = nrow(d), n_pat = length(unique(d$subject_id)),
+      beta_within = cf["xw","Estimate"], se_within = cf["xw","Std. Error"], p_within_lmer = cf["xw","Pr(>|t|)"],
+      p_within_perm = (1 + sum(abs(b_perm) >= abs(b_obs))) / (NPERM + 1),
+      beta_between = cf["xm","Estimate"], p_between_lmer = cf["xm","Pr(>|t|)"])
+  }
+}
+r1b <- do.call(rbind, res1b)
+r1b$fdr_within_perm <- ave(r1b$p_within_perm, r1b$predictor, FUN = function(p) p.adjust(p, "BH"))
+r1b$fdr_within_lmer <- ave(r1b$p_within_lmer, r1b$predictor, FUN = function(p) p.adjust(p, "BH"))
+r1b$poorly_measured <- mapply(POOR, r1b$signature, r1b$stratum)
+r1b$circular <- r1b$predictor == "FOLH1" & r1b$signature %in% CIRC_FOLH1
+write.csv(r1b, op("1b_within_patient_state_vs_FOLH1_AR_lmer.csv"), row.names = FALSE)
+
+```
+
+### 1c. PSMA− vs PSMA+ tumour segment, paired by patient
+For every signature and timepoint, the per-patient difference PanCK+PSMA− minus PSMA+ is tested by Wilcoxon signed-rank test and expressed in pooled s.d. units, with BH-FDR over all tests.
+
+```{r comp-33a-state-associations-04}
+## ---------------------------------------------------------------- 1c. PSMA- vs PSMA+ tumour segment, paired by patient
+res1c <- list()
+for (tp in c("Archival","Screening","Cycle1")) {
+  a <- pat[pat$stratum == paste0("PSMA__", tp), ]; b <- pat[pat$stratum == paste0("PanCKPSMA__", tp), ]
+  m <- merge(a, b, by = "subject_id", suffixes = c(".pos", ".neg"))
+  for (s in c("FOLH1","AR", ALLSIG)) {
+    dd <- m[[paste0(s, ".neg")]] - m[[paste0(s, ".pos")]]; if (!okv(dd)) next
+    w <- suppressWarnings(wilcox.test(dd, exact = FALSE))
+    res1c[[length(res1c)+1]] <- data.frame(timepoint = tp, signature = s, n_pairs = nrow(m),
+      median_diff_neg_minus_pos = median(dd), diff_in_SD = mean(dd) / sd(c(m[[paste0(s,".pos")]], m[[paste0(s,".neg")]])),
+      frac_neg_higher = mean(dd > 0), p = w$p.value)
+  }
+}
+r1c <- do.call(rbind, res1c)
+r1c$fdr <- p.adjust(r1c$p, "BH")
+write.csv(r1c, op("1c_PSMAneg_vs_PSMApos_segment_paired.csv"), row.names = FALSE)
+
+```
+
+### 2. State scores vs response
+Per tumour stratum, each standardised score is related to PSA change (Spearman; lm with batch; Spearman excluding batch 3; worst leave-one-patient-out P), to response group (Wilcoxon NR vs R, when at least two non-responders are present) and to rPFS (Cox HR per s.d.). Each P column gets BH-FDR within stratum.
+
+```{r comp-33a-state-associations-05}
+## ---------------------------------------------------------------- 2. response
+loo_worst <- function(x, y) max(sapply(seq_along(x), function(i)
+  suppressWarnings(cor.test(x[-i], y[-i], method = "spearman", exact = FALSE)$p.value)), na.rm = TRUE)
+res2 <- list()
+for (st in TUM) {
+  d <- pat[pat$stratum == st & !is.na(pat$psa), ]
+  for (s in c("FOLH1","AR", ALLSIG)) {
+    if (!okv(d[[s]])) next
+    x <- zs(d[[s]])
+    ct <- suppressWarnings(cor.test(x, d$psa, method = "spearman", exact = FALSE))
+    nb <- length(unique(d$batch))
+    lmf <- if (nb > 1) lm(psa ~ x + batch, data = cbind(d, x = x)) else lm(psa ~ x, data = cbind(d, x = x))
+    cl <- summary(lmf)$coefficients["x", ]
+    d3 <- d[d$batch != "batch_3", ]; x3 <- x[d$batch != "batch_3"]
+    ct3 <- suppressWarnings(cor.test(x3, d3$psa, method = "spearman", exact = FALSE))
+    rr <- d$response_group_neat %in% c("Responder","Non_Responder")
+    wt <- if (sum(d$NR[rr]) >= 2) suppressWarnings(wilcox.test(x[rr & d$NR], x[rr & !d$NR], exact = FALSE)) else list(p.value = NA)
+    cx <- tryCatch(summary(coxph(Surv(r_pfstime, r_pfsevent) ~ x, data = cbind(d, x = x)))$coefficients, error = function(e) NULL)
+    res2[[length(res2)+1]] <- data.frame(stratum = st, signature = s, n = nrow(d), n_NR = sum(d$NR),
+      rho_psa = unname(ct$estimate), p_spearman = ct$p.value,
+      beta_lm_batch = cl["Estimate"], p_lm_batch = cl["Pr(>|t|)"],
+      rho_excl_b3 = unname(ct3$estimate), p_excl_b3 = ct3$p.value, n_excl_b3 = nrow(d3),
+      p_LOO_worst = loo_worst(x, d$psa),
+      median_NR = median(x[d$NR]), median_R = median(x[d$response_group_neat == "Responder"]), p_NR_vs_R = wt$p.value,
+      HR_rPFS_perSD = if (!is.null(cx)) cx[1, "exp(coef)"] else NA, p_cox = if (!is.null(cx)) cx[1, "Pr(>|z|)"] else NA)
+  }
+}
+r2 <- do.call(rbind, res2); rownames(r2) <- NULL
+for (pc in c("p_spearman","p_lm_batch","p_excl_b3","p_NR_vs_R","p_cox"))
+  r2[[sub("^p_", "fdr_", pc)]] <- ave(r2[[pc]], r2$stratum, FUN = function(p) p.adjust(p, "BH"))
+r2$poorly_measured <- mapply(POOR, r2$signature, r2$stratum)
+write.csv(r2, op("2_state_vs_response.csv"), row.names = FALSE)
+
+```
+
+### 3. Does a state account for the *FOLH1* association?
+For each non-circular signature, compare the *FOLH1* coefficient in lm(PSA ~ *FOLH1* + batch) with that in lm(PSA ~ *FOLH1* + state + batch). The output gives the percentage change in the *FOLH1* effect and the state's own adjusted effect.
+
+```{r comp-33a-state-associations-06}
+## ---------------------------------------------------------------- 3. mediation-style
+res3 <- list()
+for (st in TUM) {
+  d <- pat[pat$stratum == st & !is.na(pat$psa), ]
+  d$F <- zs(d$FOLH1)
+  base <- summary(lm(psa ~ F + batch, d))$coefficients["F", ]
+  for (s in setdiff(ALLSIG, CIRC_FOLH1)) {
+    if (!okv(d[[s]])) next
+    d$S <- zs(d[[s]])
+    f2 <- summary(lm(psa ~ F + S + batch, d))$coefficients
+    res3[[length(res3)+1]] <- data.frame(stratum = st, signature = s, n = nrow(d),
+      beta_FOLH1_base = base["Estimate"], p_FOLH1_base = base["Pr(>|t|)"],
+      beta_FOLH1_adj = f2["F","Estimate"], p_FOLH1_adj = f2["F","Pr(>|t|)"],
+      pct_change_FOLH1 = 100 * (f2["F","Estimate"] - base["Estimate"]) / base["Estimate"],
+      beta_state_adj = f2["S","Estimate"], p_state_adj = f2["S","Pr(>|t|)"],
+      rho_state_FOLH1 = cor(d$S, d$F, method = "spearman"))
+  }
+}
+r3 <- do.call(rbind, res3); rownames(r3) <- NULL
+r3$poorly_measured <- mapply(POOR, r3$signature, r3$stratum)
+write.csv(r3, op("3_mediation_FOLH1_state_PSA.csv"), row.names = FALSE)
+
+```
+
+### 4. Change between timepoints
+For each tumour compartment, paired change in every score from pre- to on-treatment bone and from primary to pre-treatment bone. Tested are the paired Wilcoxon change, its Spearman correlation with PSA change and the NR vs R difference in change. The number of pairs run in the same batch is reported, and BH-FDR is applied within compartment and comparison.
+
+```{r comp-33a-state-associations-07}
+## ---------------------------------------------------------------- 4. change between timepoints
+res4 <- list()
+for (seg in c("PSMA","PanCKPSMA")) for (cmp in list(c("Screening","Cycle1"), c("Archival","Screening"))) {
+  a <- pat[pat$stratum == paste0(seg, "__", cmp[1]), ]; b <- pat[pat$stratum == paste0(seg, "__", cmp[2]), ]
+  m <- merge(a, b[, c("subject_id","batch", "FOLH1","AR", ALLSIG)], by = "subject_id", suffixes = c(".t0", ".t1"))
+  for (s in c("FOLH1","AR", ALLSIG)) {
+    dd <- m[[paste0(s, ".t1")]] - m[[paste0(s, ".t0")]]; if (!okv(dd)) next
+    w <- suppressWarnings(wilcox.test(dd, exact = FALSE))
+    ok <- !is.na(m$psa)
+    ct <- suppressWarnings(cor.test(dd[ok], m$psa[ok], method = "spearman", exact = FALSE))
+    rr <- m$response_group_neat %in% c("Responder","Non_Responder")
+    wt <- if (sum(m$NR) >= 2) suppressWarnings(wilcox.test(dd[rr & m$NR], dd[rr & !m$NR], exact = FALSE))$p.value else NA
+    res4[[length(res4)+1]] <- data.frame(segment = seg, comparison = paste(cmp, collapse = "->"), signature = s,
+      n_pairs = nrow(m), n_NR = sum(m$NR), n_same_batch = sum(m$batch.t0 == m$batch.t1),
+      median_change = median(dd), change_in_SD = mean(dd) / sd(c(m[[paste0(s,".t0")]], m[[paste0(s,".t1")]])),
+      p_paired = w$p.value, rho_change_vs_psa = unname(ct$estimate), p_change_vs_psa = ct$p.value,
+      median_change_NR = median(dd[m$NR]), median_change_R = median(dd[m$response_group_neat == "Responder"]),
+      p_change_NR_vs_R = wt)
+  }
+}
+r4 <- do.call(rbind, res4)
+grp <- paste(r4$segment, r4$comparison)
+r4$fdr_paired <- ave(r4$p_paired, grp, FUN = function(p) p.adjust(p, "BH"))
+r4$fdr_change_vs_psa <- ave(r4$p_change_vs_psa, grp, FUN = function(p) p.adjust(p, "BH"))
+write.csv(r4, op("4_change_between_timepoints.csv"), row.names = FALSE)
+
+```
+
+### 5. ctDNA tumour-suppressor status and FDG uptake
+Scores are compared between patients with and without ctDNA *TP53*/*PTEN*/*RB1* alterations (Wilcoxon) and correlated with FDG SUVmean (Spearman), with BH-FDR within stratum. A design check then tabulates response group by batch in each stratum, which makes the aliasing of intermediate patients with batch 3 explicit.
+
+```{r comp-33a-state-associations-08}
+## ---------------------------------------------------------------- 5. ctDNA TSG and FDG
+res5 <- list()
+for (st in TUM) {
+  d <- pat[pat$stratum == st, ]
+  for (s in c("FOLH1","AR", ALLSIG)) {
+    if (!okv(d[[s]])) next
+    x <- zs(d[[s]]); t <- d$alt_TSG_alt
+    wt <- if (sum(t == 1, na.rm = TRUE) >= 2 && sum(t == 0, na.rm = TRUE) >= 2)
+      suppressWarnings(wilcox.test(x[t %in% 1], x[t %in% 0], exact = FALSE))$p.value else NA
+    ct <- suppressWarnings(cor.test(x, d$fdg_suvmean_trorres, method = "spearman", exact = FALSE))
+    res5[[length(res5)+1]] <- data.frame(stratum = st, signature = s,
+      n_TSG_alt = sum(t == 1, na.rm = TRUE), n_TSG_wt = sum(t == 0, na.rm = TRUE),
+      diff_median_TSGalt_minus_wt = median(x[t %in% 1]) - median(x[t %in% 0]), p_TSG = wt,
+      n_fdg = sum(!is.na(d$fdg_suvmean_trorres) & !is.na(x)), rho_FDG = unname(ct$estimate), p_FDG = ct$p.value)
+  }
+}
+r5 <- do.call(rbind, res5)
+r5$fdr_TSG <- ave(r5$p_TSG, r5$stratum, FUN = function(p) p.adjust(p, "BH"))
+r5$fdr_FDG <- ave(r5$p_FDG, r5$stratum, FUN = function(p) p.adjust(p, "BH"))
+r5$poorly_measured <- mapply(POOR, r5$signature, r5$stratum)
+write.csv(r5, op("5_state_vs_ctDNA_TSG_FDG.csv"), row.names = FALSE)
+
+## design check: response x batch per stratum
+bt <- do.call(rbind, lapply(TUM, function(st) { d <- pat[pat$stratum == st, ]
+  data.frame(stratum = st, as.data.frame.matrix(table(d$response_group_neat, d$batch)), row.names = NULL,
+             group = rownames(table(d$response_group_neat, d$batch))) }))
+write.csv(bt, op("0_response_by_batch.csv"), row.names = FALSE)
+message("done")
+
+```
+
+### 6a–b. Sensitivity to tumour purity
+Several non-luminal signatures contain stromal or myeloid genes, so lower epithelial purity can raise their scores. The deconvolved epithelial-tumour fraction is attached to each AOI (primary or bone reference by timepoint) and averaged per patient. (6a) Response is refitted as lm(PSA ~ state + purity + batch), and rank-based partial correlations given purity are computed with PSA change, *FOLH1* and *AR*. (6b) The PanCK+PSMA− minus PSMA+ difference is re-estimated at the mean purity difference (intercept of Δstate/s.d. ~ centred Δpurity), and the segment purity difference itself is tested.
+
+```{r comp-33a-state-associations-09}
+## ================================================================ 6. sensitivity: tumour purity (deconvolution)
+## Several non-luminal PCCAT signatures contain stromal/myeloid-expressed genes (e.g. Basal: MYL9, CFD,
+## IGFBP6, CRYAB; DNPC_like: S100A4/A6/A9, LGALS1, TIMP1; NE_FOXA2: SPP1, TCF4, BMP7), so lower
+## epithelial purity of an AOI can raise them. Adjust for the deconvolved epithelial-tumour fraction.
+dc <- qs::qread(file.path(COMP_DIR, "C3_deconvolution", "deconvolution_proportions.qs"))
+# primary vs bone reference: Archival -> primary; Screening/Cycle1 -> bone
+aoi$purity <- ifelse(grepl("Archival", aoi$stratum),
+                     dc$lineage_primary[match(aoi$aoi, rownames(dc$lineage_primary)), "Epithelial_tumour"],
+                     dc$lineage_bone[match(aoi$aoi, rownames(dc$lineage_bone)), "Epithelial_tumour"])
+cat("AOIs with purity:", sum(!is.na(aoi$purity)), "/", nrow(aoi), "\n")
+pp <- aggregate(purity ~ stratum + subject_id, aoi, mean)
+pat <- merge(pat, pp, by = c("stratum","subject_id"), all.x = TRUE)
+
+rk_resid <- function(y, z) resid(lm(rank(y) ~ rank(z)))
+res6 <- list()
+for (st in TUM) {
+  d <- pat[pat$stratum == st & !is.na(pat$psa) & !is.na(pat$purity), ]
+  for (s in c("FOLH1","AR", ALLSIG)) {
+    if (!okv(d[[s]])) next
+    x <- zs(d[[s]]); pz <- zs(d$purity)
+    rp <- suppressWarnings(cor.test(d[[s]], d$purity, method = "spearman", exact = FALSE))
+    f <- summary(lm(psa ~ x + pz + batch, data = cbind(d, x = x, pz = pz)))$coefficients
+    pr <- cor.test(rk_resid(d[[s]], d$purity), rk_resid(d$psa, d$purity))
+    pF <- cor.test(rk_resid(d[[s]], d$purity), rk_resid(d$FOLH1, d$purity))
+    pA <- cor.test(rk_resid(d[[s]], d$purity), rk_resid(d$AR, d$purity))
+    res6[[length(res6)+1]] <- data.frame(stratum = st, signature = s, n = nrow(d),
+      rho_state_purity = unname(rp$estimate), p_state_purity = rp$p.value,
+      beta_psa_adj_purity_batch = f["x","Estimate"], p_psa_adj_purity_batch = f["x","Pr(>|t|)"],
+      partial_rho_psa_given_purity = unname(pr$estimate), p_partial_psa = pr$p.value,
+      partial_rho_FOLH1_given_purity = unname(pF$estimate), p_partial_FOLH1 = pF$p.value,
+      partial_rho_AR_given_purity = unname(pA$estimate), p_partial_AR = pA$p.value)
+  }
+}
+r6 <- do.call(rbind, res6)
+r6$fdr_psa_adj <- ave(r6$p_psa_adj_purity_batch, r6$stratum, FUN = function(p) p.adjust(p, "BH"))
+r6$fdr_partial_psa <- ave(r6$p_partial_psa, r6$stratum, FUN = function(p) p.adjust(p, "BH"))
+r6$fdr_partial_FOLH1 <- p.adjust(r6$p_partial_FOLH1, "BH"); r6$fdr_partial_AR <- p.adjust(r6$p_partial_AR, "BH")
+r6$poorly_measured <- mapply(POOR, r6$signature, r6$stratum)
+write.csv(r6, op("6a_purity_adjusted_response_and_FOLH1.csv"), row.names = FALSE)
+
+## 6b. PSMA- vs PSMA+ segment difference adjusted for purity difference (intercept of dd_state ~ dd_purity)
+res6b <- list()
+for (tp in c("Archival","Screening","Cycle1")) {
+  a <- pat[pat$stratum == paste0("PSMA__", tp), ]; b <- pat[pat$stratum == paste0("PanCKPSMA__", tp), ]
+  m <- merge(a, b, by = "subject_id", suffixes = c(".pos", ".neg"))
+  dp <- m$purity.neg - m$purity.pos
+  for (s in c("FOLH1","AR", ALLSIG)) {
+    dd <- m[[paste0(s, ".neg")]] - m[[paste0(s, ".pos")]]; if (!okv(dd)) next
+    sdp <- sd(c(m[[paste0(s,".pos")]], m[[paste0(s,".neg")]]))
+    f <- summary(lm(I(dd / sdp) ~ I(dp - mean(dp, na.rm = TRUE))))$coefficients
+    res6b[[length(res6b)+1]] <- data.frame(timepoint = tp, signature = s, n_pairs = sum(!is.na(dp)),
+      median_purity_diff_neg_minus_pos = median(dp, na.rm = TRUE),
+      diff_SD_at_mean_purity_diff = f[1, "Estimate"], p_intercept = f[1, "Pr(>|t|)"],
+      slope_on_purity_diff = f[2, "Estimate"], p_slope = f[2, "Pr(>|t|)"])
+  }
+}
+r6b <- do.call(rbind, res6b)
+# purity-matched contrast: also evaluate at zero purity difference
+write.csv(r6b, op("6b_segment_difference_purity_adjusted.csv"), row.names = FALSE)
+pd <- do.call(rbind, lapply(c("Archival","Screening","Cycle1"), function(tp) {
+  a <- pat[pat$stratum == paste0("PSMA__", tp), ]; b <- pat[pat$stratum == paste0("PanCKPSMA__", tp), ]
+  m <- merge(a, b, by = "subject_id", suffixes = c(".pos", ".neg")); dp <- m$purity.neg - m$purity.pos
+  data.frame(timepoint = tp, n = sum(!is.na(dp)), median_purity_pos = median(m$purity.pos, na.rm = TRUE),
+             median_purity_neg = median(m$purity.neg, na.rm = TRUE), p = suppressWarnings(wilcox.test(dp, exact = FALSE))$p.value) }))
+write.csv(pd, op("6b_purity_by_segment.csv"), row.names = FALSE)
+
+```
+
+### 6c–d. AOI-level confirmation of response hits and gene-level breakdown
+Strata × signatures that hit in section 2 (FDR < 0.1 for Spearman, batch-adjusted P < 0.05 or Cox P < 0.05) are refitted at AOI level as state ~ PSA + batch (+ purity) + (1 | patient). Inference uses 300 permutations of PSA change across patients on the t statistic. For signatures among these hits, each member gene's patient-level correlation with PSA change, purity and *FOLH1* is then tabulated, to show which genes drive the score.
+
+```{r comp-33a-state-associations-10}
+## 6c. AOI-level mixed model for the response hits with patient-level permutation of the outcome
+hits <- r2[(r2$fdr_spearman < 0.1 | r2$p_lm_batch < 0.05 | r2$p_cox < 0.05) & r2$signature %in% c(STATE, "FOLH1"), c("stratum","signature")]
+res6c <- list()
+for (i in seq_len(nrow(hits))) {
+  st <- hits$stratum[i]; s <- hits$signature[i]
+  d <- aoi[aoi$stratum == st, ]; d <- merge(d, clin[, c("subject_id","psa_change_capped")], by = "subject_id")
+  d <- d[!is.na(d$psa_change_capped) & is.finite(d[[s]]), ]
+  d$y <- zs(d[[s]]); d$pz <- zs(d$purity)
+  pts <- unique(d$subject_id); ppsa <- setNames(d$psa_change_capped[match(pts, d$subject_id)] / 50, pts)
+  fitb <- function(psa_vec, adj) { d$psa <- psa_vec[d$subject_id]
+    fo <- if (adj) y ~ psa + pz + batch + (1|subject_id) else y ~ psa + batch + (1|subject_id)
+    f <- suppressMessages(suppressWarnings(lmer(fo, data = d))); summary(f)$coefficients["psa", c("Estimate","t value")] }
+  for (adj in c(FALSE, TRUE)) {
+    obs <- fitb(ppsa, adj)
+    tp <- replicate(300, fitb(setNames(sample(ppsa), pts), adj)["t value"])
+    res6c[[length(res6c)+1]] <- data.frame(stratum = st, signature = s, purity_adjusted = adj, n_aoi = nrow(d), n_pat = length(pts),
+      beta_score_per_50pct_psa = obs["Estimate"], t = obs["t value"],
+      p_patient_perm = (1 + sum(abs(tp) >= abs(obs["t value"]))) / 301)
+  }
+}
+r6c <- do.call(rbind, res6c); rownames(r6c) <- NULL
+write.csv(r6c, op("6c_AOI_mixed_model_patient_permutation_hits.csv"), row.names = FALSE)
+
+## 6d. gene-level breakdown of signatures that hit in PSMA+ Screening
+pbs <- qs::qread(file.path(COMP_DIR, "C13_pseudobulk_LOQ", "pseudobulk_strata.qs"))
+gl <- list()
+for (st in unique(hits$stratum)) for (s in intersect(hits$signature[hits$stratum == st], names(X$signatures))) {
+  p <- pbs[[st]]; L <- p$lcpm; sid <- p$meta$subject_id
+  d <- pat[pat$stratum == st, ][match(sid, pat$subject_id[pat$stratum == st]), ]
+  for (g in intersect(X$signatures[[s]], rownames(L))) {
+    c1 <- suppressWarnings(cor.test(L[g, ], d$psa, method = "spearman", exact = FALSE))
+    c2 <- suppressWarnings(cor.test(L[g, ], d$purity, method = "spearman", exact = FALSE))
+    c3 <- suppressWarnings(cor.test(L[g, ], d$FOLH1, method = "spearman", exact = FALSE))
+    gl[[length(gl)+1]] <- data.frame(stratum = st, signature = s, gene = g, rho_psa = unname(c1$estimate), p_psa = c1$p.value,
+                                     rho_purity = unname(c2$estimate), rho_FOLH1 = unname(c3$estimate))
+  }
+}
+write.csv(do.call(rbind, gl), op("6d_gene_level_breakdown_hits.csv"), row.names = FALSE)
+message("section 6 done")
+```

@@ -1,0 +1,212 @@
+---
+title: "Patient-level univariable outcome models and leave-one-patient-out elastic-net prediction of PSA50"
+subtitle: "PRINCE spatial transcriptomics: `comp_08_outcome_models`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+The patient is the unit of inference here. Each patient's features are averaged over ROIs at baseline (Archival and Screening separately). They comprise focus programmes and genes from the comp_05 singscores in each compartment, deconvolved lineage and selected cell-type fractions from comp_03b, and a block of clinical and ctDNA features from comp_01 (TP53/PTEN/RB1 and other alterations, ctDNA fraction, alkaline phosphatase, PSMA-PET SUVmean and volume, age, ctDNA TMB). (1) Univariable models: each feature is related to maximal PSA change (Spearman) and to rPFS and PSA-PFS (Cox, per s.d., likelihood-ratio P), with BH-FDR within feature block. (2) Prediction: PSA50 is predicted for each block (and for Screening + clinical) by leave-one-patient-out elastic net (glmnet, α = 0.5, λ chosen by inner leave-one-out cross-validation). Missing values are median-imputed within each training fold. Performance is the out-of-fold AUC with a 2,000-sample bootstrap CI, and the script reports how often each feature is selected across folds.
+
+With roughly 20–30 patients per block, all of these results are hypothesis-generating. The manuscript's patient-selection and exploratory prediction analyses were redone in later scripts with repeated cross-validation and label permutation.
+
+**Manuscript items supported**
+
+- Supplementary Table 14 (patient-level univariable outcome models), written to the workbook by comp_11
+- Intermediate results used by comp_11 (its ExtendedDataFig9, which does not appear in the final manuscript)
+
+**Pipeline step:** `./run_pipeline.sh --only 08_outcome_models`. Approximate runtime: minutes.
+
+**Inputs**
+
+- `results/C1_clinical/patient_table.qs`
+- `results/C5_signatures/per_AOI_singscores.qs`
+- `results/C3_deconvolution/deconvolution_proportions.qs`
+- `data/phase2_se_qc_filtered.qs`
+
+**Outputs**
+
+- `results/C8_outcome_models/univariable_patient_level.csv`
+- `results/C8_outcome_models/lopo_enet_PSA50_auc.csv`
+- `results/C8_outcome_models/lopo_enet_feature_selection.csv`
+- `results/C8_outcome_models/patient_feature_blocks.qs`
+
+**Depends on**: `comp_01_clinical`, `comp_03b_deconv`, `comp_05_signatures`
+
+## Analysis
+
+Script header: feature blocks, univariable models, the leave-one-patient-out elastic net, and the caveat on sample size.
+
+### Patient feature blocks
+For Archival and Screening, averages the focus singscores and genes over each patient's AOIs in each compartment, with names prefixed by compartment. It also averages lineage and selected fine deconvolved fractions over all of the patient's AOIs at that timepoint. Blocks are joined by patient. A clinical block is added, with ctDNA fraction (log1p), alkaline phosphatase and PSMA-PET volume (log) transformed, and the outcome columns are extracted.
+
+```{r comp-08-outcome-models-01}
+## ============================================================================
+## PRINCE comprehensive analysis -- C8: patient-level outcome models (baseline only)
+## Features per patient = mean over ROIs of
+##   * focus programmes / genes (C5 singscores) in each segment, Archival & Screening
+##   * deconvolved lineage + selected cell-type fractions (C3)
+##   * clinical / ctDNA features (C1)
+## (1) Univariable: Spearman vs max PSA change; Cox (per SD, LRT p) for rPFS and
+##     PSA-PFS; BH-FDR within feature block.
+## (2) Prediction of PSA50 by leave-one-patient-out (LOPO) elastic net (glmnet,
+##     alpha = 0.5, lambda by inner LOO-CV), per feature block; AUC with bootstrap CI.
+##     Missing values median-imputed inside each training fold.
+## n is ~20-33 patients: all results are hypothesis-generating.
+## ============================================================================
+
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({ library(qs); library(dplyr); library(tidyr); library(survival); library(glmnet); library(pROC) })
+setwd(PRINCE_DIR)
+check_ram_or_stop(20)
+set.seed(2026)
+
+pt <- qs::qread(out_path("C1_clinical", "patient_table.qs"))
+sc <- qs::qread(out_path("C5_signatures", "per_AOI_singscores.qs"))
+dec <- qs::qread(out_path("C3_deconvolution", "deconvolution_proportions.qs"))
+
+focus <- c("gene|FOLH1", "gene|CHGA", "gene|IBSP", "gene|CD276", "gene|B2M", "gene|IRF9",
+           "lineage|NEPC_up", "lineage|AR_panel", "bone|Bone_remodel_module", "bone|Osteoclast",
+           "bone|Osteoblast", "paper_CAN26|IFN_I_STING_tumour", "paper_CAN26|HLA_I",
+           "paper_CAN26|Bone_TAM_TIM", "immune|Tcell_inflamed_GEP", "immune|MHC_I",
+           "immune|T_exhaustion", "immune|Treg", "progeny|TGFb", "progeny|WNT",
+           "hallmark|HALLMARK_E2F_TARGETS", "hallmark|HALLMARK_INTERFERON_ALPHA_RESPONSE")
+seg_short <- c(CD45 = "CD45", PSMA = "PSMA", PanCKPSMA = "PanCK")
+
+blocks <- list()
+for (tp in c("Archival", "Screening")) {
+  feats <- list()
+  for (sg in names(seg_short)) {
+    s <- sc[[paste0(sg, "__", tp)]]
+    f <- s %>% group_by(subject_id) %>% summarise(across(any_of(focus), mean), .groups = "drop")
+    names(f)[-1] <- paste(seg_short[sg], sub(".*\\|", "", names(f)[-1]), sep = ":")
+    feats[[sg]] <- f
+  }
+  lin <- if (tp == "Archival") dec$lineage_primary else dec$lineage_bone
+  fine <- if (tp == "Archival") dec$prop_primary else dec$prop_bone
+  fine_keep <- intersect(c("Basal", "Mph", "Pericytes", "NE", "Plasma_B", "Osteoclasts", "TAM",
+                           "Treg Active", "CTL-1", "Tumour_NE"), colnames(fine))
+  allaoi <- as.data.frame(SummarizedExperiment::colData(qs::qread("phase2_se_qc_filtered.qs")))
+  allaoi <- allaoi[rownames(allaoi) %in% rownames(lin) & allaoi$timepoint == tp &
+                     allaoi$response_group_neat != "Control", ]
+  dc <- data.frame(subject_id = allaoi$subject_id, segment = allaoi$segment_name,
+                   lin[rownames(allaoi), , drop = FALSE], fine[rownames(allaoi), fine_keep, drop = FALSE],
+                   check.names = FALSE) %>%
+    group_by(subject_id) %>% summarise(across(-segment, mean), .groups = "drop")
+  names(dc)[-1] <- paste0("decon:", names(dc)[-1])
+  blocks[[tp]] <- Reduce(function(a, b) full_join(a, b, by = "subject_id"), c(feats, list(dc)))
+}
+clin_feats <- c("alt_TSG_alt", "alt_TP53", "alt_PTEN", "alt_ATM", "ctDNA_BL", "lborres_alp",
+                "PSMAPET_BL_SUVmean", "PSMAPET_BL_vol", "age", "TMB_ctDNA")
+blocks$Clinical <- pt[, c("subject_id", clin_feats)] %>%
+  mutate(ctDNA_BL = log1p(ctDNA_BL), lborres_alp = log(lborres_alp), PSMAPET_BL_vol = log(PSMAPET_BL_vol))
+
+outc <- pt %>% transmute(subject_id, max_psa_change, PSA50, r_pfstime, r_pfsevent, psa_pfstime, psa_pfsevent,
+                         response_group_neat)
+
+```
+
+### Univariable models
+For every feature in every block: Spearman correlation with maximal PSA change, and Cox models of rPFS and PSA-PFS on the standardised feature (hazard ratio per s.d. with 95% CI, likelihood-ratio P; no fit with fewer than three events). BH-FDR is applied within block for each outcome.
+
+```{r comp-08-outcome-models-02}
+## ---- (1) univariable ---------------------------------------------------------------
+cox_lrt <- function(time, event, x) {
+  ok <- complete.cases(time, event, x)
+  if (sum(event[ok]) < 3 || sd(x[ok]) == 0) return(c(NA, NA, NA, NA))
+  f <- coxph(Surv(time[ok], event[ok]) ~ scale(x[ok]))
+  ci <- exp(confint(f))
+  c(exp(coef(f)), ci, anova(f)[["Pr(>|Chi|)"]][2])
+}
+uni <- bind_rows(lapply(names(blocks), function(b) {
+  d <- inner_join(blocks[[b]], outc, by = "subject_id")
+  bind_rows(lapply(setdiff(names(blocks[[b]]), "subject_id"), function(f) {
+    x <- d[[f]]
+    sp <- suppressWarnings(cor.test(x, d$max_psa_change, method = "spearman", exact = FALSE))
+    r <- cox_lrt(d$r_pfstime, d$r_pfsevent, x); p <- cox_lrt(d$psa_pfstime, d$psa_pfsevent, x)
+    data.frame(block = b, feature = f, n = sum(!is.na(x)),
+               rho_psa_change = unname(sp$estimate), p_psa_change = sp$p.value,
+               HR_rPFS = r[1], HR_rPFS_lo = r[2], HR_rPFS_hi = r[3], p_rPFS = r[4],
+               HR_psaPFS = p[1], HR_psaPFS_lo = p[2], HR_psaPFS_hi = p[3], p_psaPFS = p[4])
+  }))
+})) %>% group_by(block) %>%
+  mutate(fdr_psa_change = p.adjust(p_psa_change, "BH"), fdr_rPFS = p.adjust(p_rPFS, "BH"),
+         fdr_psaPFS = p.adjust(p_psaPFS, "BH")) %>% ungroup()
+
+```
+
+### Leave-one-patient-out elastic net
+For each held-out patient, medians from the training patients impute missing values, constant features are dropped, and `cv.glmnet` (binomial, α = 0.5, leave-one-out inner folds) is fitted. The held-out patient is then predicted at λ.min and the selected features are recorded. Features missing in 30% or more of patients are removed first, and a block is skipped if it has fewer than three PSA50 failures. The out-of-fold AUC has a 2,000-sample bootstrap CI.
+
+```{r comp-08-outcome-models-03}
+## ---- (2) LOPO elastic-net prediction of PSA50 ------------------------------------------
+lopo_enet <- function(X, y) {
+  n <- nrow(X); pred <- rep(NA, n); sel <- list()
+  for (i in seq_len(n)) {
+    tr <- setdiff(seq_len(n), i)
+    med <- apply(X[tr, , drop = FALSE], 2, median, na.rm = TRUE)
+    imp <- function(M) { for (j in seq_len(ncol(M))) M[is.na(M[, j]), j] <- med[j]; M }
+    Xtr <- imp(X[tr, , drop = FALSE]); Xte <- imp(X[i, , drop = FALSE])
+    keep <- apply(Xtr, 2, sd) > 0
+    if (length(unique(y[tr])) < 2) next
+    fit <- tryCatch(cv.glmnet(Xtr[, keep], y[tr], family = "binomial", alpha = 0.5,
+                              nfolds = length(tr), grouped = FALSE), error = function(e) NULL)
+    if (is.null(fit)) next
+    pred[i] <- predict(fit, Xte[, keep, drop = FALSE], s = "lambda.min", type = "response")
+    b <- coef(fit, s = "lambda.min")[-1, 1]; sel[[i]] <- names(b)[b != 0]
+  }
+  list(pred = pred, sel = sel)
+}
+pred_res <- list(); sel_res <- list()
+for (b in c(names(blocks), "Screening+Clinical")) {
+  B <- if (b == "Screening+Clinical") inner_join(blocks$Screening, blocks$Clinical, by = "subject_id") else blocks[[b]]
+  d <- inner_join(B, outc[, c("subject_id", "PSA50")], by = "subject_id") %>% filter(!is.na(PSA50))
+  X <- as.matrix(d[, setdiff(names(B), "subject_id")]); y <- d$PSA50
+  X <- X[, colMeans(is.na(X)) < 0.3, drop = FALSE]
+  if (sum(y == 0) < 3) next
+  r <- lopo_enet(X, y)
+  ok <- !is.na(r$pred)
+  roc_o <- roc(y[ok], r$pred[ok], quiet = TRUE, direction = "<")
+  ci <- ci.auc(roc_o, method = "bootstrap", boot.n = 2000)
+  freq <- sort(table(unlist(r$sel)) / sum(ok), decreasing = TRUE)
+  pred_res[[b]] <- data.frame(block = b, n = sum(ok), n_nonresponders = sum(y[ok] == 0), n_features = ncol(X),
+                              LOPO_AUC = as.numeric(auc(roc_o)), AUC_lo = ci[1], AUC_hi = ci[3])
+  sel_res[[b]] <- data.frame(block = b, feature = names(freq), selection_freq = as.numeric(freq))
+}
+pred_res <- bind_rows(pred_res); sel_res <- bind_rows(sel_res)
+
+```
+
+### Report and save
+Prints nominally significant univariable results, the AUCs and features selected in at least half of the folds. Writes the univariable table, the AUC and feature-selection tables, and the feature blocks.
+
+```{r comp-08-outcome-models-04}
+## ---- report -------------------------------------------------------------------------
+options(width = 220)
+fmt <- function(x) as.data.frame(x %>% mutate(across(where(is.numeric), ~signif(.x, 3))))
+cat("\n==== Univariable: features with p < 0.05 for any outcome (ordered by rPFS p) ====\n")
+print(fmt(uni %>% filter(p_psa_change < 0.05 | p_rPFS < 0.05 | p_psaPFS < 0.05) %>% arrange(p_rPFS) %>%
+  select(block, feature, n, rho_psa_change, fdr_psa_change, HR_rPFS, HR_rPFS_lo, HR_rPFS_hi, p_rPFS, fdr_rPFS, HR_psaPFS, fdr_psaPFS)), row.names = FALSE)
+cat("\n==== LOPO elastic-net prediction of PSA50 ====\n"); print(fmt(pred_res), row.names = FALSE)
+cat("\n==== Most frequently selected features (>= 50% of LOPO folds) ====\n")
+print(fmt(sel_res %>% filter(selection_freq >= 0.5)), row.names = FALSE)
+
+write.csv(uni, out_path("C8_outcome_models", "univariable_patient_level.csv"), row.names = FALSE)
+write.csv(pred_res, out_path("C8_outcome_models", "lopo_enet_PSA50_auc.csv"), row.names = FALSE)
+write.csv(sel_res, out_path("C8_outcome_models", "lopo_enet_feature_selection.csv"), row.names = FALSE)
+qs::qsave(blocks, out_path("C8_outcome_models", "patient_feature_blocks.qs"))
+cat("\nC8 complete.\n")
+```

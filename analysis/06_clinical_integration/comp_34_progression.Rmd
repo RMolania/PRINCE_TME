@@ -1,0 +1,89 @@
+---
+title: "Tumour phenotype at disease progression (descriptive)"
+subtitle: "PRINCE spatial transcriptomics: `comp_34_progression`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+Progression biopsies exist only for four patients who first responded, so they describe acquired rather than primary resistance and are not used for inference. The script normalises all tumour AOIs (PSMA⁺ and PanCK⁺PSMA⁻) of these four patients together across every timepoint (TMM). It then summarises, per patient and timepoint, mean log₂ CPM and the fraction of AOIs above the per-AOI negative-probe LOQ for PSMA (*FOLH1*), AR-output (*KLK3*, *NKX3-1*, *TMPRSS2*), *AR*, neuroendocrine (*CHGA*, *CHGB*, *INSM1*, *ASCL1*, *SYP*) and proliferation (*MKI67*, *TOP2A*) genes. The median AOI signal depth (% genes above LOQ) is reported alongside, because low-depth AOIs cannot separate loss of phenotype from loss of tumour signal.
+
+**Manuscript items supported**
+
+- Fig. 6e (tumour AOIs of the four initial responders with progression biopsies; drawn by `comp_28_figures_v4` and placed in Fig. 6 by `comp_41_figures_v5`)
+- Supplementary Table 74 (`progression_patient_timepoint_markers.csv`)
+- Results: At progression, PSMA and AR output are lost without neuroendocrine features
+- Methods: Progression biopsies
+
+**Pipeline step:** `./run_pipeline.sh --only 34_progression`. Approximate runtime: seconds.
+
+**Inputs**
+
+- `data/phase2_se_qc_filtered.qs`
+- `results/R1_loq/loq_gene_universes.qs`
+- `results/C1_clinical/patient_table.qs`
+
+**Outputs**
+
+- `results/R12_progression/progression_patient_timepoint_markers.csv`
+- `results/R12_progression/progression_detection_pooled.csv`
+
+**Depends on**: `comp_00b_bone_cohort`, `comp_01_clinical`, `comp_16_loq_filter`
+
+## Analysis
+
+Header: purpose and scope. The analysis is descriptive because only initial responders contributed progression biopsies.
+
+Select tumour AOIs from every timepoint of the patients with a DiseaseProgression biopsy. Normalise them jointly (TMM, log-CPM with prior count 1) and, per patient × timepoint, compute the mean log-CPM of the marker genes, the fraction of AOIs above each AOI's LOQ and the median % genes above LOQ. Add response group, maximal PSA change, rPFS and ctDNA *TP53*/*PTEN*/*RB1*/*AR* alterations, then write the table. A second table pools detection over patients by timepoint.
+
+```{r comp-34-progression-01}
+## ============================================================================
+## PRINCE -- R12: tumour phenotype at disease progression (descriptive).
+## Progression biopsies exist only for patients who first responded (n = 4), so this is not
+## used for inference about primary non-response. Tumour AOIs (PSMA+, PanCK+PSMA-) of these
+## patients at every timepoint: per patient x timepoint mean log2 CPM (TMM across all these
+## AOIs) and fraction of AOIs above the per-AOI negative-probe LOQ for PSMA, AR-output,
+## neuroendocrine and proliferation genes.
+## Outputs: results/R12_progression/
+## ============================================================================
+
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({ library(qs); library(SummarizedExperiment); library(dplyr); library(tidyr); library(edgeR) })
+setwd(PRINCE_DIR)
+out_dir <- file.path(COMP_DIR, "R12_progression"); dir.create(out_dir, showWarnings = FALSE)
+se <- qs::qread("phase2_se_qc_filtered.qs"); cd <- as.data.frame(colData(se))
+loq <- qs::qread(file.path(COMP_DIR, "R1_loq", "loq_gene_universes.qs"))
+pt <- qs::qread(out_path("C1_clinical", "patient_table.qs"))
+genes <- c("FOLH1", "KLK3", "NKX3-1", "TMPRSS2", "AR", "CHGA", "CHGB", "INSM1", "ASCL1", "SYP", "MKI67", "TOP2A")
+dp <- unique(cd$subject_id[cd$timepoint == "DiseaseProgression"])
+tum <- which(cd$segment_name %in% c("PSMA+", "PanCK+PSMA-") & cd$subject_id %in% dp)
+cnt <- assay(se, "all_count")[, tum]; L <- loq$aoi[colnames(cnt), "LOQ_std"]
+lc <- cpm(calcNormFactors(DGEList(cnt)), log = TRUE, prior.count = 1)
+d <- cd[tum, ]; key <- paste(d$subject_id, d$timepoint, sep = "|")
+expr <- do.call(rbind, lapply(split(seq_along(key), key), function(i)
+  data.frame(n_aoi = length(i), q = median(loq$aoi[colnames(cnt)[i], "pct_above_LOQ_std"]),
+             t(rowMeans(lc[genes, i, drop = FALSE])), t(setNames(rowMeans(cnt[genes, i, drop = FALSE] > matrix(L[i], length(genes), length(i), byrow = TRUE)), paste0(genes, "_det"))),
+             check.names = FALSE)))
+expr$subject_id <- sub("\\|.*", "", rownames(expr)); expr$timepoint <- factor(sub(".*\\|", "", rownames(expr)), c("Archival", "Screening", "Cycle1", "DiseaseProgression"))
+expr <- expr %>% left_join(pt %>% select(subject_id, response_group_neat, max_psa_change, r_pfstime, alt_TP53, alt_PTEN, alt_RB1, alt_AR), by = "subject_id") %>% arrange(subject_id, timepoint)
+write.csv(expr, file.path(out_dir, "progression_patient_timepoint_markers.csv"), row.names = FALSE)
+pooled <- data.frame(timepoint = d$timepoint, t(cnt[genes, ] > matrix(L, length(genes), ncol(cnt), byrow = TRUE))) %>% group_by(timepoint) %>%
+  summarise(n_aoi = n(), across(everything(), mean))
+write.csv(pooled, file.path(out_dir, "progression_detection_pooled.csv"), row.names = FALSE)
+print(as.data.frame(expr %>% select(subject_id, timepoint, n_aoi, q, FOLH1, KLK3, `NKX3-1`, AR, CHGA, MKI67) %>% mutate(across(where(is.numeric), ~round(.x, 2)))), row.names = FALSE)
+print(as.data.frame(pooled %>% mutate(across(where(is.numeric), ~round(.x, 2)))), row.names = FALSE)
+cat("R12 complete.\n")
+```

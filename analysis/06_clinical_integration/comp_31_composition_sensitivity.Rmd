@@ -1,0 +1,190 @@
+---
+title: "Composition sensitivity of the key patient-level findings"
+subtitle: "PRINCE spatial transcriptomics: `comp_31_composition_sensitivity`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+Asks whether the main patient-level associations could be explained by differences in tissue composition rather than by expression within cells. Patient-level composition is the library-size-weighted mean of SpatialDecon lineage fractions across a patient's AOIs in a stratum, which matches the summed-count pseudobulk. Three lineages are used: tumour (epithelial tumour), immune (T/NK + B/plasma + myeloid) and, in bone only, bone/marrow (bone cells + erythroid/progenitor).
+
+Four checks are made: (A) whether composition itself differs with response; (B) the key features (*FOLH1*, Hallmark androgen, HLA-I, Hallmark IFN-α, IFN-I/STING, p53 core) refitted as feature ~ PSA + batch with tumour, tumour + immune, or tumour + bone/marrow covariates; (C) whether composition shifts between paired pre- and on-treatment biopsies, and whether feature induction persists after regressing each patient's change on their change in tumour (and immune) fraction, where the intercept is the change expected with unchanged composition; and (D) transcriptome-wide PSA association with composition covariates.
+
+**Manuscript items supported**
+
+- Extended Data Fig. 4c (*FOLH1* vs PSA change with composition covariates), 4d (on-treatment induction adjusted for change in composition) and 4e (on-treatment programmes vs PSA change with composition covariates), drawn by `comp_28_figures_v4` (v4 ExtendedDataFig9)
+- Supplementary Tables 55–59 (S55_composition_vs_response to S59_tw_adj_composition), via `comp_29_supp_tables_v4`
+- Methods: Composition and heterogeneity sensitivity analyses
+
+**Pipeline step:** `./run_pipeline.sh --only 31_composition_sensitivity`. Approximate runtime: minutes.
+
+**Inputs**
+
+- `data/phase2_se_qc_filtered.qs`
+- `results/C1_clinical/patient_table.qs`
+- `results/C13_pseudobulk_LOQ/pseudobulk_strata.qs`
+- `results/R1_loq/loq_gene_universes.qs`
+- `results/C3_deconvolution/deconvolution_proportions.qs`
+- `data/reference/msigdb_gene_sets.rds`
+
+**Outputs**
+
+- `results/R9_composition/A_composition_vs_response.csv`
+- `results/R9_composition/B_features_adjusted_for_composition.csv`
+- `results/R9_composition/C_composition_change_on_treatment.csv`
+- `results/R9_composition/C_induction_adjusted_for_composition.csv`
+- `results/R9_composition/D_transcriptome_wide_with_composition.csv`
+
+**Depends on**: `comp_00b_bone_cohort`, `comp_01_clinical`, `comp_03b_deconv`, `comp_13b_pseudobulk_loq`, `comp_16_loq_filter`
+
+## Analysis
+
+### Composition sensitivity
+The header defines patient-level composition and the four analyses (A–D).
+
+Load inputs and collapse the SpatialDecon lineage fractions to tumour, immune and bone/marrow per AOI, using the primary-tumour reference for Archival AOIs and the bone reference otherwise (bone/marrow is zero in primary tumours). `comp_pt` gives the library-size-weighted patient mean per stratum. `score` returns *FOLH1* (log2 CPM) and the five programme mean z-scores, and `pv` extracts the PSA coefficient and P from a linear model.
+
+```{r comp-31-composition-sensitivity-01}
+## ============================================================================
+## PRINCE -- R9: composition sensitivity of the key patient-level findings.
+## Patient-level composition = count-weighted mean (AOI library size) of SpatialDecon lineage
+## fractions, matching the summed-count pseudobulk. Lineages: tumour (Epithelial_tumour),
+## immune (T_NK + B_plasma + Myeloid), bone/marrow (Bone_cells + Erythroid_progenitor; bone only).
+##  A. Does composition differ with response (Spearman with PSA change; NR vs R)?
+##  B. Key features vs PSA change: lm(feature ~ PSA + batch) vs + tumour | + tumour + immune |
+##     + tumour + bone/marrow. Features: FOLH1, Hallmark androgen, HLA-I, Hallmark IFN-a,
+##     IFN-I/STING, p53 core.
+##  C. On-treatment change: does composition shift Screening -> Cycle1, and does feature
+##     induction persist after adjusting for the change in composition?
+##     delta_feature = a + b1*delta_tumour (+ b2*delta_immune); test a (induction at no change).
+##  D. Transcriptome-wide PSA association with tumour (and bone/marrow) fraction covariates.
+## Outputs: results/R9_composition/
+## ============================================================================
+
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({ library(qs); library(SummarizedExperiment); library(dplyr); library(tidyr); library(edgeR); library(limma) })
+setwd(PRINCE_DIR)
+check_ram_or_stop(20)
+out_dir <- file.path(COMP_DIR, "R9_composition"); dir.create(out_dir, showWarnings = FALSE)
+se <- qs::qread("phase2_se_qc_filtered.qs"); cd <- as.data.frame(colData(se))
+pt <- qs::qread(out_path("C1_clinical", "patient_table.qs"))
+pbs <- qs::qread(out_path("C13_pseudobulk_LOQ", "pseudobulk_strata.qs"))
+uni <- qs::qread(file.path(COMP_DIR, "R1_loq", "loq_gene_universes.qs"))$universes
+dec <- qs::qread(out_path("C3_deconvolution", "deconvolution_proportions.qs"))
+msig <- readRDS(file.path(PMCC_DIR, "msigdb_gene_sets.rds"))
+code <- c("CD45+" = "CD45", "PSMA+" = "PSMA", "PanCK+PSMA-" = "PanCKPSMA")
+
+lin <- bind_rows(
+  data.frame(aoi = rownames(dec$lineage_primary), tumour = dec$lineage_primary[, "Epithelial_tumour"],
+             immune = rowSums(dec$lineage_primary[, c("T_NK", "B_plasma", "Myeloid")]), bone = 0),
+  data.frame(aoi = rownames(dec$lineage_bone), tumour = dec$lineage_bone[, "Epithelial_tumour"],
+             immune = rowSums(dec$lineage_bone[, c("T_NK", "B_plasma", "Myeloid")]),
+             bone = rowSums(dec$lineage_bone[, c("Bone_cells", "Erythroid_progenitor")])))
+lin <- lin[!duplicated(lin$aoi), ]; rownames(lin) <- lin$aoi
+## renormalise to fractions of the total (lineages sum to 1 per AOI already; keep as is)
+keep_aoi <- cd$response_group_neat != "Control" & cd$timepoint %in% c("Archival", "Screening", "Cycle1")
+comp_pt <- function(sg, tp, subjects = NULL) {
+  idx <- which(keep_aoi & cd$segment_name == sg & cd$timepoint == tp); d <- cd[idx, ]
+  d$w <- d$library_size; d <- cbind(d, lin[rownames(d), c("tumour", "immune", "bone")])
+  d %>% group_by(subject_id) %>% summarise(tumour = weighted.mean(tumour, w), immune = weighted.mean(immune, w), bone = weighted.mean(bone, w), .groups = "drop")
+}
+progs <- list(AR_Hallmark = msig$H$HALLMARK_ANDROGEN_RESPONSE, HLA_I = c("HLA-A", "HLA-B", "HLA-C", "B2M", "TAP1", "TAP2", "TAPBP"),
+  Hallmark_IFNa = msig$H$HALLMARK_INTERFERON_ALPHA_RESPONSE, IFN_I_STING = c("IRF9", "STAT1", "IRF7", "OAS1", "STING1", "TMEM173", "B2M"),
+  P53_core = c("CDKN1A", "MDM2", "DDB2", "PHLDA3", "GDF15", "TNFRSF10B", "SESN1", "ZMAT3", "RRM2B", "TP53I3"))
+score <- function(lc) { z <- t(scale(t(lc))); cbind(FOLH1 = lc["FOLH1", ], sapply(progs, function(g) colMeans(z[intersect(g, rownames(z)), , drop = FALSE]))) }
+pv <- function(f, dd, term = "psa") { s <- tryCatch(summary(lm(f, dd))$coefficients, error = function(e) NULL); if (is.null(s) || !term %in% rownames(s)) c(NA, NA) else s[term, c(1, 4)] }
+
+```
+
+### A, B and D. Composition, feature and transcriptome-wide models per stratum
+For each of the nine strata: Spearman correlation of each lineage fraction with PSA change and a Wilcoxon NR vs R test (A). Each feature is then refitted as y ~ PSA/50 + batch, and with tumour, tumour + immune and tumour + bone/marrow covariates; in primary tumours the last of these is tumour only (B). Transcriptome-wide limma-voom (robust) is refitted with the same covariate sets, recording genes at FDR < 0.05/0.1, π₁ and the *FOLH1* P (D).
+
+```{r comp-31-composition-sensitivity-02}
+## ---- A + B ---------------------------------------------------------------------------------
+a_rows <- list(); b_rows <- list(); d_rows <- list()
+for (sg in names(code)) for (tp in c("Archival", "Screening", "Cycle1")) {
+  sid <- paste0(code[sg], "__", tp); p <- pbs[[sid]]
+  m <- p$meta %>% left_join(comp_pt(sg, tp), by = "subject_id"); m$psa <- m$psa_change_capped / 50; m$batch <- factor(m$study_batch)
+  for (v in c("tumour", "immune", "bone")) { if (all(m[[v]] == 0)) next
+    ct <- suppressWarnings(cor.test(m[[v]], m$max_psa_change, method = "spearman", exact = FALSE))
+    nr <- m$response_group_neat
+    a_rows[[paste(sid, v)]] <- data.frame(stratum = sid, lineage = v, mean_R = mean(m[[v]][nr == "Responder"]), mean_NR = mean(m[[v]][nr == "Non_Responder"]),
+      rho_psa = unname(ct$estimate), p_psa = ct$p.value,
+      p_NR_vs_R = suppressWarnings(wilcox.test(m[[v]][nr == "Non_Responder"], m[[v]][nr == "Responder"], exact = FALSE))$p.value) }
+  F <- score(p$lcpm); dd0 <- cbind(m, F)
+  bonecov <- if (tp == "Archival") "" else " + bone"
+  specs <- c(base = "y ~ psa + batch", tumour = "y ~ psa + batch + tumour", tumour_immune = "y ~ psa + batch + tumour + immune",
+             tumour_bone = paste0("y ~ psa + batch + tumour", bonecov))
+  for (f in colnames(F)) { dd <- dd0; dd$y <- dd[[f]]
+    r <- sapply(specs, function(s) pv(as.formula(s), dd))
+    b_rows[[paste(sid, f)]] <- data.frame(stratum = sid, feature = f, n = nrow(dd),
+      beta_base = r[1, "base"], p_base = r[2, "base"], beta_tumour = r[1, "tumour"], p_tumour = r[2, "tumour"],
+      beta_tumour_immune = r[1, "tumour_immune"], p_tumour_immune = r[2, "tumour_immune"],
+      beta_tumour_bone = r[1, "tumour_bone"], p_tumour_bone = r[2, "tumour_bone"]) }
+  ## D. transcriptome-wide with composition covariates
+  for (cs in c("base", "tumour", "tumour_bone")) {
+    f <- switch(cs, base = ~ psa + batch, tumour = ~ psa + batch + tumour, tumour_bone = if (tp == "Archival") ~ psa + batch + tumour else ~ psa + batch + tumour + bone)
+    X <- model.matrix(f, m); X <- X[, qr(X)$pivot[seq_len(qr(X)$rank)], drop = FALSE]
+    tt <- topTable(eBayes(lmFit(voom(p$dge, X), X), robust = TRUE), coef = "psa", number = Inf, sort.by = "none")
+    d_rows[[paste(sid, cs)]] <- data.frame(stratum = sid, covariates = cs, fdr05 = sum(tt$adj.P.Val < 0.05), fdr10 = sum(tt$adj.P.Val < 0.1),
+      pi1 = 1 - propTrueNull(tt$P.Value, method = "lfdr"), FOLH1_P = tt["FOLH1", "P.Value"])
+  }
+}
+a_tab <- bind_rows(a_rows); b_tab <- bind_rows(b_rows); d_tab <- bind_rows(d_rows)
+
+```
+
+### C. On-treatment change adjusted for composition change
+For each compartment, build a joint pseudobulk of paired Screening/Cycle1 samples over the union LOQ universe and compute per-patient changes in features and in tumour, immune and bone/marrow fractions. The composition shift is tested by Wilcoxon signed-rank test. Induction is tested as the intercept of Δfeature ~ 1, ~ Δtumour and ~ Δtumour + Δimmune; the intercept is the change at unchanged composition, since the regressors are not centred. All five tables are then written and summaries printed.
+
+```{r comp-31-composition-sensitivity-03}
+## ---- C. on-treatment change adjusted for composition change ------------------------------
+c_rows <- list(); comp_change <- list()
+for (sg in names(code)) {
+  g <- union(uni[[paste0(code[sg], "__Screening")]]$g10, uni[[paste0(code[sg], "__Cycle1")]]$g10)
+  idx <- which(keep_aoi & cd$segment_name == sg & cd$timepoint %in% c("Screening", "Cycle1")); d <- cd[idx, ]
+  key <- paste(d$subject_id, d$timepoint, sep = "|")
+  mm <- sapply(split(seq_along(key), key), function(i) rowSums(assay(se, "all_count")[g, idx[i], drop = FALSE]))
+  sid <- sub("\\|.*", "", colnames(mm)); both <- names(which(table(sid) == 2)); mm <- mm[, sid %in% both]
+  lc <- cpm(calcNormFactors(DGEList(mm)), log = TRUE, prior.count = 1); F <- score(lc)
+  cmp <- bind_rows(comp_pt(sg, "Screening") %>% mutate(tp = "Screening"), comp_pt(sg, "Cycle1") %>% mutate(tp = "Cycle1")) %>% filter(subject_id %in% both)
+  key2 <- paste(cmp$subject_id, cmp$tp, sep = "|"); cmp <- cmp[match(colnames(lc), key2), ]
+  dl <- function(v) { s <- split(v, sub("\\|.*", "", colnames(lc))); t <- split(sub(".*\\|", "", colnames(lc)), sub("\\|.*", "", colnames(lc)))
+    sapply(names(s), function(k) s[[k]][t[[k]] == "Cycle1"] - s[[k]][t[[k]] == "Screening"]) }
+  dT <- dl(cmp$tumour); dI <- dl(cmp$immune); dB <- dl(cmp$bone)
+  comp_change[[sg]] <- data.frame(segment = sg, n = length(dT), mean_dTumour = mean(dT), p_dTumour = wilcox.test(dT, exact = FALSE)$p.value,
+    mean_dImmune = mean(dI), p_dImmune = wilcox.test(dI, exact = FALSE)$p.value, mean_dBone = mean(dB), p_dBone = wilcox.test(dB, exact = FALSE)$p.value)
+  for (f in colnames(F)) { y <- dl(F[, f])
+    f0 <- summary(lm(y ~ 1))$coefficients; f1 <- summary(lm(y ~ dT))$coefficients; f2 <- summary(lm(y ~ dT + dI))$coefficients
+    c_rows[[paste(sg, f)]] <- data.frame(segment = sg, feature = f, n = length(y), mean_change = f0[1, 1], p_change = f0[1, 4],
+      change_adj_tumour = f1[1, 1], p_adj_tumour = f1[1, 4], change_adj_tumour_immune = f2[1, 1], p_adj_tumour_immune = f2[1, 4],
+      p_wilcox = wilcox.test(y, exact = FALSE)$p.value) }
+}
+c_tab <- bind_rows(c_rows); cc_tab <- bind_rows(comp_change)
+
+write.csv(a_tab, file.path(out_dir, "A_composition_vs_response.csv"), row.names = FALSE)
+write.csv(b_tab, file.path(out_dir, "B_features_adjusted_for_composition.csv"), row.names = FALSE)
+write.csv(cc_tab, file.path(out_dir, "C_composition_change_on_treatment.csv"), row.names = FALSE)
+write.csv(c_tab, file.path(out_dir, "C_induction_adjusted_for_composition.csv"), row.names = FALSE)
+write.csv(d_tab, file.path(out_dir, "D_transcriptome_wide_with_composition.csv"), row.names = FALSE)
+options(width = 220); f2 <- function(x) mutate(x, across(where(is.numeric), ~signif(.x, 2)))
+cat("\n==== A. composition vs response (P < 0.1) ====\n"); print(as.data.frame(f2(a_tab %>% filter(p_psa < 0.1 | p_NR_vs_R < 0.1))), row.names = FALSE)
+cat("\n==== B. key features: P base vs adjusted ====\n"); print(as.data.frame(f2(b_tab %>% select(stratum, feature, n, p_base, p_tumour, p_tumour_immune, p_tumour_bone, beta_base, beta_tumour_bone))), row.names = FALSE)
+cat("\n==== C. composition change on treatment ====\n"); print(as.data.frame(f2(cc_tab)), row.names = FALSE)
+cat("\n==== C. induction adjusted for composition change ====\n"); print(as.data.frame(f2(c_tab)), row.names = FALSE)
+cat("\n==== D. transcriptome-wide ====\n"); print(as.data.frame(f2(d_tab)), row.names = FALSE)
+cat("R9 complete.\n")
+```

@@ -1,0 +1,152 @@
+---
+title: "Negative-probe limit of quantification and per-stratum gene universes"
+subtitle: "PRINCE spatial transcriptomics: `comp_16_loq_filter`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+Defines which genes are measurable above background. For each AOI, the limit of quantification is LOQ = geometric mean × (geometric s.d.)² of the 139 NegProbe-WTX probes, floored at 2 counts (the GeomxTools default); the threshold of the earlier analysis (2 × geometric mean) is kept for comparison. A gene is detected in an AOI when its count exceeds that AOI's LOQ.
+
+Within each compartment × timepoint stratum (control AOIs excluded), genes detected in at least 10% of AOIs form the gene universe used by every downstream analysis, including the patient pseudobulk; 5% and 20% sets are kept as sensitivity thresholds. Probe families prone to cross-hybridisation (*USP17L*, *PRAMEF*, *NBPF*, olfactory receptors) are excluded. The per-AOI percentage of genes above LOQ is also stored and defines the low-signal AOIs (< 5%) excluded in sensitivity analyses.
+
+**Manuscript items supported**
+
+- Extended Data Fig. 1b–e (per-AOI LOQ, % genes above LOQ, gene-universe size by threshold, detection of selected genes), via comp_28/comp_41
+- Supplementary Table 23 (LOQ and gene universes per stratum, via comp_25)
+- Methods: Background and gene universe
+- `loq_gene_universes.qs` defines the gene universe for comp_13b and most later analyses
+
+**Pipeline step:** `./run_pipeline.sh --only 16_loq_filter`. Approximate runtime: about a minute.
+
+**Inputs**
+
+- `data/phase2_se_qc_filtered.qs`
+- `data/raw/Prince_countdata_with_ncg.cvs`
+
+**Outputs**
+
+- `results/R1_loq/loq_gene_universes.qs`
+- `results/R1_loq/loq_filter_summary.csv`
+- `results/R1_loq/gene_detection_rates.csv`
+- `results/R1_loq/pct_genes_above_LOQ.pdf`
+
+**Depends on**: `comp_00b_bone_cohort`
+
+## Analysis
+
+Header defining the standard LOQ, the detection rule and the ≥10% gene-universe criterion with 5% and 20% sensitivity thresholds.
+
+Loads the bone-only AOI object and its raw counts and creates the output folder.
+
+```{r comp-16-loq-filter-01}
+## ============================================================================
+## PRINCE -- R1: negative-probe background and gene filtering
+## Standard GeoMx limit of quantification per AOI from the 139 NegProbe-WTX probes:
+##   LOQ_std = geomean(neg) * geoSD(neg)^2, floored at 2 (GeomxTools default)
+## (phase2_qc.R used LOQ = 2 * geomean(neg); both are reported.)
+## A gene is "detected" in an AOI when its count exceeds that AOI's LOQ. Within each
+## segment x timepoint stratum (Control / DiseaseProgression excluded) genes are kept
+## when detected in >= 10% of AOIs (sensitivity: 5% and 20%). The kept gene sets are
+## the gene universe for every downstream analysis (pseudobulk included).
+## Outputs: results/R1_loq/
+## ============================================================================
+
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({ library(qs); library(SummarizedExperiment); library(dplyr); library(ggplot2) })
+setwd(PRINCE_DIR)
+check_ram_or_stop(20)
+out_dir <- file.path(COMP_DIR, "R1_loq"); dir.create(out_dir, showWarnings = FALSE)
+
+se <- qs::qread("phase2_se_qc_filtered.qs"); cd <- as.data.frame(colData(se))
+counts <- assay(se, "all_count")
+
+```
+
+### Per-AOI negative-probe LOQ
+Reads the negative-probe counts from the raw count export, matches its AOI columns to the AOI object, and computes each AOI's geometric mean and geometric s.d. (counts floored at 1). LOQ = geomean × geoSD², floored at 2; AOIs without negative-probe data fall back to the earlier LOQ. The ratio of the two thresholds is printed.
+
+```{r comp-16-loq-filter-02}
+## ---- negative probes per AOI (mapping as in phase2_qc.R) ----------------------------
+hdr <- readLines("raw/Prince_countdata_with_ncg.cvs", n = 1)
+aoi_cols_csv <- gsub('^"|"$', "", strsplit(hdr, ",")[[1]])[-(1:12)]
+ncg <- read.csv("raw/Prince_countdata_with_ncg.cvs", row.names = 1, check.names = FALSE)
+neg <- as.matrix(ncg[ncg$CodeClass == "Negative", 13:ncol(ncg)])
+cat("Negative probes:", nrow(neg), "\n")
+mi <- match(make.names(cd$segment_display_name), aoi_cols_csv)
+cat("AOIs with negative-probe data:", sum(!is.na(mi)), "/", nrow(cd), "\n")
+geo <- function(x) exp(mean(log(pmax(x, 1))))
+geosd <- function(x) exp(sd(log(pmax(x, 1))))
+cd$neg_geomean2 <- NA; cd$neg_geosd <- NA
+for (i in which(!is.na(mi))) { v <- neg[, aoi_cols_csv[mi[i]]]; cd$neg_geomean2[i] <- geo(v); cd$neg_geosd[i] <- geosd(v) }
+cd$LOQ_std <- pmax(cd$neg_geomean2 * cd$neg_geosd^2, 2)
+# AOIs without negative-probe data: fall back to the existing phase2 LOQ (2 x geomean)
+cd$LOQ_std[is.na(cd$LOQ_std)] <- pmax(cd$LOQ[is.na(cd$LOQ_std)], 2)
+cat("LOQ_std vs phase2 LOQ (ratio) summary:\n"); print(summary(cd$LOQ_std / cd$LOQ))
+
+```
+
+### AOI signal depth
+Percentage of genes above LOQ per AOI; AOIs below 5% are counted here and excluded only in sensitivity analyses.
+
+```{r comp-16-loq-filter-03}
+## ---- AOI signal QC ------------------------------------------------------------------------
+cd$pct_above_LOQ_std <- colMeans(sweep(counts, 2, cd$LOQ_std, `>`)) * 100
+cat("AOIs with < 5% genes above LOQ_std:", sum(cd$pct_above_LOQ_std < 5), "\n")
+
+```
+
+### Gene universes per stratum
+For each of the nine compartment × timepoint strata, the fraction of AOIs in which each gene exceeds LOQ; artefact-prone probe families are removed and the 5%, 10% and 20% gene sets are stored with the detection rates. The summary also gives the 10% universe under the earlier LOQ and the detection of key genes (*FOLH1*, *KLK3*, neuroendocrine and p53-target genes). Writes the universes and per-AOI LOQ data, the summary table, gene-level detection rates and a QC box plot.
+
+```{r comp-16-loq-filter-04}
+## ---- per-stratum detection and gene universes ------------------------------------------
+keep_aoi <- cd$response_group_neat != "Control" & cd$timepoint %in% c("Archival", "Screening", "Cycle1")
+strata <- expand.grid(segment = c("CD45+", "PSMA+", "PanCK+PSMA-"), timepoint = c("Archival", "Screening", "Cycle1"),
+                      stringsAsFactors = FALSE)
+code <- c("CD45+" = "CD45", "PSMA+" = "PSMA", "PanCK+PSMA-" = "PanCKPSMA")
+artefact_re <- "^(USP17L|PRAMEF|NBPF|OR[0-9]+[A-Z]+[0-9]+)"
+universes <- list(); summ <- list(); det_rates <- list()
+for (s in seq_len(nrow(strata))) {
+  sg <- strata$segment[s]; tp <- strata$timepoint[s]; sid <- paste0(code[sg], "__", tp)
+  idx <- which(keep_aoi & cd$segment_name == sg & cd$timepoint == tp)
+  det <- rowMeans(sweep(counts[, idx], 2, cd$LOQ_std[idx], `>`))
+  det_old <- rowMeans(sweep(counts[, idx], 2, cd$LOQ[idx], `>`))
+  ok <- !grepl(artefact_re, names(det))
+  universes[[sid]] <- list(g05 = names(det)[det >= 0.05 & ok], g10 = names(det)[det >= 0.10 & ok],
+                           g20 = names(det)[det >= 0.20 & ok], detection = det)
+  det_rates[[sid]] <- data.frame(stratum = sid, gene = names(det), detection = det)
+  key <- c("FOLH1", "CHGA", "IBSP", "NEUROD1", "KLK3", "TMPRSS2", "SYP", "ASCL1", "INSM1", "MDM2", "CDKN1A")
+  summ[[sid]] <- data.frame(stratum = sid, n_aoi = length(idx), median_LOQ_std = median(cd$LOQ_std[idx]),
+                            genes_det05 = length(universes[[sid]]$g05), genes_det10 = length(universes[[sid]]$g10),
+                            genes_det20 = length(universes[[sid]]$g20),
+                            genes_det10_phase2LOQ = sum(det_old >= 0.10 & ok),
+                            key_detection = paste(sprintf("%s %.0f%%", key, 100 * det[key]), collapse = "; "))
+}
+summ <- bind_rows(summ)
+options(width = 250); print(summ %>% select(-key_detection), row.names = FALSE)
+cat("\nDetection of key genes (% AOIs above LOQ_std):\n"); for (i in seq_len(nrow(summ))) cat(summ$stratum[i], ":", summ$key_detection[i], "\n")
+
+p <- ggplot(cd[keep_aoi, ], aes(segment_name, pct_above_LOQ_std, fill = segment_name)) + geom_boxplot(outlier.size = 0.4) +
+  facet_wrap(~timepoint) + scale_y_log10() + theme_classic(base_size = 8) + theme(legend.position = "none") +
+  labs(x = NULL, y = "% genes above LOQ (geomean x geoSD^2)")
+ggsave(file.path(out_dir, "pct_genes_above_LOQ.pdf"), p, width = 6, height = 3)
+qs::qsave(list(universes = universes, aoi = cd[, c("neg_geomean2", "neg_geosd", "LOQ_std", "LOQ", "pct_above_LOQ_std")]),
+          file.path(out_dir, "loq_gene_universes.qs"))
+write.csv(summ, file.path(out_dir, "loq_filter_summary.csv"), row.names = FALSE)
+write.csv(bind_rows(det_rates), file.path(out_dir, "gene_detection_rates.csv"), row.names = FALSE)
+cat("R1 complete.\n")
+```

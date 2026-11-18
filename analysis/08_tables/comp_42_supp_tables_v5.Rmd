@@ -1,0 +1,77 @@
+---
+title: "Supplementary Tables: add outcome-framing and categorical AOI-level sheets (S86–S97)"
+subtitle: "PRINCE spatial transcriptomics: `comp_42_supp_tables_v5`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+This is one step in the cumulative construction of the Supplementary Tables workbook (`comp_15` → `comp_25` → `comp_29` → `comp_42` → `comp_47`). It loads the v4 workbook and appends ten sheets from the clinical-outcome analysis (R17, `comp_40_burden_outcome`; S86–S95) and two from the categorical AOI-level analysis (R18, `comp_43_aoi_dream_categorical`; S96–S97). Each sheet has its caption in row 1 and the table from row 3. The workbook is saved as `Manuscript_v5/Supplementary_Tables_v5.xlsx`, and the Supplementary Data files are copied forward from `Manuscript_v4`. `comp_47_supp_tables_audit` then adds the last sheets to the same workbook, which is released as `Supplementary_Tables_v6.xlsx`.
+
+**Manuscript items supported**
+
+- Supplementary Tables 86–95 (tumour burden, ctDNA categories, PET × tissue stratification, genotype–phenotype and prognostic factors)
+- Supplementary Tables 96–97 (categorical non-responder vs responder AOI-level models)
+- Supplementary Data 1–5 (copied forward from the v4 folder)
+
+**Pipeline step:** `./run_pipeline.sh --only 42_supp_tables_v5`. Approximate runtime: seconds.
+
+**Inputs**
+
+- `results/Manuscript_v4/Supplementary_Tables_v4.xlsx`
+- `results/R17_kwan/*.csv`
+- `results/R18_aoi_dream_categorical/A_genomewide_dream_NR_vs_R.csv`
+- `results/R18_aoi_dream_categorical/B_feature_models_NR_vs_R.csv`
+- `results/Manuscript_v4/Supplementary_Data_*`
+- `results/Manuscript_v4/p53_core*`
+
+**Outputs**
+
+- `results/Manuscript_v5/Supplementary_Tables_v5.xlsx`
+- `results/Manuscript_v5/Supplementary_Data_*`
+- `results/Manuscript_v5/p53_core*`
+
+**Depends on**: `comp_29_supp_tables_v4`, `comp_40_burden_outcome`, `comp_43_aoi_dream_categorical`
+
+## Analysis
+
+Load the v4 workbook and append S86–S95 from `results/R17_kwan/`: tissue vs burden correlations, *FOLH1* by ctDNA category, burden-adjusted *FOLH1* outcome models, per-stratum ctDNA-adjusted models, SUVmean × *FOLH1* groups, tests and multivariable Cox, ctDNA categories, genotype–tissue associations and univariable Cox models. Then append S96–S97 from `results/R18_aoi_dream_categorical/`: transcriptome-wide dream and feature mixed models for non-responders vs responders. Save the v5 workbook and copy the Supplementary Data files into the v5 folder.
+
+```{r comp-42-supp-tables-v5-01}
+## PRINCE manuscript v5 -- Supplementary Tables: v4 workbook + R17 outcome analyses (S86-S97).
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({ library(openxlsx) })
+wb <- loadWorkbook(file.path(COMP_DIR, "Manuscript_v4", "Supplementary_Tables_v4.xlsx"))
+add <- function(name, f, desc) { df <- read.csv(file.path(COMP_DIR, "R17_kwan", f), check.names = FALSE); addWorksheet(wb, name)
+  writeData(wb, name, desc, startRow = 1); writeData(wb, name, df, startRow = 3) }
+add("S86_tissue_vs_burden", "A_tissue_vs_burden_correlations.csv", "Table S86. Patient-level tissue programmes vs ctDNA fraction, PET and laboratory burden markers (Spearman; Bonferroni within tissue feature).")
+add("S87_FOLH1_by_ctDNA_cat", "A_FOLH1_by_ctDNA_category.csv", "Table S87. Tissue FOLH1 by baseline ctDNA category (Kruskal-Wallis).")
+add("S88_FOLH1_burden_adjusted", "A_FOLH1_outcomes_adjusted_for_burden.csv", "Table S88. Tissue FOLH1 vs PSA change, PSA50 failure (Firth), rPFS and OS, unadjusted and adjusted for ctDNA%, PSA and SUVmean.")
+add("S89_FOLH1_strata_ctDNA_adj", "A_FOLH1_per_stratum_adjusted_for_ctDNA.csv", "Table S89. Per-stratum FOLH1 ~ PSA change + batch, with and without ctDNA fraction.")
+add("S90_SUV_FOLH1_groups", "B_SUV_FOLH1_groups.csv", "Table S90. PSA50 (exact CI) and median rPFS/OS by PSMA SUVmean >=10, tissue FOLH1 median split and their combination.")
+add("S91_SUV_FOLH1_tests", "B_SUV_FOLH1_tests.csv", "Table S91. Fisher, log-rank and Cox tests for the SUVmean and FOLH1 groupings; multivariable Cox in S92.")
+add("S92_SUV_FOLH1_cox", "B_SUV_FOLH1_multivariable_cox.csv", "Table S92. Cox model of rPFS and OS with SUVmean >=10 and baseline tissue FOLH1.")
+add("S93_ctDNA_categories", "C_ctDNA_categories.csv", "Table S93. PSA50 and survival by baseline ctDNA fraction (<2%, 2-30%, >30%).")
+add("S94_genotype_tissue", "D_alterations_tissue_patient.csv", "Table S94. ctDNA alterations vs tissue FOLH1, AR and PI3K-AKT-mTOR activity and PSMA SUVmean, with and without ctDNA% adjustment (per-stratum results in the R17 output folder).")
+add("S95_prognostic_factors", "I_univariable_cox.csv", "Table S95. Univariable Cox models for rPFS and OS: clinical, PET, ctDNA and tissue features.")
+add18 <- function(name, f, desc) { df <- read.csv(file.path(COMP_DIR, "R18_aoi_dream_categorical", f), check.names = FALSE); addWorksheet(wb, name)
+  writeData(wb, name, desc, startRow = 1); writeData(wb, name, df, startRow = 3) }
+add18("S96_AOI_NR_vs_R_genomewide", "A_genomewide_dream_NR_vs_R.csv", "Table S96. AOI-level dream, non-responder vs responder (Intermediate excluded): genes at FDR<0.05/0.1, pi1, FOLH1, patient-permutation calibration and concordance with patient pseudobulk, per stratum and model (M0 batch; M1 + between/within-patient SpatialDecon purity; M2 no batch).")
+add18("S97_AOI_NR_vs_R_features", "B_feature_models_NR_vs_R.csv", "Table S97. AOI-level mixed models of pre-specified features, non-responder vs responder: difference, Kenward-Roger P and 500-permutation patient-level P.")
+saveWorkbook(wb, file.path(COMP_DIR, "Manuscript_v5", "Supplementary_Tables_v5.xlsx"), overwrite = TRUE)
+for (f in list.files(file.path(COMP_DIR, "Manuscript_v4"), pattern = "^Supplementary_Data|p53_core", full.names = TRUE)) file.copy(f, file.path(COMP_DIR, "Manuscript_v5"), overwrite = TRUE)
+cat("v5 tables written\n")
+```

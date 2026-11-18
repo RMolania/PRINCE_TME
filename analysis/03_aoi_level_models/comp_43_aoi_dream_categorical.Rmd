@@ -1,0 +1,184 @@
+---
+title: "AOI-level differential expression by response group (non-responder vs responder)"
+subtitle: "PRINCE spatial transcriptomics: `comp_43_aoi_dream_categorical`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+This script checks that the main conclusions do not depend on treating response as continuous. In each compartment × timepoint stratum, non-responders are compared with responders at AOI level, excluding intermediate patients and omitting strata with fewer than two non-responders. Three models are fitted: M0 = non-responder + batch + (1 | patient); M1 adds the between- and within-patient split of logit SpatialDecon tumour fraction; M2 drops batch as a sensitivity analysis, since two of five non-responders are in batch 3.
+
+Transcriptome-wide models use dream with voomWithDreamWeights on the LOQ gene universe, with cross-hybridising probe families removed. Where any gene reaches FDR < 0.05, the count is calibrated by `N_PERM` permutations of the response label across patients, holding the number of non-responders fixed. Pre-specified features (*FOLH1*, AR, HLA class I, IFN-α, p53 core, NE 13-gene set) are fitted with lmerTest (Kenward–Roger) and 500 patient-level label permutations. Patient pseudobulk limma-voom with the same contrast provides a concordance check (Spearman correlation of t statistics). The patient is the unit of randomisation in every permutation.
+
+**Manuscript items supported**
+
+- Supplementary Table 96 (transcriptome-wide dream, non-responder vs responder: genes at FDR < 0.05/0.1, π₁, *FOLH1*, permutation calibration, concordance)
+- Supplementary Table 97 (pre-specified feature mixed models: difference, Kenward–Roger P, permutation P)
+- Results: categorical AOI-level comparison in the *FOLH1* section (0–32 genes at FDR < 0.05, none beyond the permutation null; *FOLH1* lower in non-responders in all 27 stratum × model fits)
+- Methods: AOI-level analyses (categorical contrast)
+
+**Pipeline step:** `./run_pipeline.sh --only 43_aoi_dream_categorical`. Approximate runtime: about 2.5 h with 10 workers; several hours with the default 4.
+
+**Inputs**
+
+- `data/phase2_se_qc_filtered.qs`
+- `data/reference/msigdb_gene_sets.rds`
+- `results/R1_loq/loq_gene_universes.qs`
+- `results/C3_deconvolution/deconvolution_proportions.qs`
+- `results/C13_pseudobulk_LOQ/pseudobulk_strata.qs`
+
+**Outputs**
+
+- `results/R18_aoi_dream_categorical/A_genomewide_dream_NR_vs_R.csv`
+- `results/R18_aoi_dream_categorical/B_feature_models_NR_vs_R.csv`
+- `results/R18_aoi_dream_categorical/A_top200_genes_per_stratum_model.csv`
+
+**Depends on**: `comp_00b_bone_cohort`, `comp_03b_deconv`, `comp_13b_pseudobulk_loq`, `comp_16_loq_filter`
+
+## Analysis
+
+Header: models M0–M2 and the three parts: A, transcriptome-wide dream with label-permutation calibration; B, pre-specified features; C, pseudobulk concordance.
+
+Set-up. Keep responder and non-responder AOIs from the three analysed timepoints. Remove cross-hybridising probe families, define the pre-specified programmes and the between/within split of logit tumour fraction, and drop batch in single-batch strata. `perm_labels` shuffles the non-responder label across patients with a fixed seed, so the number of non-responders is preserved.
+
+```{r comp-43-aoi-dream-categorical-01}
+## ============================================================================
+## PRINCE -- R18: AOI-level differential expression by response group (categorical),
+## Non-responder vs Responder, Intermediate patients excluded.
+## Per segment x timepoint stratum, AOI counts on the LOQ gene universe (artefact probe families removed).
+##   M0: NR + batch + (1|patient)
+##   M1: M0 + decon_b + decon_w        (SpatialDecon tumour fraction split into patient mean / within-patient deviation)
+##   M2: NR + (1|patient)              (no batch; sensitivity, since 2/5 NR are in batch 3)
+##  A. genome-wide dream (voomWithDreamWeights; Satterthwaite df; variancePartition::eBayes):
+##     FDR counts, pi1, FOLH1 rank, top genes; calibration by N_PERM permutations of the response label
+##     across patients (number of NR fixed), run only where the observed count at FDR < 0.05 is > 0
+##  B. pre-specified features: lmer with Kenward-Roger df + 500 patient-level label permutations
+##  C. patient pseudobulk limma-voom (robust) NR + batch, for concordance (Spearman of t statistics)
+## Outputs: results/R18_aoi_dream_categorical/
+## ============================================================================
+
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({ library(qs); library(SummarizedExperiment); library(dplyr); library(tidyr); library(edgeR); library(limma)
+  library(variancePartition); library(BiocParallel); library(lme4); library(lmerTest); library(parallel) })
+setwd(PRINCE_DIR)
+check_ram_or_stop(20)
+set.seed(2026)
+out_dir <- file.path(COMP_DIR, "R18_aoi_dream_categorical"); dir.create(out_dir, showWarnings = FALSE)
+N_PERM <- as.integer(Sys.getenv("N_PERM", "20"))
+BP <- SnowParam(MAX_WORKERS, progressbar = FALSE)
+
+se <- qs::qread("phase2_se_qc_filtered.qs"); cd <- as.data.frame(colData(se))
+loq <- qs::qread(file.path(COMP_DIR, "R1_loq", "loq_gene_universes.qs")); uni <- loq$universes
+dec <- qs::qread(out_path("C3_deconvolution", "deconvolution_proportions.qs"))
+tf <- c(dec$lineage_primary[, "Epithelial_tumour"], dec$lineage_bone[, "Epithelial_tumour"]); tf <- tf[!duplicated(names(tf))]
+pbs <- qs::qread(out_path("C13_pseudobulk_LOQ", "pseudobulk_strata.qs"))
+msig <- readRDS(file.path(PMCC_DIR, "msigdb_gene_sets.rds"))
+artefact_re <- "^(USP17L|PRAMEF|NBPF|OR[0-9]+[A-Z]+[0-9]+)"
+counts_all <- assay(se, "all_count"); counts_all <- counts_all[!grepl(artefact_re, rownames(counts_all)), ]
+code <- c("CD45+" = "CD45", "PSMA+" = "PSMA", "PanCK+PSMA-" = "PanCKPSMA"); tps <- c("Archival", "Screening", "Cycle1")
+keep_aoi <- cd$response_group_neat %in% c("Responder", "Non_Responder") & cd$timepoint %in% tps
+progs <- list(AR_Hallmark = msig$H$HALLMARK_ANDROGEN_RESPONSE, HLA_I = c("HLA-A", "HLA-B", "HLA-C", "B2M", "TAP1", "TAP2", "TAPBP"),
+  Hallmark_IFNa = msig$H$HALLMARK_INTERFERON_ALPHA_RESPONSE, P53_core = c("CDKN1A", "MDM2", "DDB2", "PHLDA3", "GDF15", "TNFRSF10B", "SESN1", "ZMAT3", "RRM2B", "TP53I3"),
+  NE_Beltran13 = c("ASCL1", "SOX2", "NKX2-1", "FOXA2", "INSM1", "CHGA", "CHGB", "SYP", "NCAM1", "EZH2", "AURKA", "MYCN", "PCSK1"))
+logit <- function(p) { p <- pmin(pmax(p, 0.01), 0.99); log(p / (1 - p)) }
+split_bw <- function(x, g) { b <- ave(x, g); list(b = b, w = x - b) }
+forms <- list(M0 = ~ NR + batch + (1 | patient), M1 = ~ NR + batch + decon_b + decon_w + (1 | patient), M2 = ~ NR + (1 | patient))
+fix_form <- function(f, m) if (length(unique(m$batch)) < 2) update(f, ~ . - batch) else f
+perm_labels <- function(pts, b) { set.seed(b); setNames(sample(pts$NR), pts$patient) }
+
+```
+
+Per stratum (strata already in the cumulative CSVs are skipped when `RESUME=1`):
+- **C.** Patient pseudobulk limma-voom (robust eBayes) with ~ non-responder + batch; rank-deficient columns are dropped.
+- **B.** TMM log-CPM, then *FOLH1* and programme mean z-scores (≥3 genes). Each feature × model is fitted with lmerTest (Kenward–Roger P for the non-responder term), with a permutation P from 500 patient-level label shuffles.
+- **A.** dream per model. Records genes at FDR < 0.05 and < 0.1, π₁, the *FOLH1* log fold change, P and rank, pseudobulk FDR < 0.05 count, and the AOI-vs-pseudobulk t-statistic correlation. When the observed count is > 0, the permutation median, 95th percentile, fraction of permutations with any hit, and permutation P are added; when it is 0, the permutation P is set to 1. The top 200 genes per stratum and model are also written.
+
+Outputs are rewritten after each stratum, so the run can be resumed.
+
+```{r comp-43-aoi-dream-categorical-02}
+summ <- list(); feat <- list(); tops <- list()
+## RESUME=1: reuse strata already completed (all models) in the cumulative CSVs written after each stratum
+done_sid <- character()
+if (Sys.getenv("RESUME") == "1" && file.exists(file.path(out_dir, "A_genomewide_dream_NR_vs_R.csv"))) {
+  prevA <- read.csv(file.path(out_dir, "A_genomewide_dream_NR_vs_R.csv"))
+  done_sid <- names(which(table(prevA$stratum) == length(forms)))
+  summ$prev <- prevA[prevA$stratum %in% done_sid, ]
+  prevB <- read.csv(file.path(out_dir, "B_feature_models_NR_vs_R.csv")); feat$prev <- prevB[prevB$stratum %in% done_sid, ]
+  prevT <- read.csv(file.path(out_dir, "A_top200_genes_per_stratum_model.csv")); tops$prev <- prevT[prevT$stratum %in% done_sid, ]
+  message("RESUME: reusing ", paste(done_sid, collapse = ", "))
+}
+for (sg in names(code)) for (tp in tps) {
+  sid <- paste0(code[sg], "__", tp)
+  if (sid %in% done_sid) next
+  idx <- which(keep_aoi & cd$segment_name == sg & cd$timepoint == tp); d <- cd[idx, ]
+  m <- data.frame(aoi = rownames(d), patient = d$subject_id, batch = factor(d$study_batch), NR = as.integer(d$response_group_neat == "Non_Responder"),
+                  decon = logit(tf[rownames(d)]))
+  s <- split_bw(m$decon, m$patient); m$decon_b <- s$b; m$decon_w <- s$w; m$batch <- droplevels(m$batch); rownames(m) <- m$aoi
+  pts <- unique(m[, c("patient", "NR")]); n_nr <- sum(pts$NR)
+  if (n_nr < 2) { message(sid, ": < 2 non-responders, skipped"); next }
+  g <- intersect(uni[[sid]]$g10, rownames(counts_all))
+  dge <- calcNormFactors(DGEList(counts_all[g, idx]))
+  ## ---- C. patient pseudobulk (same patients) ----
+  pb <- pbs[[sid]]; keep_pb <- pb$meta$response_group_neat %in% c("Responder", "Non_Responder")
+  pm <- pb$meta[keep_pb, ]; pm$NR <- as.integer(pm$response_group_neat == "Non_Responder"); pm$batch <- factor(pm$study_batch)
+  Xp <- model.matrix(~ NR + batch, pm); Xp <- Xp[, qr(Xp)$pivot[seq_len(qr(Xp)$rank)], drop = FALSE]
+  tpb <- topTable(eBayes(lmFit(voom(pb$dge[, keep_pb], Xp), Xp), robust = TRUE), coef = "NR", number = Inf, sort.by = "none")
+  ## ---- B. features ----
+  lc <- cpm(dge, log = TRUE, prior.count = 1); z <- t(scale(t(lc)))
+  F <- cbind(FOLH1 = if ("FOLH1" %in% rownames(lc)) lc["FOLH1", ] else rep(NA_real_, ncol(lc)),
+             sapply(progs, function(gs) { gg <- intersect(gs, rownames(z)); if (length(gg) >= 3) colMeans(z[gg, , drop = FALSE]) else rep(NA_real_, ncol(z)) }))
+  for (f in colnames(F)) { if (all(is.na(F[, f]))) next
+    for (mn in names(forms)) {
+      fm <- fix_form(forms[[mn]], m); dd <- cbind(m, y = F[, f]); ff <- update(fm, y ~ .)
+      ob <- tryCatch({ fit <- suppressMessages(suppressWarnings(lmerTest::lmer(ff, dd))); summary(fit, ddf = "Kenward-Roger")$coefficients["NR", c(1, 2, 5)] }, error = function(e) c(NA, NA, NA))
+      pb_ <- unlist(mclapply(1:500, function(b) { px <- perm_labels(pts, b); dp <- dd; dp$NR <- px[dp$patient]
+        tryCatch(suppressMessages(suppressWarnings(fixef(lme4::lmer(ff, dp))["NR"])), error = function(e) NA) }, mc.cores = MAX_WORKERS))
+      feat[[paste(sid, f, mn)]] <- data.frame(stratum = sid, feature = f, model = mn, n_aoi = nrow(m), n_pt = nrow(pts), n_NR = n_nr,
+        diff_NR_minus_R = ob[1], se = ob[2], p_KR = ob[3], p_perm = (1 + sum(abs(pb_) >= abs(ob[1]), na.rm = TRUE)) / (1 + sum(!is.na(pb_)))) } }
+  message(sid, " features done")
+  ## ---- A. genome-wide dream ----
+  for (mn in names(forms)) {
+    fm <- fix_form(forms[[mn]], m); t0 <- Sys.time()
+    v <- voomWithDreamWeights(dge, fm, m, BPPARAM = BP)
+    fit <- variancePartition::eBayes(dream(v, fm, m, BPPARAM = BP)); tt <- variancePartition::topTable(fit, coef = "NR", number = Inf, sort.by = "none")
+    secs <- as.numeric(difftime(Sys.time(), t0, units = "secs")); obs <- sum(tt$adj.P.Val < 0.05)
+    perm_med <- NA; perm_95 <- NA; perm_p <- if (obs == 0) 1 else NA; perm_any <- NA; n_done <- 0
+    if (obs > 0 && N_PERM > 0) {
+      pn <- sapply(seq_len(N_PERM), function(b) { px <- perm_labels(pts, 900 + b); mp <- m; mp$NR <- px[mp$patient]
+        fp <- variancePartition::eBayes(dream(v, fm, mp, BPPARAM = BP)); sum(p.adjust(fp$p.value[, "NR"], "BH") < 0.05) })
+      n_done <- N_PERM; perm_med <- median(pn); perm_95 <- unname(quantile(pn, 0.95)); perm_any <- mean(pn > 0); perm_p <- (1 + sum(pn >= obs)) / (1 + N_PERM) }
+    cc <- intersect(rownames(tt), rownames(tpb))
+    summ[[paste(sid, mn)]] <- data.frame(stratum = sid, model = mn, n_aoi = nrow(m), n_pt = nrow(pts), n_NR = n_nr, n_genes = nrow(tt),
+      fdr05 = obs, fdr10 = sum(tt$adj.P.Val < 0.1), pi1 = 1 - propTrueNull(tt$P.Value, method = "lfdr"),
+      FOLH1_logFC = if ("FOLH1" %in% rownames(tt)) tt["FOLH1", "logFC"] else NA, FOLH1_P = if ("FOLH1" %in% rownames(tt)) tt["FOLH1", "P.Value"] else NA,
+      FOLH1_rank = if ("FOLH1" %in% rownames(tt)) rank(tt$P.Value)[rownames(tt) == "FOLH1"] else NA,
+      pb_fdr05 = sum(tpb$adj.P.Val < 0.05), rho_t_aoi_vs_pb = cor(tt[cc, "t"], tpb[cc, "t"], method = "spearman"),
+      n_perm = n_done, perm_median = perm_med, perm_95 = perm_95, perm_frac_any = perm_any, perm_p = perm_p, secs_per_fit = secs,
+      top10 = paste(head(rownames(tt)[order(tt$P.Value)], 10), collapse = ","))
+    tops[[paste(sid, mn)]] <- data.frame(stratum = sid, model = mn, gene = rownames(tt), logFC = tt$logFC, t = tt$t, P = tt$P.Value, FDR = tt$adj.P.Val) %>%
+      arrange(P) %>% head(200)
+    message(sid, " ", mn, " dream done (", round(secs), " s/fit; ", obs, " genes FDR<0.05", if (n_done) paste0("; perm P ", signif(perm_p, 2)) else "", ")")
+  }
+  write.csv(bind_rows(summ), file.path(out_dir, "A_genomewide_dream_NR_vs_R.csv"), row.names = FALSE)
+  write.csv(bind_rows(feat), file.path(out_dir, "B_feature_models_NR_vs_R.csv"), row.names = FALSE)
+  write.csv(bind_rows(tops), file.path(out_dir, "A_top200_genes_per_stratum_model.csv"), row.names = FALSE)
+}
+options(width = 230); f2 <- function(x) as.data.frame(mutate(x, across(where(is.numeric), ~signif(.x, 2))))
+cat("\n==== A. genome-wide (NR vs R) ====\n"); print(f2(bind_rows(summ) %>% select(-top10)), row.names = FALSE)
+cat("\n==== B. features (patient-permutation P) ====\n")
+print(f2(bind_rows(feat) %>% select(stratum, feature, model, n_NR, diff_NR_minus_R, p_KR, p_perm) %>% pivot_wider(names_from = model, values_from = c(diff_NR_minus_R, p_KR, p_perm))), row.names = FALSE)
+cat("R18 complete.\n")
+```

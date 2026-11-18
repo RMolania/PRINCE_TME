@@ -1,0 +1,107 @@
+---
+title: "Shared set-up: repository paths, thread limits and output guard"
+subtitle: "PRINCE spatial transcriptomics: `comp_00_guard`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+This file is sourced at the top of every analysis script (from `.build/`, where the R code extracted from the R Markdown files is placed). It defines the repository-relative folders used throughout the pipeline: `data/` for the bone-only input objects written by `comp_00b_bone_cohort`, `data/reference/` for gene sets, cell-type markers and external single-cell data, and `results/` (`COMP_DIR`) for every analysis output. The repository root is taken from the environment variable `PRINCE_ROOT`, which `run_pipeline.sh` sets.
+
+BLAS and OpenMP threads are fixed at one, and the number of parallel workers used by `dream`, `variancePartition` and similar steps is read from `PRINCE_MAX_WORKERS` (default 4). This keeps the multi-process steps from oversubscribing cores and keeps results reproducible across machines. The file also provides a free-RAM check (macOS `vm_stat`; it does not block on other systems) and `out_path()`, which creates `results/<step>/` and refuses to write into the input data folder.
+
+**Manuscript items supported**
+
+- No manuscript item directly; shared infrastructure for every analysis script (Code availability).
+
+**Pipeline step:** not run on its own; used by other scripts (see Overview). Approximate runtime: seconds.
+
+**Inputs**
+
+- none
+
+**Outputs**
+
+- none
+
+**Depends on**: none
+
+## Analysis
+
+Header describing what the shared set-up provides.
+
+### Configuration and helpers
+- Fixes BLAS/OpenMP threads at one and reads the parallel worker count from `PRINCE_MAX_WORKERS`.
+- Defines `PRINCE_DIR` (`data/`), `PMCC_DIR` (`data/reference/`), `COMP_DIR` (`results/`) and `CODE_DIR` (`.build/`), and records that the analyses are bone-only (`BONE_ONLY`).
+- `free_ram_gb()`, `check_ram_or_stop()` and `wait_for_ram()` guard the memory-heavy steps.
+- `out_path(step, ...)` returns a path under `results/<step>/` and stops if that path would fall inside `data/`.
+
+```{r comp-00-guard-01}
+## ============================================================================
+## PRINCE analysis -- shared set-up, sourced by every analysis script.
+## Defines the input/output folders relative to the repository root
+## (environment variable PRINCE_ROOT, set by run_pipeline.sh), limits BLAS
+## threads and parallel workers, and provides RAM checks and a safe output-path
+## helper.
+## ============================================================================
+
+Sys.setenv(OMP_NUM_THREADS = 1, OPENBLAS_NUM_THREADS = 1, MKL_NUM_THREADS = 1,
+           VECLIB_MAXIMUM_THREADS = 1)
+MAX_WORKERS <- as.integer(Sys.getenv("PRINCE_MAX_WORKERS", "4"))  # parallel workers; override via env var
+
+PRINCE_ROOT <- normalizePath(Sys.getenv("PRINCE_ROOT", "."))
+PRINCE_DIR  <- file.path(PRINCE_ROOT, "data")                 # inputs (bone-only GeoMx objects written by comp_00b)
+PMCC_DIR    <- file.path(PRINCE_ROOT, "data", "reference")    # reference gene sets, cell-type markers, external scRNA-seq
+COMP_DIR    <- file.path(PRINCE_ROOT, "results")              # every analysis output
+CODE_DIR    <- file.path(PRINCE_ROOT, ".build")               # R code extracted from the R Markdown files
+dir.create(COMP_DIR, showWarnings = FALSE, recursive = TRUE)
+
+# Analyses are restricted to prostate (archival) and bone (pre-/on-treatment) samples:
+# lymph-node and soft-tissue samples were removed from the input objects by comp_00b_bone_cohort.
+BONE_ONLY <- TRUE
+
+# free + inactive + speculative pages (macOS vm_stat), in GB; on other systems returns Inf (no check)
+free_ram_gb <- function() {
+  vm <- tryCatch(suppressWarnings(system("vm_stat", intern = TRUE)), error = function(e) character(0))
+  if (!length(vm)) return(Inf)
+  page <- as.numeric(sub(".*page size of ([0-9]+) bytes.*", "\\1", vm[1]))
+  pick <- function(key) as.numeric(gsub("[^0-9]", "", sub(".*:", "", grep(key, vm, value = TRUE)[1])))
+  (pick("Pages free") + pick("Pages inactive") + pick("Pages speculative")) * page / 1e9
+}
+
+check_ram_or_stop <- function(min_gb = 20) {
+  f <- free_ram_gb()
+  if (f < min_gb) stop(sprintf("Only %.1f GB RAM free (< %d GB); aborting.", f, min_gb))
+  invisible(f)
+}
+
+wait_for_ram <- function(min_gb, poll_sec = 600) {
+  repeat {
+    f <- free_ram_gb()
+    message(sprintf("[%s] free RAM %.1f GB (need %d)", format(Sys.time()), f, min_gb))
+    if (f >= min_gb) return(invisible(f))
+    Sys.sleep(poll_sec)
+  }
+}
+
+# output path inside results/<step>/; outputs must never be written into the input data folder
+out_path <- function(step, ...) {
+  d <- file.path(COMP_DIR, step); dir.create(d, showWarnings = FALSE, recursive = TRUE)
+  p <- file.path(d, ...)
+  stopifnot(!startsWith(normalizePath(dirname(p), mustWork = FALSE), normalizePath(PRINCE_DIR)))
+  p
+}
+```

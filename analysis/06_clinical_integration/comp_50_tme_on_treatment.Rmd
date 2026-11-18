@@ -1,0 +1,192 @@
+---
+title: "On-treatment change of the bone immune microenvironment"
+subtitle: "PRINCE spatial transcriptomics: `comp_50_tme_on_treatment`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+This script extends the paired p53 and interferon analysis of comp_13b to a fixed panel of published immune programmes, checkpoint and myeloid genes, and deconvolved cell fractions. It compares pre-treatment with on-treatment bone biopsies. Every test in the panel is reported, so selective reporting is not possible. For each compartment, the patients with tissue at both timepoints are pseudobulked jointly over the union of both LOQ universes (TMM, log-CPM). Programme scores are the mean z-score of detected genes, with at least three genes required.
+
+Change is tested by Wilcoxon signed-rank test, with BH correction within compartment × family. Changes with FDR < 0.1 are checked in two ways: by adjusting each patient's change for the change in tumour fraction and in library size and signal depth (testing the intercept), and by an AOI-level mixed model `feature ~ timepoint + (1 | patient)` with Kenward–Roger degrees of freedom. The script also relates change and on-treatment level to PSA change. Library-size-weighted SpatialDecon lineage and selected cell-type fractions are analysed in the same paired design on the logit scale.
+
+**Manuscript items supported**
+
+- Extended Data Fig. 4f,g (on-treatment change of immune programmes, genes and deconvolved fractions; plotted by comp_28 code within comp_41)
+- Supplementary Table 101 (assembled by comp_47)
+- Results: rise of IFN-γ-responsive programmes in tumour compartments on treatment
+
+**Pipeline step:** `./run_pipeline.sh --only 50_tme_on_treatment`. Approximate runtime: a few minutes.
+
+**Inputs**
+
+- `data/phase2_se_qc_filtered.qs`
+- `results/C1_clinical/patient_table.qs`
+- `results/R1_loq/loq_gene_universes.qs`
+- `results/C13_pseudobulk_LOQ/pseudobulk_strata.qs`
+- `results/C3_deconvolution/deconvolution_proportions.qs`
+- `data/reference/ProstateCancer_GeneSignatures.R`
+- `data/reference/msigdb_gene_sets.rds`
+- `.build/comp_13b_pseudobulk_loq.R`
+
+**Outputs**
+
+- `results/R22_tme_on_treatment/A_tme_programme_gene_change.csv`
+- `results/R22_tme_on_treatment/D_deconvolved_change.csv`
+
+**Depends on**: `comp_01`, `comp_03b`, `comp_16`, `comp_13b`
+
+## Analysis
+
+### On-treatment change of the immune microenvironment
+
+The header lists analyses A–D. The panel is fixed in advance, and every test is reported.
+
+Loads the inputs and defines the panel in four families: effector, exhaustion/checkpoint, suppressive myeloid (including the bone TAM/TIM programme) and lymphoid/other (including osteoclast and osteoblast programmes). It also defines 18 single genes, including *CD274*, *CD276*, *CXCL9*/*CXCL10* and macrophage markers. The SpatialDecon epithelial-tumour fraction is extracted for composition adjustment. Helper functions cover scoring, logit transformation (clipped at 0.005/0.995), Spearman correlation and intercept extraction.
+
+```{r comp-50-tme-on-treatment-01}
+## ============================================================================
+## PRINCE -- R22: on-treatment change of the immune microenvironment (pre-treatment -> on-treatment bone).
+## Extends the paired p53 / interferon analysis (comp_13b D) to a fixed panel of published immune programmes,
+## immune-checkpoint and myeloid genes, and deconvolved cell lineages. Every test in the panel is reported.
+## Per compartment, patients with tissue at both timepoints; joint pseudobulk over the union of both LOQ universes
+## (TMM, log-CPM); programme score = mean z-score of detected genes (>= 3).
+##  A. change per programme / gene: Wilcoxon signed-rank, n up; BH within compartment x family
+##  B. robustness of changes with FDR < 0.1: intercept after adjusting each patient's change for change in tumour fraction,
+##     in library size + signal depth, and both; AOI-level lmer feature ~ timepoint + (1|patient) (Kenward-Roger)
+##  C. response: change and on-treatment level (on-treatment pseudobulk, batch-adjusted) vs PSA change (Spearman / lm)
+##  D. deconvolved SpatialDecon lineages and selected bone cell types: library-weighted patient mean, paired change (logit)
+## Outputs: results/R22_tme_on_treatment/
+## ============================================================================
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({ library(qs); library(SummarizedExperiment); library(dplyr); library(tidyr); library(edgeR); library(lme4); library(lmerTest) })
+setwd(PRINCE_DIR)
+out_dir <- file.path(COMP_DIR, "R22_tme_on_treatment"); dir.create(out_dir, showWarnings = FALSE)
+se <- qs::qread("phase2_se_qc_filtered.qs"); cd <- as.data.frame(colData(se))
+pt <- qs::qread(out_path("C1_clinical", "patient_table.qs"))
+loq <- qs::qread(file.path(COMP_DIR, "R1_loq", "loq_gene_universes.qs")); uni <- loq$universes
+pbs <- qs::qread(out_path("C13_pseudobulk_LOQ", "pseudobulk_strata.qs"))
+dec <- qs::qread(out_path("C3_deconvolution", "deconvolution_proportions.qs"))
+sig_env <- new.env(); sys.source(file.path(PMCC_DIR, "ProstateCancer_GeneSignatures.R"), envir = sig_env); S <- sig_env$immune_sigs
+src <- readLines(file.path(CODE_DIR, "comp_13b_pseudobulk_loq.R")); msig <- readRDS(file.path(PMCC_DIR, "msigdb_gene_sets.rds"))
+eval(parse(text = src[grep("^apriori_genes <- ", src):grep("^posthoc_programmes <- ", src)]))   # Bone_TAM_TIM, Osteoclast, Osteoblast
+panel <- list(
+  effector = S[c("Tcell_inflamed_GEP", "IFNG_6gene_Ayers", "Cytolytic_activity", "Cytotoxic_effector", "CD8_effector", "NK_cell")],
+  exhaustion_checkpoint = S[c("T_exhaustion", "T_exhaustion_terminal", "Immune_checkpoints", "Tcell_stemness_TCF7")],
+  suppressive_myeloid = c(S[c("Treg", "MDSC_like", "M2_macrophage", "M1_macrophage", "Neutrophil", "TGFb_response_FTBRS")], list(Bone_TAM_TIM = programmes$Bone_TAM_TIM)),
+  lymphoid_other = c(S[c("B_cell", "Plasma_cell", "TLS_12_chemokine", "Proliferation")], list(Osteoclast = programmes$Osteoclast, Osteoblast = programmes$Osteoblast)))
+genes <- c("CD8A", "CD4", "FOXP3", "PDCD1", "CD274", "PDCD1LG2", "CTLA4", "LAG3", "HAVCR2", "TIGIT", "CD276", "IDO1", "CXCL9", "CXCL10", "CD68", "CD163", "SPP1", "MRC1")
+fam_of <- c(setNames(rep(names(panel), lengths(panel)), unlist(lapply(panel, names))), setNames(rep("genes", length(genes)), genes))
+progs <- unlist(unname(panel), recursive = FALSE)
+seg <- c(CD45 = "CD45+", PSMA = "PSMA+", PanCKPSMA = "PanCK+PSMA-")
+artefact_re <- "^(USP17L|PRAMEF|NBPF|OR[0-9]+[A-Z]+[0-9]+)"
+raw <- assay(se, "all_count"); raw <- raw[!grepl(artefact_re, rownames(raw)), ]
+cd$depth <- log(loq$aoi[rownames(cd), "pct_above_LOQ_std"]); cd$lib <- colSums(assay(se, "all_count"))
+tf <- dec$lineage_bone[, "Epithelial_tumour"]
+score <- function(lc) {
+  z <- t(scale(t(lc)))
+  P <- sapply(progs, function(g) { g <- intersect(g, rownames(z)); if (length(g) >= 3) colMeans(z[g, , drop = FALSE]) else rep(NA, ncol(z)) })
+  G <- sapply(genes, function(g) if (g %in% rownames(lc)) lc[g, ] else rep(NA, ncol(lc)))
+  cbind(P, G)
+}
+logit <- function(p) { p <- pmin(pmax(p, 0.005), 0.995); log(p / (1 - p)) }
+sp <- function(a, b) { ok <- complete.cases(a, b); if (sum(ok) < 5) return(c(NA, NA)); t <- suppressWarnings(cor.test(a[ok], b[ok], method = "spearman", exact = FALSE)); c(unname(t$estimate), t$p.value) }
+icpt <- function(f, d) { s <- tryCatch(summary(lm(f, d))$coefficients, error = function(e) NULL); if (is.null(s)) c(NA, NA) else s[1, c(1, 4)] }
+
+```
+
+### A and D. Paired change and response association
+
+For each compartment:
+- builds the joint pre/on-treatment pseudobulk and scores every programme and gene;
+- computes each patient's change and the change in library-weighted tumour fraction (logit), log library size and signal depth;
+- tests change by Wilcoxon signed-rank test, with the composition- and technical-adjusted intercepts;
+- relates change and on-treatment level to PSA change (Spearman, and `level ~ PSA/50 + batch` in the on-treatment pseudobulk).
+
+AOI-level scores are kept for the mixed models. Lineage and selected cell-type fractions (CTL, Treg, TAM, TIM, mDC, NK, osteoclasts) are summarised as library-weighted patient means and tested for paired change on the logit scale. BH correction is applied within compartment × family, and within compartment × level for fractions.
+
+```{r comp-50-tme-on-treatment-02}
+A <- list(); Dc <- list(); aoi_dat <- list()
+for (sg in names(seg)) {
+  s0 <- paste0(sg, "__Screening"); s1 <- paste0(sg, "__Cycle1")
+  pts <- intersect(pbs[[s0]]$meta$subject_id, pbs[[s1]]$meta$subject_id)
+  g <- intersect(union(uni[[s0]]$g10, uni[[s1]]$g10), rownames(raw))
+  idx <- which(cd$segment_name == seg[sg] & cd$timepoint %in% c("Screening", "Cycle1") & cd$subject_id %in% pts & cd$response_group_neat != "Control")
+  key <- paste(cd$subject_id[idx], cd$timepoint[idx]); cnt <- t(rowsum(t(raw[g, idx]), key))
+  lc <- cpm(calcNormFactors(DGEList(cnt)), log = TRUE, prior.count = 1); F <- score(lc)
+  pid <- sub(" .*", "", colnames(lc)); tp <- sub(".* ", "", colnames(lc))
+  dl <- function(x) { x0 <- setNames(x[tp == "Screening"], pid[tp == "Screening"]); x1 <- setNames(x[tp == "Cycle1"], pid[tp == "Cycle1"]); unname(x1[pts] - x0[pts]) }
+  ## per patient-timepoint covariates (library-weighted tumour fraction, library size, signal depth)
+  cv <- cd[idx, ] %>% mutate(key = key, tf = tf[rownames(cd)[idx]]) %>% group_by(key) %>%
+    summarise(tfw = weighted.mean(tf, lib), depth = mean(depth), .groups = "drop")
+  cv <- cv[match(colnames(lc), cv$key), ]
+  dcov <- data.frame(d_tf = dl(logit(cv$tfw)), d_lib = dl(log(colSums(cnt))[colnames(lc)]), d_depth = dl(cv$depth))
+  psa <- pt$max_psa_change[match(pts, pt$subject_id)]; nr <- pt$response_group_neat[match(pts, pt$subject_id)] == "Non_Responder"
+  ## on-treatment level vs PSA change (on-treatment pseudobulk stratum, batch-adjusted)
+  p1 <- pbs[[s1]]; F1 <- score(p1$lcpm); m1 <- p1$meta
+  for (f in colnames(F)) { y <- dl(F[, f]); if (all(is.na(y))) next
+    dd <- cbind(dcov, y = y)
+    r <- sp(y, psa); y1 <- F1[, f]
+    lv <- if (all(is.na(y1))) c(NA, NA) else { b <- factor(m1$study_batch); fm <- if (nlevels(droplevels(b)) > 1) y1 ~ I(m1$psa_change_capped / 50) + b else y1 ~ I(m1$psa_change_capped / 50); summary(lm(fm))$coefficients[2, c(1, 4)] }
+    A[[paste(sg, f)]] <- data.frame(segment = seg[sg], family = fam_of[f], feature = f, n_pairs = sum(!is.na(y)), n_NR = sum(nr),
+      n_up = sum(y > 0, na.rm = TRUE), median_change = median(y, na.rm = TRUE), p_change = wilcox.test(y, exact = FALSE)$p.value,
+      p_adj_tumour = icpt(y ~ d_tf, dd)[2], p_adj_libdepth = icpt(y ~ d_lib + d_depth, dd)[2], p_adj_all = icpt(y ~ d_tf + d_lib + d_depth, dd)[2],
+      median_change_R = median(y[!nr], na.rm = TRUE), median_change_NR = median(y[nr], na.rm = TRUE),
+      rho_change_psa = r[1], p_change_psa = r[2], beta_level_psa = lv[1], p_level_psa = lv[2], rho_level_psa = sp(y1, m1$max_psa_change)[1], p_rho_level_psa = sp(y1, m1$max_psa_change)[2])
+  }
+  ## AOI-level scores for the mixed models (same universe, AOI-level TMM)
+  lca <- cpm(calcNormFactors(DGEList(raw[g, idx])), log = TRUE, prior.count = 1)
+  aoi_dat[[sg]] <- data.frame(segment = seg[sg], patient = cd$subject_id[idx], post = as.integer(cd$timepoint[idx] == "Cycle1"), score(lca), check.names = FALSE)
+  ## D. deconvolution
+  aoi_ids <- rownames(cd)[idx]
+  ct <- cbind(dec$lineage_bone[aoi_ids, setdiff(colnames(dec$lineage_bone), "Other")],
+              CTL = rowSums(dec$prop_bone[aoi_ids, c("CTL-1", "CTL-2")]), Treg = rowSums(dec$prop_bone[aoi_ids, c("Treg Active", "Treg Resting")]),
+              TAM = dec$prop_bone[aoi_ids, "TAM"], TIM = dec$prop_bone[aoi_ids, "TIM"], mDC = dec$prop_bone[aoi_ids, "mDC"],
+              NK = dec$prop_bone[aoi_ids, "NK"], Osteoclasts = dec$prop_bone[aoi_ids, "Osteoclasts"])
+  w <- cd$lib[idx]
+  pm <- apply(ct, 2, function(x) tapply(seq_along(x), key, function(i) weighted.mean(x[i], w[i])))
+  pm <- pm[colnames(lc), , drop = FALSE]
+  for (cn in colnames(pm)) { y <- dl(logit(pm[, cn])); raw_d <- dl(pm[, cn])
+    Dc[[paste(sg, cn)]] <- data.frame(segment = seg[sg], cell_type = cn, level = ifelse(cn %in% colnames(dec$lineage_bone), "lineage", "cell type (exploratory)"),
+      n_pairs = length(y), median_pre = median(pm[tp == "Screening", cn]), median_on = median(pm[tp == "Cycle1", cn]),
+      median_change_pp = 100 * median(raw_d), n_up = sum(y > 0), p_change = wilcox.test(y, exact = FALSE)$p.value,
+      rho_change_psa = sp(y, psa)[1], p_change_psa = sp(y, psa)[2]) }
+}
+A <- bind_rows(A) %>% group_by(segment, family) %>% mutate(fdr_change = p.adjust(p_change, "BH"), fdr_level_psa = p.adjust(p_level_psa, "BH")) %>% ungroup()
+Dc <- bind_rows(Dc) %>% group_by(segment, level) %>% mutate(fdr_change = p.adjust(p_change, "BH")) %>% ungroup()
+```
+
+### B. AOI-level confirmation
+
+For every change with FDR < 0.1, the script fits `score ~ timepoint + (1 | patient)` on AOI-level scores, with Kenward–Roger P values, and joins the result to table A. Both tables are written and printed.
+
+```{r comp-50-tme-on-treatment-03}
+## B. AOI-level mixed models for changes with FDR < 0.1
+hits <- A %>% filter(fdr_change < 0.1)
+B <- bind_rows(lapply(seq_len(nrow(hits)), function(i) {
+  h <- hits[i, ]; d <- aoi_dat[[names(seg)[seg == h$segment]]]; d$y <- d[[h$feature]]
+  s <- tryCatch(summary(lmerTest::lmer(y ~ post + (1 | patient), d), ddf = "Kenward-Roger")$coefficients["post", c(1, 5)], error = function(e) c(NA, NA))
+  data.frame(segment = h$segment, feature = h$feature, aoi_beta = s[1], aoi_p_KR = s[2]) }))
+A <- A %>% left_join(B, by = c("segment", "feature"))
+write.csv(A, file.path(out_dir, "A_tme_programme_gene_change.csv"), row.names = FALSE)
+write.csv(Dc, file.path(out_dir, "D_deconvolved_change.csv"), row.names = FALSE)
+
+options(width = 230); f2 <- function(x) as.data.frame(mutate(x, across(where(is.numeric), ~signif(.x, 2))))
+cat("\n==== A. changes (all) ====\n")
+print(f2(A %>% select(segment, family, feature, n_pairs, n_up, median_change, p_change, fdr_change, p_adj_tumour, p_adj_libdepth, p_adj_all, aoi_p_KR, rho_change_psa, p_change_psa, rho_level_psa, p_level_psa, fdr_level_psa)), row.names = FALSE)
+cat("\n==== D. deconvolution ====\n"); print(f2(Dc), row.names = FALSE)
+cat("R22 complete.\n")
+```

@@ -1,0 +1,87 @@
+---
+title: "Subsampled PCCAT single-cell reference"
+subtitle: "PRINCE spatial transcriptomics: `comp_03a_build_refs`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+Loading the full PCCAT prostate cancer single-cell atlas takes a large amount of memory, so this script does it once and saves a compact subsample for the deconvolution and atlas-based scripts. At most 500 cells are drawn per disease group (Group2) × fine cell type (ct.L3), with seed 2026. The script saves their raw counts, the donor and cell-type annotation (levels L1–L3), and the full cell-count table by Group2 × ct.L2. If the subsample already exists, the script exits. Otherwise it waits until at least 70 GB of RAM is free before loading the atlas.
+
+Unlike the analysis scripts, this step writes its output to `data/refs/`, because the subsample is treated as a derived reference input rather than a result.
+
+**Manuscript items supported**
+
+- Methods: Deconvolution (PCCAT primary-tumour and castration-resistant/NEPC tumour profiles)
+- Intermediate results used by comp_03b_deconv and by later scripts that reuse the subsample (comp_17_bayesprism, comp_20_external_ne_signatures, comp_33_pccat_states, comp_33b_state_validation)
+
+**Pipeline step:** `./run_pipeline.sh --only 03a_build_refs`. Approximate runtime: dominated by loading the atlas; requires at least 70 GB of free RAM.
+
+**Inputs**
+
+- `data/reference/StepF.PCCAT_scRNAseq_data_0601.26.qs`
+
+**Outputs**
+
+- `data/refs/pccat_subsample.qs`
+
+**Depends on**: none
+
+## Analysis
+
+Script header: purpose of the one-off reference build and its memory requirement.
+
+### Build the subsample
+Skips the step if the subsample already exists. Otherwise it waits for at least 70 GB of free RAM, loads the atlas and prints cell counts by disease group and lineage. It then draws at most 500 cells per Group2 × ct.L3 (seed 2026), extracts raw counts and selected metadata, releases the atlas from memory, and saves a sparse count matrix, the metadata and the Group2 × ct.L2 cell-count table.
+
+```{r comp-03a-build-refs-01}
+## ============================================================================
+## PRINCE comprehensive analysis -- C3a: build a small PCCAT reference
+## Loads the 7 GB PCCAT atlas ONCE (read-only, external input),
+## subsamples <= 500 cells per (Group2 x ct.L3), and saves raw counts + meta
+## to data/refs/pccat_subsample.qs. Waits until >= 70 GB RAM is free.
+## ============================================================================
+
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({ library(qs); library(Seurat); library(Matrix) })
+
+out_file <- file.path(PRINCE_DIR, "refs/pccat_subsample.qs")
+if (file.exists(out_file)) { message("Reference already built: ", out_file); quit(save = "no") }
+
+wait_for_ram(70)
+message("Loading StepF PCCAT atlas ...")
+pccat <- qs::qread(file.path(PMCC_DIR, "StepF.PCCAT_scRNAseq_data_0601.26.qs"), nthreads = 1)
+meta <- pccat@meta.data
+message("Atlas: ", nrow(pccat), " genes x ", ncol(pccat), " cells")
+print(table(meta$Group2))
+print(table(meta$Group2, meta$ct.L1))
+
+set.seed(2026)
+cells_keep <- unlist(lapply(split(rownames(meta), paste(meta$Group2, meta$ct.L3)), function(x)
+  if (length(x) > 500) sample(x, 500) else x))
+message("Subsampled cells: ", length(cells_keep))
+
+counts <- LayerData(pccat, assay = "RNA", layer = "counts")[, cells_keep]
+meta_keep <- meta[cells_keep, intersect(c("Data.sets", "Donor_ID", "SampleID", "Group2",
+                                          "ct.L1", "ct.L2", "ct.L3"), colnames(meta))]
+group_tab <- as.data.frame(table(Group2 = meta$Group2, ct.L2 = meta$ct.L2))
+rm(pccat, meta); invisible(gc())
+
+qs::qsave(list(counts = as(counts, "CsparseMatrix"), meta = meta_keep,
+               full_group_by_ctL2 = group_tab),
+          out_file, nthreads = 1)
+message("Saved ", out_file, " (", ncol(counts), " cells)")
+```

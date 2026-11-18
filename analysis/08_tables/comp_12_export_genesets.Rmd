@@ -1,0 +1,66 @@
+---
+title: "Export of gene-set definitions (Supplementary Data 5, base table)"
+subtitle: "PRINCE spatial transcriptomics: `comp_12_export_genesets`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+Writes every gene set used for programme scoring as one long table (collection, set, gene), so that the published gene-set file is exactly the definition used in the analysis rather than a hand-maintained copy.
+
+Rather than redefining the sets, the script reads the source of `comp_05_signatures` (from `.build/`), locates the block that builds the `sets` list and the `single_genes` vector, and evaluates only that block. The collections are the immune signatures, lineage sets (13-gene NEPC marker set, five-gene AR panel, Hallmark androgen response), the programmes compared with the bone-metastasis literature, bone-cell programmes, Hallmark and Reactome senescence sets, PCCAT L3 cell-type markers, and the single genes analysed individually.
+
+**Manuscript items supported**
+
+- Supplementary Data 5 (gene-set definitions); this base table is copied forward by comp_21b and extended with the Owen et al. comparison programmes by comp_29
+- Methods: Externally defined signatures (immune programmes, Supplementary Data 5)
+
+**Pipeline step:** `./run_pipeline.sh --only 12_export_genesets`. Approximate runtime: seconds.
+
+**Inputs**
+
+- `.build/comp_05_signatures.R (gene-set block only)`
+- `data/reference/ProstateCancer_GeneSignatures.R`
+- `data/reference/msigdb_gene_sets.rds`
+- `data/reference/celltype_markers_AllLevels.xlsx`
+
+**Outputs**
+
+- `results/Manuscript/Supplementary_Data_5_gene_sets.csv`
+
+**Depends on**: `comp_05_signatures`
+
+## Analysis
+
+Extracts the gene-set block from `comp_05_signatures` (from the line creating `sig_env` to the closing parenthesis of `single_genes`), evaluates it, flattens the nested `sets` list into collection/set/gene rows, appends the single genes as their own collection, and writes the table. Re-using the source guarantees that Supplementary Data 5 matches the sets that were actually scored.
+
+```{r comp-12-export-genesets-01}
+## PRINCE manuscript -- Supplementary Data 5: gene-set definitions used in C5/C6
+## Re-extracts the exact `sets` list built in comp_05_signatures.R (lines defining
+## `sets` and `single_genes`) and writes one long table: collection, set, gene.
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({ library(readxl); library(dplyr) })
+setwd(PRINCE_DIR)
+src <- readLines(file.path(CODE_DIR, "comp_05_signatures.R"))
+start <- grep("^sig_env <- new.env", src); end <- grep("^single_genes <-", src)
+end <- end + which(grepl("\\)$", src[end:length(src)]))[1] - 1
+eval(parse(text = src[start:end]))
+long <- bind_rows(lapply(names(sets), function(cl) bind_rows(lapply(names(sets[[cl]]), function(s)
+  data.frame(collection = cl, set = s, gene = sets[[cl]][[s]])))),
+  data.frame(collection = "gene", set = single_genes, gene = single_genes))
+write.csv(long, file.path(COMP_DIR, "Manuscript", "Supplementary_Data_5_gene_sets.csv"), row.names = FALSE)
+cat(nrow(long), "rows;", length(unique(paste(long$collection, long$set))), "sets\n")
+```

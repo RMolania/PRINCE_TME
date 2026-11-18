@@ -1,0 +1,228 @@
+---
+title: "AOI-level differential expression with patient random effects (dream)"
+subtitle: "PRINCE spatial transcriptomics: `comp_04_de`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+This is the earlier AOI-level differential-expression arm. It runs in each of the nine RUV-4-normalised strata from comp_02, where artefact probes and RLE outlier AOIs have already been removed. Expression is modelled with `variancePartition::dream` (voomWithDreamWeights), with a random intercept per patient so that AOIs from the same patient are not treated as independent. The outcome is continuous PSA change, capped at +100% and scaled per 50%, and the model is fitted under three specifications: A, PSA + RUV-4 factors W; B, PSA + study batch (no RUV); C, PSA + W + logit deconvolved tumour fraction. A non-responder versus responder contrast on specification A is fitted in baseline strata with at least three non-responders; Cycle1 strata are excluded.
+
+Genes are called robust only if all of the following hold: FDR < 0.1 in at least two of A/B/C; the same sign in all three specifications and in a patient-level pseudobulk limma-voom fit (PSA + majority batch); and sign stability of at least 90% across leave-one-patient-out pseudobulk refits. Gene-set enrichment uses fgsea on specification-A t statistics (Hallmark, Reactome, KEGG, GO:BP; 15–500 genes). The manuscript's primary inference is patient-level pseudobulk on the LOQ gene universe, run in later scripts. These AOI-level results form part of the reconciliation with earlier analyses.
+
+**Manuscript items supported**
+
+- Supplementary Table 7 (robust genes), Supplementary Table 8 (DE summary per stratum) and Supplementary Table 9 (fgsea, FDR < 0.05), written to the workbook by comp_11
+- Methods: Reconciliation with earlier analyses and the standR workflow (earlier AOI-level models)
+
+**Pipeline step:** `./run_pipeline.sh --only 04_de`. Approximate runtime: long (three or four dream fits per stratum plus leave-one-patient-out refits; parallel over PRINCE_MAX_WORKERS); strata already written are reloaded on a rerun.
+
+**Inputs**
+
+- `results/C2_normalization/normalized_strata.qs`
+- `results/C3_deconvolution/deconvolution_proportions.qs`
+- `data/reference/msigdb_gene_sets.rds`
+
+**Outputs**
+
+- `results/C4_DE/<stratum>_dream_psa_specs.csv`
+- `results/C4_DE/<stratum>_fgsea_psa.csv`
+- `results/C4_DE/de_summary.csv`
+- `results/C4_DE/de_results.qs`
+- `results/C4_DE/robust_genes_all_strata.csv`
+- `results/C4_DE/pvalue_histograms_specA.pdf`
+
+**Depends on**: `comp_02_normalize`, `comp_03b_deconv`
+
+## Analysis
+
+Script header: model specifications, the robustness definition and the gene-set tests.
+
+### Set-up and model helpers
+Reads the normalised strata, the epithelial-tumour fraction from deconvolution (logit-transformed, bounded at 0.01–0.99) and the MSigDB collections. Helpers:
+- `run_dream()`: TMM, voomWithDreamWeights and dream with eBayes, returning the full table for one coefficient;
+- `pseudobulk()`: sums counts per patient and assigns each patient's majority batch;
+- `pb_fit()`: limma-voom on the pseudobulk with ~ outcome + batch, dropping batch if it is constant or aliased.
+
+```{r comp-04-de-01}
+## ============================================================================
+## PRINCE comprehensive analysis -- C4: differential expression with patient random effects
+## Per stratum (C2 output; artefact probes + RLE outliers already removed):
+##   dream (variancePartition::voomWithDreamWeights + dream), random intercept per patient
+##   Outcome: continuous PSA change (capped at +100%, per 50%) -- all patients
+##   Specs:   A = psa + RUV-4 W
+##            B = psa + study_batch (no RUV)
+##            C = psa + RUV-4 W + logit(deconvolved tumour fraction, C3)
+##   NR vs R (Intermediate excluded) on spec A, baseline strata only (Cycle1 has 2 NR pts)
+##   Robustness: patient-level pseudobulk limma-voom (psa + majority batch), and
+##               leave-one-patient-out (LOPO) pseudobulk for candidate genes
+##   "Robust" gene: FDR < 0.1 in >= 2 of A/B/C, same sign in pseudobulk, LOPO sign
+##   stability >= 90%.
+##   Gene-set tests: fgsea on spec-A t-statistics (H, Reactome, KEGG, GO:BP).
+## ============================================================================
+
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({
+  library(qs); library(dplyr); library(limma); library(edgeR); library(variancePartition)
+  library(BiocParallel); library(fgsea); library(ggplot2)
+})
+setwd(PRINCE_DIR)
+check_ram_or_stop(20)
+bp <- SnowParam(workers = MAX_WORKERS, progressbar = FALSE)
+
+norm <- qs::qread(out_path("C2_normalization", "normalized_strata.qs"), nthreads = 1)
+dec <- qs::qread(out_path("C3_deconvolution", "deconvolution_proportions.qs"))
+tum_frac <- c(dec$lineage_primary[, "Epithelial_tumour"], dec$lineage_bone[, "Epithelial_tumour"])
+msig <- readRDS(file.path(PMCC_DIR, "msigdb_gene_sets.rds"))
+gsets <- c(msig$H, msig$C2_CP_REAC, msig$C2_CP_KEGG, msig$C5_BP)
+logit <- function(p) { p <- pmin(pmax(p, 0.01), 0.99); log(p / (1 - p)) }
+
+run_dream <- function(counts, d, form, coef) {
+  dge <- calcNormFactors(DGEList(counts))
+  v <- voomWithDreamWeights(dge, form, d, BPPARAM = bp)
+  fit <- eBayes(dream(v, form, d, BPPARAM = bp))
+  topTable(fit, coef = coef, number = Inf, sort.by = "none")
+}
+pseudobulk <- function(counts, d, outcome) {
+  pb <- sapply(split(seq_len(nrow(d)), d$subject_id), function(i) rowSums(counts[, i, drop = FALSE]))
+  pd <- d %>% group_by(subject_id) %>%
+    summarise(y = first(.data[[outcome]]),
+              batch = names(sort(table(study_batch), decreasing = TRUE))[1], .groups = "drop")
+  pd <- pd[match(colnames(pb), pd$subject_id), ]
+  list(pb = pb, pd = pd)
+}
+pb_fit <- function(pb, pd) {
+  dge <- calcNormFactors(DGEList(pb))
+  X <- if (length(unique(pd$batch)) > 1) model.matrix(~ y + batch, pd) else model.matrix(~ y, pd)
+  if (qr(X)$rank < ncol(X)) X <- model.matrix(~ y, pd)
+  fit <- eBayes(lmFit(voom(dge, X), X))
+  topTable(fit, coef = "y", number = Inf, sort.by = "none")
+}
+
+```
+
+### Per-stratum models
+For each stratum, previously written results are reloaded if present; otherwise:
+- fits specifications A (~ psa + W + (1|patient)), B (~ psa + study_batch + (1|patient)) and C (~ psa + W + tumour + (1|patient)), plus the patient pseudobulk fit;
+- in Archival and Screening strata with at least three non-responder patients, fits ~ NR + W + (1|patient) with intermediate patients excluded;
+- marks candidate genes (FDR < 0.1 in ≥ 2 specifications, consistent sign across specifications and with pseudobulk), then refits the pseudobulk leaving out each patient in turn. Candidates with ≥ 90% sign agreement are called robust;
+- runs fgsea on specification-A t statistics.
+
+Per-stratum tables are written as they finish. The summary, combined results, robust-gene list and specification-A P-value histograms follow.
+
+```{r comp-04-de-02}
+all_res <- list(); robust_all <- list(); gsea_all <- list(); summ <- list()
+for (sid in names(norm)) {
+  nm <- norm[[sid]]
+  cat("\n==========", sid, "==========\n")
+  ## resume: strata already written by an earlier (interrupted) run are reloaded, not refitted
+  de_file <- out_path("C4_DE", paste0(sid, "_dream_psa_specs.csv"))
+  gs_file <- out_path("C4_DE", paste0(sid, "_fgsea_psa.csv"))
+  if (file.exists(de_file) && file.exists(gs_file)) {
+    res <- read.csv(de_file); gs <- read.csv(gs_file)
+    all_res[[sid]] <- res; gsea_all[[sid]] <- gs
+    summ[[sid]] <- data.frame(stratum = sid, n_aoi = nrow(nm$cd), n_pt = length(unique(nm$cd$subject_id)),
+                              n_NR_pt = length(unique(nm$cd$subject_id[nm$cd$response_group_neat == "Non_Responder"])),
+                              n_genes = nrow(res), fdr10_A = sum(res$FDR_A < 0.1, na.rm = TRUE),
+                              fdr10_B = sum(res$FDR_B < 0.1, na.rm = TRUE), fdr10_C = sum(res$FDR_C < 0.1, na.rm = TRUE),
+                              robust = sum(res$robust, na.rm = TRUE), fdr10_NR = sum(res$FDR_NR < 0.1, na.rm = TRUE),
+                              pathways_fdr05 = sum(gs$padj < 0.05, na.rm = TRUE))
+    cat("reloaded from", basename(de_file), "\n"); next
+  }
+  counts <- nm$counts
+  d <- nm$cd %>% mutate(psa = psa_change_capped / 50, tumour = logit(tum_frac[rownames(nm$cd)]))
+  W <- nm$W; colnames(W) <- paste0("W", seq_len(ncol(W))); d <- cbind(d, W)
+  wterms <- paste(colnames(W), collapse = " + ")
+  if (length(unique(d$study_batch)) < 2) stop("single batch in ", sid)
+
+  fA <- as.formula(paste("~ psa +", wterms, "+ (1|subject_id)"))
+  fB <- ~ psa + study_batch + (1|subject_id)
+  fC <- as.formula(paste("~ psa +", wterms, "+ tumour + (1|subject_id)"))
+  tA <- run_dream(counts, d, fA, "psa"); tB <- run_dream(counts, d, fB, "psa"); tC <- run_dream(counts, d, fC, "psa")
+
+  pbl <- pseudobulk(counts, d, "psa")
+  tP <- pb_fit(pbl$pb, pbl$pd)
+
+  # align by gene: dream can drop a gene whose model fails to converge in one spec
+  g <- rownames(tA)
+  res <- data.frame(stratum = sid, gene = g,
+                    logFC_A = tA$logFC, t_A = tA$t, P_A = tA$P.Value, FDR_A = tA$adj.P.Val,
+                    logFC_B = tB[g, "logFC"], FDR_B = tB[g, "adj.P.Val"],
+                    logFC_C = tC[g, "logFC"], FDR_C = tC[g, "adj.P.Val"],
+                    logFC_PB = tP[g, "logFC"], P_PB = tP[g, "P.Value"])
+
+  ## NR vs R (baseline strata only)
+  dn <- d %>% filter(response_group_neat %in% c("Responder", "Non_Responder")) %>%
+    mutate(NR = as.integer(response_group_neat == "Non_Responder"))
+  n_nr_pt <- length(unique(dn$subject_id[dn$NR == 1]))
+  if (!grepl("Cycle1", sid) && n_nr_pt >= 3) {
+    fN <- as.formula(paste("~ NR +", wterms, "+ (1|subject_id)"))
+    tN <- run_dream(counts[, rownames(dn)], dn, fN, "NR")
+    res$logFC_NR <- tN[g, "logFC"]; res$P_NR <- tN[g, "P.Value"]; res$FDR_NR <- tN[g, "adj.P.Val"]
+  } else { res$logFC_NR <- NA; res$P_NR <- NA; res$FDR_NR <- NA }
+
+  ## robustness for psa
+  res$n_specs_fdr10 <- (res$FDR_A < 0.1) + (res$FDR_B < 0.1) + (res$FDR_C < 0.1)
+  res$specs_same_sign <- sign(res$logFC_A) == sign(res$logFC_B) & sign(res$logFC_A) == sign(res$logFC_C)
+  res$pb_same_sign <- sign(res$logFC_A) == sign(res$logFC_PB)
+  cand <- res$gene[which(res$n_specs_fdr10 >= 2 & res$specs_same_sign & res$pb_same_sign)]
+  res$lopo_stability <- NA
+  if (length(cand)) {
+    pts <- colnames(pbl$pb)
+    lopo <- sapply(pts, function(p) {
+      keep <- pts != p
+      tt <- pb_fit(pbl$pb[, keep], pbl$pd[keep, ])
+      sign(tt[cand, "logFC"]) == sign(res$logFC_A[match(cand, res$gene)])
+    })
+    res$lopo_stability[match(cand, res$gene)] <- rowMeans(matrix(lopo, nrow = length(cand)))
+  }
+  res$robust <- res$gene %in% cand & !is.na(res$lopo_stability) & res$lopo_stability >= 0.9
+
+  ## fgsea on spec-A t statistics
+  st <- setNames(res$t_A, res$gene)
+  set.seed(2026)  # fgsea p-values are permutation-based; fixed seed makes Table S9 reproducible
+  gs <- fgsea(gsets, st, minSize = 15, maxSize = 500, nproc = 1)
+  gs <- gs %>% arrange(padj) %>% mutate(stratum = sid, leadingEdge = sapply(leadingEdge, paste, collapse = ";"))
+
+  s <- data.frame(stratum = sid, n_aoi = nrow(d), n_pt = length(unique(d$subject_id)),
+                  n_NR_pt = n_nr_pt, n_genes = nrow(res),
+                  fdr10_A = sum(res$FDR_A < 0.1), fdr10_B = sum(res$FDR_B < 0.1), fdr10_C = sum(res$FDR_C < 0.1),
+                  robust = sum(res$robust), fdr10_NR = sum(res$FDR_NR < 0.1, na.rm = TRUE),
+                  pathways_fdr05 = sum(gs$padj < 0.05, na.rm = TRUE))
+  print(s, row.names = FALSE)
+  if (sum(res$robust)) {
+    cat("Robust genes (top 25 by P_A):\n")
+    print(head(res %>% filter(robust) %>% arrange(P_A) %>%
+                 select(gene, logFC_A, FDR_A, FDR_B, FDR_C, logFC_PB, lopo_stability), 25), row.names = FALSE)
+  }
+  cat("Top pathways:\n"); print(head(as.data.frame(gs[, c("pathway", "NES", "padj")]), 10), row.names = FALSE)
+
+  all_res[[sid]] <- res; gsea_all[[sid]] <- gs; summ[[sid]] <- s
+  write.csv(res, out_path("C4_DE", paste0(sid, "_dream_psa_specs.csv")), row.names = FALSE)
+  write.csv(gs, out_path("C4_DE", paste0(sid, "_fgsea_psa.csv")), row.names = FALSE)
+}
+
+summ <- bind_rows(summ)
+cat("\n================ C4 SUMMARY ================\n"); print(summ, row.names = FALSE)
+write.csv(summ, out_path("C4_DE", "de_summary.csv"), row.names = FALSE)
+qs::qsave(list(genes = all_res, gsea = gsea_all), out_path("C4_DE", "de_results.qs"))
+write.csv(bind_rows(lapply(all_res, function(r) r[r$robust, ])), out_path("C4_DE", "robust_genes_all_strata.csv"), row.names = FALSE)
+
+pdf(out_path("C4_DE", "pvalue_histograms_specA.pdf"), width = 12, height = 9)
+par(mfrow = c(3, 3)); for (sid in names(all_res)) hist(all_res[[sid]]$P_A, breaks = 50, main = sid, xlab = "P (spec A, psa)")
+dev.off()
+cat("\nC4 complete.\n")
+```

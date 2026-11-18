@@ -1,0 +1,332 @@
+---
+title: "Expression-based audit of sample and AOI annotation (all sites)"
+subtitle: "PRINCE spatial transcriptomics: `comp_62_annotation_audit`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+Before the bone-only restriction, this script checks the sample and AOI labels against the expression data itself. It runs on all 745 AOIs of the full, all-site QC object; control tissue is used only as a reference. The checks are:
+- sex: Y-linked minus X-homologue expression, per AOI and per patient;
+- segment identity: within each ROI, the CD45⁺ AOI should be the most immune, the tumour AOIs more epithelial than CD45⁺, and *FOLH1* higher in PSMA⁺ than in PanCK⁺PSMA⁻;
+- tumour content: *KLK3* and prostate-lineage expression relative to each AOI's LOQ;
+- tissue site: erythroid, megakaryocyte, bone-matrix, prostate smooth-muscle and *MSMB* signal;
+- patient identity: a tumour-intrinsic fingerprint chosen on archival samples only, with each metastatic sample ranked against every patient's archival tumour and slide sharing recorded;
+- timepoint order: on-treatment p53 and IFN induction;
+- duplicated AOI profiles, and similarity of patient AOIs to the control tissue.
+
+The comparison of the lab sheet with the colData labels, and the documented anatomical site of each block, are handled by a companion script (`comp_62a_lab_crosscheck.py`, named in the header). The documented sites were the basis for excluding the lymph-node and soft-tissue samples.
+
+**Manuscript items supported**
+
+- Methods: Patients and samples (documented anatomical site of every block; exclusion of ten lymph-node or soft-tissue biopsies and one lymph-node archival block)
+- Code availability: comp_62 (annotation audit and documented tissue sites)
+- Intermediate results in `results/R34_annotation_audit/`, used by the optional audit sensitivities of comp_13b (`AUDIT_EXCL`, `SITE_MODE`)
+
+**Pipeline step:** `./run_pipeline.sh --only 62_annotation_audit` (optional; not part of the default run). Approximate runtime: a few minutes.
+
+**Inputs**
+
+- `data/interim/phase2_se_with_qc_metrics.qs`
+
+**Outputs**
+
+- `results/R34_annotation_audit/B_sex_by_patient.csv`
+- `results/R34_annotation_audit/B_sex_by_aoi.csv`
+- `results/R34_annotation_audit/C_segment_within_roi.csv`
+- `results/R34_annotation_audit/C_roi_metadata_inconsistencies.csv`
+- `results/R34_annotation_audit/C2_tumour_content_by_sample.csv`
+- `results/R34_annotation_audit/C2_tumour_content_by_aoi.csv`
+- `results/R34_annotation_audit/D_tissue_site_by_sample.csv`
+- `results/R34_annotation_audit/E_tumour_fingerprint_bone_vs_archival.csv`
+- `results/R34_annotation_audit/E_clonal_markers_by_sample.csv`
+- `results/R34_annotation_audit/F_on_treatment_change.csv`
+- `results/R34_annotation_audit/G_duplicate_profiles.csv`
+- `results/R34_annotation_audit/H_similarity_to_control.csv`
+
+**Depends on**: `comp_00a`
+
+## Analysis
+
+### Annotation audit
+
+The header lists checks B–H. Control AOIs serve only as a reference. The lab-sheet cross-check is done separately.
+
+Loads the full all-site object, before any QC filtering or site restriction, and computes log-CPM (prior count 2). Each AOI's LOQ is expressed on the log-CPM scale so that genes can be compared with background. Expected tissue is assigned from the timepoint: prostate for archival samples, bone for on-study samples. Slide and ROI keys are built, along with helper functions for gene-set means and robust z-scores.
+
+```{r comp-62-annotation-audit-01}
+## ============================================================================
+## PRINCE -- R34: expression-based audit of sample / AOI annotation.
+## All 745 AOIs in phase2_se_with_qc_metrics.qs (controls used as a reference only):
+##   B  sex: Y-linked vs X-homolog expression per AOI and per patient
+##   C  segment identity: within-ROI ordering of immune / epithelial / FOLH1 scores
+##   C2 tumour content: prostate-lineage genes in PanCK+PSMA- / PSMA+ AOIs vs the AOI's LOQ
+##   D  tissue site: erythroid, myeloid, megakaryocyte, bone-matrix, prostate smooth-muscle, MSMB
+##   E  patient identity: tumour-intrinsic fingerprint (genes chosen on Archival only), each bone sample
+##      ranked against every patient's Archival tumour; slide sharing recorded
+##   F  timepoint order: on-treatment p53 / IFN induction (Cycle1 - Screening) per patient
+##   G  duplicated AOI profiles; H  similarity of patient AOIs to the control tissue
+## Lab sheet vs colData labels and ROI spatial layout: comp_62a_lab_crosscheck.py
+## Outputs: results/R34_annotation_audit/
+## ============================================================================
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({
+  library(qs); library(SummarizedExperiment); library(dplyr); library(edgeR)
+})
+setwd(PRINCE_DIR)
+check_ram_or_stop(6)
+set.seed(2026)
+STEP <- "R34_annotation_audit"
+
+se <- qs::qread(file.path(PRINCE_ROOT, "data", "interim", "phase2_se_with_qc_metrics.qs"))  # all sites
+cd <- as.data.frame(colData(se))
+cd$aoi <- rownames(cd)
+cnt <- assay(se, "all_count")
+lc <- cpm(cnt, log = TRUE, prior.count = 2)
+cd$loq_lcpm <- log2(cd$LOQ / (colSums(cnt) / 1e6))
+cd$tissue <- ifelse(cd$timepoint == "Archival", "prostate",
+              ifelse(cd$timepoint %in% c("Screening", "Cycle1", "DiseaseProgression"), "bone", "control"))
+cd$slide <- paste(cd$scans, sub(" *\\|.*", "", cd$segment_display_name))
+cd$roi_key <- paste(cd$slide, cd$roi_name, sep = "_")
+tum <- cd$sample_type == "Tumours"
+pass <- tum & cd$qc_status == "PASS"
+tumseg <- cd$segment_name %in% c("PanCK+PSMA-", "PSMA+")
+score <- function(g) colMeans(lc[intersect(g, rownames(lc)), , drop = FALSE])
+robz <- function(v, ref) (v - median(ref, na.rm = TRUE)) / mad(ref, na.rm = TRUE)
+unit_of <- function(i) paste(cd$subject_id[i], cd$timepoint[i], sep = "|")
+artefact_re <- "^(USP17L|PRAMEF|NBPF|OR[0-9]+[A-Z]+[0-9]+)"
+
+```
+
+### B. Sex check
+
+The Y-minus-X score is the mean log-CPM of seven Y-linked genes minus that of their X homologues. It is robust-z-scored within each compartment × tissue group against QC-passed AOIs. The per-patient summary lists the AOIs and timepoints with low Y signal, which would flag a possible sample swap or a mislabelled female control.
+
+```{r comp-62-annotation-audit-02}
+## ---- B. sex -----------------------------------------------------------------------------
+Yg <- c("RPS4Y1", "DDX3Y", "KDM5D", "EIF1AY", "USP9Y", "ZFY", "NLGN4Y")
+Xg <- c("RPS4X", "DDX3X", "KDM5C", "EIF1AX", "USP9X", "ZFX", "NLGN4X")
+cd$Y_score <- score(Yg); cd$X_score <- score(Xg); cd$Y_minus_X <- cd$Y_score - cd$X_score
+cd$Y_genes_above_LOQ <- colSums(cnt[Yg, ] > matrix(cd$LOQ, length(Yg), ncol(cnt), byrow = TRUE))
+cd$Y_z <- NA
+for (g in unique(paste(cd$segment_name, cd$tissue))) {
+  j <- paste(cd$segment_name, cd$tissue) == g
+  cd$Y_z[j] <- robz(cd$Y_minus_X[j], cd$Y_minus_X[j & pass])
+}
+sexB <- cd %>% filter(tum) %>% group_by(subject_id) %>%
+  summarise(n_aoi = n(), n_timepoints = n_distinct(timepoint), median_Y_minus_X = median(Y_minus_X),
+            median_Y_z = median(Y_z), frac_aoi_Yz_below_m3 = mean(Y_z < -3),
+            median_Yz_CD45 = median(Y_z[segment_name == "CD45+"]),
+            median_Yz_tumour = median(Y_z[segment_name != "CD45+"]),
+            timepoints_Yz_below_m2 = paste(unique(timepoint[Y_z < -2]), collapse = ";"),
+            median_Y_genes_above_LOQ = median(Y_genes_above_LOQ), .groups = "drop") %>%
+  arrange(median_Y_z)
+
+```
+
+### C. Segment identity within ROI
+
+In ROIs with exactly one AOI of each compartment, the script compares immune, epithelial and *FOLH1* scores across the three AOIs and records any ordering violation. ROIs whose metadata are inconsistent (several patients, timepoints or coordinates under one key) are listed separately.
+
+```{r comp-62-annotation-audit-03}
+## ---- C. segment identity within ROI -----------------------------------------------------------
+imm <- c("PTPRC", "CD52", "CORO1A", "LAPTM5", "LCP1", "CD53", "CD37", "CD48", "ARHGDIB", "RAC2")
+epi <- c("KRT8", "KRT18", "EPCAM", "CLDN4", "KRT19", "CDH1", "ELF3", "CLDN7")
+cd$immune <- score(imm); cd$epith <- score(epi); cd$folh1 <- lc["FOLH1", ]
+roi_tab <- cd %>% filter(tum) %>% group_by(roi_key) %>% filter(n_distinct(segment_name) == 3, n() == 3) %>%
+  summarise(subject_id = first(subject_id), timepoint = first(timepoint),
+            imm_CD45_minus_maxOther = immune[segment_name == "CD45+"] - max(immune[segment_name != "CD45+"]),
+            epi_PanCK_minus_CD45 = epith[segment_name == "PanCK+PSMA-"] - epith[segment_name == "CD45+"],
+            epi_PSMA_minus_CD45 = epith[segment_name == "PSMA+"] - epith[segment_name == "CD45+"],
+            folh1_PSMA_minus_PanCK = folh1[segment_name == "PSMA+"] - folh1[segment_name == "PanCK+PSMA-"],
+            all_pass = all(qc_status == "PASS"), .groups = "drop")
+roi_tab$violations <- with(roi_tab, paste0(
+  ifelse(imm_CD45_minus_maxOther < 0, "CD45+ not most immune; ", ""),
+  ifelse(epi_PanCK_minus_CD45 < 0, "PanCK+ less epithelial than CD45+; ", ""),
+  ifelse(epi_PSMA_minus_CD45 < 0, "PSMA+ less epithelial than CD45+; ", ""),
+  ifelse(folh1_PSMA_minus_PanCK < 0, "FOLH1 lower in PSMA+ than PanCK+PSMA-; ", "")))
+roi_meta <- cd %>% filter(tum) %>% group_by(roi_key) %>%
+  summarise(n = n(), n_subject = n_distinct(subject_id), n_tp = n_distinct(timepoint),
+            n_xy = n_distinct(paste(round(roi_coordinate_x), round(roi_coordinate_y))), .groups = "drop") %>%
+  filter(n_subject > 1 | n_tp > 1 | n_xy > 1)
+
+```
+
+### C2. Tumour content
+
+For tumour-compartment AOIs that passed QC, the script computes *KLK3* and an eight-gene prostate-lineage score relative to LOQ, and summarises them per sample. A sample is called 'none detectable' when median *KLK3* is less than 1.5 log₂ units above LOQ, 'low' below 4, and 'present' otherwise.
+
+```{r comp-62-annotation-audit-04}
+## ---- C2. tumour content ------------------------------------------------------------------------
+lin <- c("KLK3", "KLK2", "NKX3-1", "HOXB13", "TMPRSS2", "FOLH1", "SLC45A3", "STEAP2")
+cd$lineage <- score(lin)
+cd$KLK3_above_LOQ <- cnt["KLK3", ] > cd$LOQ
+cd$KLK3_minus_LOQ <- lc["KLK3", ] - cd$loq_lcpm
+tc <- cd %>% filter(pass, tumseg) %>% group_by(subject_id, timepoint) %>%
+  summarise(n_tumour_aoi = n(), frac_KLK3_above_LOQ = mean(KLK3_above_LOQ),
+            median_KLK3 = median(lc["KLK3", aoi]), median_KLK3_minus_LOQ = median(KLK3_minus_LOQ),
+            median_lineage = median(lineage), median_lineage_minus_LOQ = median(lineage - loq_lcpm),
+            .groups = "drop")
+ref_arch <- tc %>% filter(timepoint == "Archival")
+tc <- tc %>% mutate(tumour_content = case_when(
+  median_KLK3_minus_LOQ < 1.5 ~ "none detectable",
+  median_KLK3_minus_LOQ < 4 ~ "low",
+  TRUE ~ "present")) %>% arrange(median_KLK3_minus_LOQ)
+
+```
+
+### D. Tissue site
+
+Marrow and bone signals (erythroid, megakaryocyte, bone matrix) and prostate signals (smooth muscle, *MSMB*) are summarised per sample. The thresholds come from the archival prostate samples: the 95th percentile for marrow signals and the 5th percentile for smooth muscle. Archival samples with marrow-like signal, and on-study samples without marrow or bone signal (with or without prostate-like stroma), are flagged.
+
+```{r comp-62-annotation-audit-05}
+## ---- D. tissue site ------------------------------------------------------------------------------
+sets <- list(erythroid = c("HBB", "HBA1", "HBA2", "GYPA", "AHSP", "CA1"),
+             myeloid_CD45 = c("MPO", "ELANE", "PRTN3", "AZU1", "LTF", "CAMP", "DEFA4", "CEACAM8"),
+             megakaryocyte = c("PPBP", "PF4", "ITGA2B"),
+             bone_matrix = c("IBSP", "BGLAP", "CTSK", "ACP5", "SP7", "MMP13"),
+             prostate_smooth_muscle = c("MYH11", "ACTG2", "DES", "CNN1"),
+             MSMB = "MSMB")
+for (s in names(sets)) cd[[s]] <- score(sets[[s]])
+cd$marrow_any <- pmax(cd$erythroid, cd$megakaryocyte, cd$bone_matrix) - cd$loq_lcpm
+site <- cd %>% filter(pass, tissue %in% c("prostate", "bone")) %>% group_by(subject_id, timepoint, tissue) %>%
+  summarise(n_aoi = n(), erythroid = median(erythroid), myeloid_CD45 = median(myeloid_CD45[segment_name == "CD45+"]),
+            megakaryocyte = median(megakaryocyte), bone_matrix = median(bone_matrix),
+            prostate_smooth_muscle = median(prostate_smooth_muscle), MSMB = median(MSMB),
+            loq = median(loq_lcpm), .groups = "drop")
+arch_ref <- site %>% filter(tissue == "prostate")
+q95 <- sapply(c("erythroid", "megakaryocyte", "bone_matrix"), function(v) unname(quantile(arch_ref[[v]], 0.95)))
+q05_sm <- unname(quantile(arch_ref$prostate_smooth_muscle, 0.05))
+site <- site %>% mutate(
+  marrow_or_bone_signal = erythroid > q95["erythroid"] | megakaryocyte > q95["megakaryocyte"] | bone_matrix > q95["bone_matrix"],
+  site_flag = case_when(
+    tissue == "prostate" & (erythroid - loq > 1 | megakaryocyte - loq > 1 | bone_matrix - loq > 1) ~
+      "Archival with marrow/bone signal > 1 log2 above LOQ",
+    tissue == "bone" & !marrow_or_bone_signal & prostate_smooth_muscle > q05_sm & MSMB > 8 ~
+      "on-study: no marrow/bone signal, prostate-like stroma and MSMB",
+    tissue == "bone" & !marrow_or_bone_signal ~ "on-study: no marrow/bone signal (bone not confirmed)",
+    TRUE ~ "")) %>% arrange(desc(site_flag != ""), tissue)
+
+```
+
+### E. Patient identity
+
+Uses tumour-compartment AOIs with clear prostate-cancer content (*KLK3* log-CPM > 9) and genes above LOQ in at least 30% of them; artefact probe families and sex-chromosome genes are excluded. Expression is centred within compartment × tissue and averaged per sample. The 300 most variable genes are chosen across archival samples only, so the selection is independent of the metastatic samples. Each metastatic sample is then correlated (Spearman) with every patient's archival tumour, and its rank for its own patient is recorded together with whether the two share a slide. Shared slides could inflate similarity. Medians of known clonal markers (e.g. *ERG*, *ETV1*, *SPINK1*) are tabulated per sample.
+
+```{r comp-62-annotation-audit-06}
+## ---- E. patient identity: tumour-intrinsic fingerprint ----------------------------------------------
+ie <- which(pass & tumseg & lc["KLK3", ] > 9)            # AOIs with clear prostate-cancer content
+ok <- rownames(lc)[rowMeans(cnt[, ie] > matrix(cd$LOQ[ie], nrow(cnt), length(ie), byrow = TRUE)) >= 0.3]
+ok <- ok[!grepl(artefact_re, ok) & !ok %in% c(Yg, Xg)]
+M <- lc[ok, ie]; g <- paste(cd$segment_name[ie], cd$tissue[ie])
+for (k in unique(g)) { j <- g == k; M[, j] <- M[, j] - rowMeans(M[, j, drop = FALSE]) }
+key <- unit_of(ie)
+U <- sapply(split(seq_along(ie), key), function(j) rowMeans(M[, j, drop = FALSE]))
+um <- data.frame(do.call(rbind, strsplit(colnames(U), "\\|"))); names(um) <- c("pt", "tp")
+um$slide <- sapply(split(cd$slide[ie], key), function(s) paste(unique(s), collapse = ";"))[colnames(U)]
+um$n <- as.integer(table(key)[colnames(U)])
+A <- which(um$tp == "Archival"); B <- which(um$tp != "Archival")
+NG <- 300
+sel <- names(sort(apply(U[, A], 1, var), decreasing = TRUE))[seq_len(NG)]   # chosen on Archival only
+R <- cor(U[sel, B], U[sel, A], method = "spearman"); colnames(R) <- um$pt[A]
+fp <- data.frame(unit = colnames(U)[B], n_aoi = um$n[B], bone_slide = um$slide[B],
+  arch_slide = sapply(um$pt[B], function(p) { k <- A[um$pt[A] == p]; if (length(k)) um$slide[k] else NA }),
+  self_rank = sapply(seq_along(B), function(i) { p <- um$pt[B[i]]; if (p %in% colnames(R)) unname(rank(-R[i, ])[p]) else NA }),
+  self_r = sapply(seq_along(B), function(i) { p <- um$pt[B[i]]; if (p %in% colnames(R)) R[i, p] else NA }),
+  best_match = colnames(R)[apply(R, 1, which.max)], best_r = apply(R, 1, max), n_candidates = ncol(R))
+fp$same_slide <- mapply(function(a, b) !is.na(a) && length(intersect(strsplit(a, ";")[[1]], strsplit(b, ";")[[1]])) > 0,
+                        fp$arch_slide, fp$bone_slide)
+fp <- fp %>% arrange(same_slide, desc(self_rank))
+## permutation reference for cross-slide pairs: chance P(rank <= 3) = 3 / n_candidates
+## known tumour-clonal markers per sample (tumour segments, tumour-containing AOIs)
+clon <- intersect(c("ERG", "ETV1", "ETV4", "SPINK1", "TDRD1", "PLA2G2A", "CHGA", "AMACR", "TMPRSS2"), rownames(lc))
+clon_tab <- as.data.frame(t(sapply(split(ie, key), function(j) apply(lc[clon, j, drop = FALSE], 1, median))))
+clon_tab$unit <- rownames(clon_tab)
+
+```
+
+### F. On-treatment change
+
+Per patient and compartment, the script computes the change in a 20-gene p53 target score and a 12-gene interferon score from pre-treatment to on-treatment. Consistent decreases would suggest that the timepoint labels are swapped.
+
+```{r comp-62-annotation-audit-07}
+## ---- F. on-treatment change ---------------------------------------------------------------------
+p53 <- c("CDKN1A", "MDM2", "FDXR", "PHLDA3", "AEN", "SESN1", "GDF15", "TNFRSF10B", "ZMAT3", "RPS27L",
+         "TRIAP1", "BAX", "DDB2", "XPC", "POLH", "TP53I3", "CCNG1", "SPATA18", "EDA2R", "TP53INP1")
+ifn <- c("ISG15", "IFI6", "IFI27", "IFIT1", "IFIT3", "MX1", "OAS1", "RSAD2", "IFI44L", "STAT1", "IRF7", "XAF1")
+cd$p53 <- score(p53); cd$ifn <- score(ifn)
+chgF <- cd %>% filter(pass, timepoint %in% c("Screening", "Cycle1")) %>%
+  group_by(subject_id, segment_name, timepoint) %>% summarise(p53 = mean(p53), ifn = mean(ifn), .groups = "drop") %>%
+  tidyr::pivot_wider(names_from = timepoint, values_from = c(p53, ifn)) %>%
+  filter(!is.na(p53_Screening), !is.na(p53_Cycle1)) %>%
+  mutate(d_p53 = p53_Cycle1 - p53_Screening, d_ifn = ifn_Cycle1 - ifn_Screening) %>%
+  group_by(subject_id) %>% summarise(n_segments = n(), mean_d_p53 = mean(d_p53), mean_d_ifn = mean(d_ifn),
+                                     segs_p53_down = sum(d_p53 < 0), segs_ifn_down = sum(d_ifn < 0), .groups = "drop") %>%
+  arrange(mean_d_p53)
+
+```
+
+### G/H. Duplicates and similarity to control tissue
+
+Pairwise Pearson correlations are computed over the 3,000 most variable expressed genes. Patient AOI pairs with r > 0.995 and identical raw count vectors are counted. For each patient AOI, the script compares its highest correlation with same-compartment control AOIs and with other patients' AOIs. An AOI that resembles control tissue more than other patients would suggest a mislabelled control.
+
+```{r comp-62-annotation-audit-08}
+## ---- G / H. duplicates and control similarity ---------------------------------------------------------
+expr_ok <- rownames(lc)[rowMeans(cnt[, pass] > matrix(cd$LOQ[pass], nrow(cnt), sum(pass), byrow = TRUE)) >= 0.25]
+hv <- names(sort(apply(lc[expr_ok, ], 1, var), decreasing = TRUE))[1:3000]
+C <- cor(lc[hv, ]); diag(C) <- NA
+ti <- which(tum); ci <- which(!tum)
+ut <- which(upper.tri(C[ti, ti]) & C[ti, ti] > 0.995, arr.ind = TRUE)
+dupG <- data.frame(aoi1 = rownames(C)[ti][ut[, 1]], aoi2 = rownames(C)[ti][ut[, 2]], r = C[ti, ti][ut])
+identical_raw <- sum(duplicated(t(cnt[, ti])))
+ctlH <- data.frame(aoi = cd$aoi[ti], subject_id = cd$subject_id[ti], timepoint = cd$timepoint[ti],
+                   segment = cd$segment_name[ti], qc = cd$qc_status[ti],
+                   max_r_control = sapply(ti, function(i) max(C[i, ci[cd$segment_name[ci] == cd$segment_name[i]]])),
+                   max_r_other_patient = sapply(ti, function(i) max(C[i, ti[cd$segment_name[ti] == cd$segment_name[i] &
+                                                                             cd$subject_id[ti] != cd$subject_id[i]]])))
+ctlH$control_minus_other <- ctlH$max_r_control - ctlH$max_r_other_patient
+ctlH <- ctlH %>% arrange(desc(control_minus_other))
+
+```
+
+Writes all audit tables to `results/R34_annotation_audit/` and prints a summary of each check.
+
+```{r comp-62-annotation-audit-09}
+## ---- write -----------------------------------------------------------------------------------------
+w <- function(x, f) write.csv(x, out_path(STEP, f), row.names = FALSE)
+w(sexB, "B_sex_by_patient.csv")
+w(cd %>% filter(tum) %>% select(aoi, subject_id, timepoint, segment_name, qc_status, Y_score, X_score, Y_minus_X,
+                                Y_z, Y_genes_above_LOQ, library.size), "B_sex_by_aoi.csv")
+w(roi_tab, "C_segment_within_roi.csv"); w(roi_meta, "C_roi_metadata_inconsistencies.csv")
+w(tc, "C2_tumour_content_by_sample.csv")
+w(cd %>% filter(tum, tumseg) %>% select(aoi, subject_id, timepoint, segment_name, qc_status, KLK3_above_LOQ,
+                                        KLK3_minus_LOQ, lineage, loq_lcpm), "C2_tumour_content_by_aoi.csv")
+w(site, "D_tissue_site_by_sample.csv")
+w(fp, "E_tumour_fingerprint_bone_vs_archival.csv"); w(clon_tab, "E_clonal_markers_by_sample.csv")
+w(chgF, "F_on_treatment_change.csv"); w(dupG, "G_duplicate_profiles.csv"); w(ctlH, "H_similarity_to_control.csv")
+
+cat("\n== B sex ==\n"); print(as.data.frame(head(sexB, 6)), digits = 3)
+cat("\n== C within-ROI violations:", sum(roi_tab$violations != ""), "of", nrow(roi_tab), "ROIs ==\n")
+print(as.data.frame(roi_tab %>% filter(violations != "")), digits = 3)
+cat("\nROI metadata inconsistencies:", nrow(roi_meta), "\n")
+cat("\n== C2 tumour content (not 'present') ==\n"); print(as.data.frame(tc %>% filter(tumour_content != "present")), digits = 3)
+cat("\n== D tissue site flags ==\n"); print(as.data.frame(site %>% filter(site_flag != "")), digits = 3)
+cat("\n== E fingerprint ==\n"); print(table(same_slide = fp$same_slide, rank_le3 = fp$self_rank <= 3, useNA = "ifany"))
+print(fp, digits = 3, row.names = FALSE)
+cat("\n== F on-treatment change ==\n"); print(as.data.frame(chgF), digits = 3)
+cat("\n== G duplicates r>0.995:", nrow(dupG), "; identical raw vectors:", identical_raw, "\n")
+cat("== H max(control - other patient) r:", round(max(ctlH$control_minus_other), 3), "\n")
+```

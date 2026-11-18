@@ -1,0 +1,74 @@
+#step	folder	script	mode	note
+00a_qc	01_data_preparation	comp_00a_qc	run	AOI quality control (all sites)
+00b_bone_cohort	01_data_preparation	comp_00b_bone_cohort	run	bone-only cohort and input objects
+03a_build_refs	01_data_preparation	comp_03a_build_refs	run	PCCAT reference subsample (skipped when data/refs/pccat_subsample.qs exists)
+62_annotation_audit	01_data_preparation	comp_62_annotation_audit	optional	sample-annotation audit (all sites)
+01_clinical	01_data_preparation	comp_01_clinical	run	clinical table
+02_normalize	01_data_preparation	comp_02_normalize	run	normalisation
+03b_deconv	01_data_preparation	comp_03b_deconv	run	SpatialDecon deconvolution
+16_loq_filter	01_data_preparation	comp_16_loq_filter	run	LOQ gene universes
+13_pseudobulk_primary	02_patient_pseudobulk	comp_13_pseudobulk_primary	run	patient pseudobulk
+13b_pseudobulk_loq	02_patient_pseudobulk	comp_13b_pseudobulk_loq	run	patient pseudobulk, LOQ universe (primary analysis)
+13b_exclLow	02_patient_pseudobulk	comp_13b_pseudobulk_loq	env:EXCL_LOW=1 C13_OUT=C13_pseudobulk_LOQ_exclLow	sensitivity: low-signal AOIs excluded
+04_de	03_aoi_level_models	comp_04_de	run	AOI-level DE (dream)
+05_signatures	04_signatures_and_deconvolution	comp_05_signatures	run	signature scoring
+06_longitudinal	04_signatures_and_deconvolution	comp_06_longitudinal	run	paired on-treatment change
+07_crosstalk	04_signatures_and_deconvolution	comp_07_crosstalk	run	compartment crosstalk
+08_outcome_models	04_signatures_and_deconvolution	comp_08_outcome_models	run	outcome models
+17_bayesprism	04_signatures_and_deconvolution	comp_17_bayesprism	run	BayesPrism deconvolution
+19_deconv_compare	04_signatures_and_deconvolution	comp_19_deconv_compare	run	deconvolution comparison
+18_nepc_purity_reconcile	04_signatures_and_deconvolution	comp_18_nepc_purity_reconcile	run	re-evaluation of earlier NE/purity findings
+20_external_ne_signatures	04_signatures_and_deconvolution	comp_20_external_ne_signatures	run	external NE signatures
+22_standR_arm	03_aoi_level_models	comp_22_standR_arm	run	standR workflow arm
+23_standR_permutation	03_aoi_level_models	comp_23_standR_permutation	run	standR permutation calibration
+26_aoi_level	03_aoi_level_models	comp_26_aoi_level	run	AOI-level arm and calibration
+27_owen_bone	06_clinical_integration	comp_27_owen_bone	run	primary-to-bone remodelling (Owen et al.)
+30_tissue_pet_ctdna	06_clinical_integration	comp_30_tissue_pet_ctdna	run	tissue vs PSMA-PET and ctDNA
+31_composition_sensitivity	06_clinical_integration	comp_31_composition_sensitivity	run	composition sensitivity
+32_clws_extensions	06_clinical_integration	comp_32_clws_extensions	run	additional cell-type analyses
+33_pccat_states	05_tumour_states	comp_33_pccat_states	run	PCCAT tumour-state signatures
+33b_state_validation	05_tumour_states	comp_33b_state_validation	args:all	state-signature validation
+33a_state_associations	05_tumour_states	comp_33a_state_associations	run	state associations
+33c_state_review	05_tumour_states	comp_33c_state_review	run	critical review of state analyses
+34_progression	06_clinical_integration	comp_34_progression	run	acquired resistance (progression biopsies)
+35_pre	03_aoi_level_models	comp_35_aoi_dream_purity	run	AOI mixed models with purity terms (pre-treatment strata)
+35_cycle1	03_aoi_level_models	comp_35_aoi_dream_purity	env:STRATA=CD45__Cycle1,PSMA__Cycle1,PanCKPSMA__Cycle1 OUT_TAG=_cycle1	AOI mixed models with purity terms (on-treatment strata)
+36_radiobiology	06_clinical_integration	comp_36_radiobiology	run	radiobiology panel
+37_bayes_hierarchical	06_clinical_integration	comp_37_bayes_hierarchical	run	Bayesian hierarchical pooling
+38_prediction	06_clinical_integration	comp_38_prediction	run	patient-selection models
+40_burden_outcome	06_clinical_integration	comp_40_burden_outcome	run	tumour burden, ctDNA and genotype
+43_aoi_dream_categorical	03_aoi_level_models	comp_43_aoi_dream_categorical	run	categorical NR vs R AOI models
+45_purity_feature_free	03_aoi_level_models	comp_45_purity_feature_free	run	feature-free purity
+46_depth_adjusted_pseudobulk	03_aoi_level_models	comp_46_depth_adjusted_pseudobulk	run	signal-depth-adjusted FOLH1
+49_technical_confounding	06_clinical_integration	comp_49_technical_confounding	run	technical confounding
+50_tme_on_treatment	06_clinical_integration	comp_50_tme_on_treatment	run	on-treatment immune microenvironment
+51_grist_signatures	06_clinical_integration	comp_51_grist_signatures	run	STAMPEDE signatures
+52_dose_interferon	06_clinical_integration	comp_52_dose_interferon	run	FOLH1 vs on-treatment response
+53_psma_fraction	06_clinical_integration	comp_53_psma_fraction	run	morphometric PSMA+ share
+54_psa_coding_sensitivity	06_clinical_integration	comp_54_psa_coding_sensitivity	run	PSA coding sensitivity
+13c_pi1_roi_heterogeneity	02_patient_pseudobulk	comp_13c_pi1_roi_heterogeneity	run	pi1 and ROI heterogeneity
+10_main_figures	07_figures	comp_10_main_figures	run	figure set v1
+11_extended_figures	07_figures	comp_11_extended_figures	run	figure set v1 (Extended Data)
+12_export_genesets	08_tables	comp_12_export_genesets	run	gene-set export (Supplementary Data 5)
+14_revised_figures	07_figures	comp_14_revised_figures	run	figure set v2
+15_supp_tables_v2	08_tables	comp_15_supp_tables_v2	run	supplementary tables v2
+21_figures_v3	07_figures	comp_21_figures_v3	run	figure set v3
+21b_assemble_v3	07_figures	comp_21b_assemble_v3	run	assemble v3 figure set
+24_ed_standR	07_figures	comp_24_ed_standR	run	standR Extended Data figure
+25_supp_tables_v3	08_tables	comp_25_supp_tables_v3	run	supplementary tables v3
+28_figures_v4	07_figures	comp_28_figures_v4	run	figure set v4
+29_supp_tables_v4	08_tables	comp_29_supp_tables_v4	run	supplementary tables v4
+39_supp_fig6	07_figures	comp_39_supp_fig6	run	Supplementary Fig. 1 (AOI-level models)
+41_figures_v5	07_figures	comp_41_figures_v5	notitle:results/Manuscript_v5	final main figures (run through comp_44, titles removed)
+42_supp_tables_v5	08_tables	comp_42_supp_tables_v5	run	supplementary tables v5
+47_supp_tables_audit	08_tables	comp_47_supp_tables_audit	run	final supplementary tables
+48_supp_data_3_4	08_tables	comp_48_supp_data_3_4	run	Supplementary Data 3-4
+44_run_notitle	07_figures	comp_44_run_notitle	helper	helper: re-render a figure script without plot titles
+00_guard	00_setup	comp_00_guard	helper	shared set-up sourced by every script
+phase3_normalization	legacy_earlier_analysis	phase3_normalization	legacy	earlier all-site analysis
+phase3d_psma_rootcause	legacy_earlier_analysis	phase3d_psma_rootcause	legacy	earlier all-site analysis
+phase4_DE	legacy_earlier_analysis	phase4_DE	legacy	earlier all-site analysis
+phase5_purity_covariate	legacy_earlier_analysis	phase5_purity_covariate	legacy	earlier all-site analysis
+phase6_spatialdecon	legacy_earlier_analysis	phase6_spatialdecon	legacy	earlier all-site analysis
+phase6b_spatialdecon_fix	legacy_earlier_analysis	phase6b_spatialdecon_fix	legacy	earlier all-site analysis
+phase8_nepc_longitudinal	legacy_earlier_analysis	phase8_nepc_longitudinal	legacy	earlier all-site analysis

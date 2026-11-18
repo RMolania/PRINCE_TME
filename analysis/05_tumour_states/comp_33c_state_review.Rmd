@@ -1,0 +1,393 @@
+---
+title: "Critical review of the PCCAT tumour-state association and validation analyses"
+subtitle: "PRINCE spatial transcriptomics: `comp_33c_state_review`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+This is the critical-review analysis of the PCCAT tumour-state scores. It re-examines the leads from the association (`comp_33a`) and validation (`comp_33b`) analyses, asking what the cohort can detect and whether the nominal signals survive technical explanations.
+
+The sections cover: (1) simulated power with five non-responders; (2) single-gene NE marker detection above the per-AOI LOQ at patient level, including the SVH-004 primary tumour; (3) the metallothionein (*MT1E*) and basal-state lead in pre-treatment PSMA⁺ bone, tested against batch, purity, library size, AOI quality, site and multiplicity; (4) purity-safe double-negative genes; (5) mediation or suppression between *FOLH1* and AR signatures; (6) candidate AR-indifferent markers; (7) noise-floor and site checks; and (8) whether the *MT1E* and *FOLH1* associations with PSA change are driven by AOI signal depth.
+
+The patient is the unit of inference throughout: tests use summed-count pseudobulk or per-patient AOI fractions. Purity is the SpatialDecon epithelial-tumour fraction, from the primary reference for archival AOIs and the bone reference otherwise. Partial correlations are rank-based. Control-tissue AOIs appear only as a technical reference for detection rates.
+
+**Manuscript items supported**
+
+- Supplementary Table 72 (patient-level NE marker detection vs response and *FOLH1*; `C2_NE_detection_patient_level_tests.csv`)
+- Supplementary Table 73 (power with five non-responders; `C1_power.csv`)
+- Fig. 6d: the per-patient NE detection table (`C2_NE_detection_patient_table.csv`) is cross-checked against the panel data in `comp_41_figures_v5`
+- Results: re-evaluation of neuroendocrine findings (SVH-004 primary tumour; *INSM1* detection in control tissue; detectable effect sizes); the metallothionein lead mentioned in the radiobiology paragraph
+- Methods: Atlas-derived tumour-state signatures (power by simulation)
+
+**Pipeline step:** `./run_pipeline.sh --only 33c_state_review`. Approximate runtime: under 1 min.
+
+**Inputs**
+
+- `data/phase2_se_qc_filtered.qs`
+- `results/R1_loq/loq_gene_universes.qs`
+- `results/C13_pseudobulk_LOQ/pseudobulk_strata.qs`
+- `results/C1_clinical/patient_table.qs`
+- `results/C3_deconvolution/deconvolution_proportions.qs`
+- `results/R11_pccat_states/state_association/2_state_vs_response.csv`
+- `results/R11_pccat_states/C_patient_scores.csv`
+
+**Outputs**
+
+- `results/R11_pccat_states/state_review/C1_power.csv`
+- `results/R11_pccat_states/state_review/C2_NE_detection_by_compartment.csv`
+- `results/R11_pccat_states/state_review/C2_NE_detection_patient_level_tests.csv`
+- `results/R11_pccat_states/state_review/C2_NE_detection_patient_table.csv`
+- `results/R11_pccat_states/state_review/C2_SVH004_aoi_detail.csv`
+- `results/R11_pccat_states/state_review/C3_metallothionein_patient_level.csv`
+- `results/R11_pccat_states/state_review/C3_MT_vs_AOI_quality.csv`
+- `results/R11_pccat_states/state_review/C4_purity_safe_DNPC_genes.csv`
+- `results/R11_pccat_states/state_review/C5_mediation_suppression.csv`
+- `results/R11_pccat_states/state_review/C6_alt_AR_indifferent_markers.csv`
+- `results/R11_pccat_states/state_review/state_review*.log`
+
+**Depends on**: `comp_00b_bone_cohort`, `comp_01_clinical`, `comp_03b_deconv`, `comp_13b_pseudobulk_loq`, `comp_16_loq_filter`, `comp_33_pccat_states`, `comp_33a_state_associations`
+
+## Analysis
+
+Set-up. Load the AOI object, per-AOI LOQ calls, LOQ pseudobulk strata, clinical table and deconvolution, and give each AOI a stratum label and a purity value. `pb_lcpm` returns TMM-scaled patient pseudobulk log-CPM for any gene, not only LOQ-universe genes, so genes below background can also be examined. Helpers: `sp` (Spearman, ≥6 patients), `prt` (partial rank correlation via residualised ranks, ≥7 patients) and `wx` (Wilcoxon, non-responders vs others).
+
+```{r comp-33c-state-review-01}
+## ============================================================================
+## R11 PCCAT state analyses -- critical review of the association and validation analyses
+## Read-only on inputs; writes only to R11_pccat_states/state_review/
+## ============================================================================
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({library(qs); library(SummarizedExperiment); library(edgeR); library(survival)})
+set.seed(20261026)
+OUT <- file.path(COMP_DIR, "R11_pccat_states", "state_review"); dir.create(OUT, showWarnings = FALSE)
+op <- function(f) file.path(OUT, f)
+sink(op("state_review.log"), split = TRUE)
+
+se  <- qread(file.path(PRINCE_DIR, "phase2_se_qc_filtered.qs"))
+cd  <- as.data.frame(colData(se)); cnt <- as.matrix(assay(se, "all_count"))
+loq <- qread(file.path(COMP_DIR, "R1_loq", "loq_gene_universes.qs"))
+LOQ <- loq$aoi[colnames(se), "LOQ_std"]
+above <- sweep(cnt, 2, LOQ, ">")
+pbs <- qread(file.path(COMP_DIR, "C13_pseudobulk_LOQ", "pseudobulk_strata.qs"))
+clin <- qread(file.path(COMP_DIR, "C1_clinical", "patient_table.qs"))
+dc  <- qread(file.path(COMP_DIR, "C3_deconvolution", "deconvolution_proportions.qs"))
+seg <- c("CD45+" = "CD45", "PSMA+" = "PSMA", "PanCK+PSMA-" = "PanCKPSMA")[cd$segment_name]
+cd$stratum <- ifelse(cd$timepoint %in% c("Archival", "Screening", "Cycle1"), paste0(seg, "__", cd$timepoint),
+                     ifelse(grepl("Control", cd$timepoint), "Control", paste0(seg, "__", cd$timepoint)))
+cd$purity <- NA
+ip <- intersect(colnames(se), rownames(dc$lineage_primary)); cd[ip, "purity"] <- dc$lineage_primary[ip, "Epithelial_tumour"]
+ib <- intersect(colnames(se), rownames(dc$lineage_bone)); ib <- ib[cd[ib, "timepoint"] != "Archival"]
+cd[ib, "purity"] <- dc$lineage_bone[ib, "Epithelial_tumour"]
+cd$logCPM_lib <- log2(colSums(cnt))
+lcpm_aoi <- log2(sweep(cnt + 0.5, 2, colSums(cnt) + 1, "/") * 1e6)
+
+## patient pseudobulk logCPM for ANY gene (not only LOQ-universe genes), TMM-scaled
+pb_lcpm <- function(st) {
+  p <- pbs[[st]]; s <- p$dge$samples; L <- log2(sweep(p$counts + 0.5, 2, s$lib.size * s$norm.factors + 1, "/") * 1e6)
+  colnames(L) <- p$meta$subject_id; L }
+pmeta <- function(st) { m <- pbs[[st]]$meta; m$psa <- m$psa_change_capped; m }
+TUM <- c("PSMA__Archival", "PSMA__Screening", "PSMA__Cycle1", "PanCKPSMA__Archival", "PanCKPSMA__Screening", "PanCKPSMA__Cycle1")
+ALLST <- c(TUM, "CD45__Archival", "CD45__Screening", "CD45__Cycle1")
+pat_purity <- function(st) { a <- cd[which(cd$stratum == st), ]; tapply(a$purity, a$subject_id, mean, na.rm = TRUE) }
+sp <- function(x, y) { ok <- is.finite(x) & is.finite(y); if (sum(ok) < 6) return(c(rho = NA, p = NA))
+  t <- suppressWarnings(cor.test(x[ok], y[ok], method = "spearman", exact = FALSE)); c(rho = unname(t$estimate), p = t$p.value) }
+prt <- function(y, x, z) { ok <- is.finite(x) & is.finite(y) & is.finite(z); if (sum(ok) < 7) return(c(rho = NA, p = NA))
+  r1 <- resid(lm(rank(y[ok]) ~ rank(z[ok]))); r2 <- resid(lm(rank(x[ok]) ~ rank(z[ok]))); t <- cor.test(r1, r2); c(rho = unname(t$estimate), p = t$p.value) }
+wx <- function(x, nr) { ok <- is.finite(x) & !is.na(nr); if (sum(nr[ok]) < 2) return(NA); suppressWarnings(wilcox.test(x[ok & nr], x[ok & !nr], exact = FALSE)$p.value) }
+
+```
+
+### 1. Power
+Monte Carlo power (2,000 simulations) for a Wilcoxon test of 5 non-responders against 28 or 17 other patients, at shifts of 0.8–2.5 s.d., and for a Spearman test with 22 or 17 patients at ρ = 0.3–0.7. Both are evaluated at α = 0.05 and α = 0.002. Fisher P values are also listed for k of 5 non-responders being NE-positive against 1 of 28 others.
+
+```{r comp-33c-state-review-02}
+## ============================================================ 1. POWER
+cat("\n==== 1. POWER ====\n")
+pw_w <- function(d, n1 = 5, n0 = 28, alpha = 0.05, B = 2000) mean(replicate(B, {
+  x <- rnorm(n1, d); y <- rnorm(n0); suppressWarnings(wilcox.test(x, y, exact = FALSE)$p.value) < alpha }))
+pw_s <- function(r, n = 22, alpha = 0.05, B = 2000) mean(replicate(B, {
+  z <- MASS::mvrnorm(n, c(0, 0), matrix(c(1, r, r, 1), 2)); cor.test(z[, 1], z[, 2], method = "spearman", exact = FALSE)$p.value < alpha }))
+pow <- expand.grid(effect = c(0.8, 1.0, 1.5, 2.0, 2.5), alpha = c(0.05, 0.002))
+pow$wilcox_5NR_vs_28 <- mapply(pw_w, pow$effect, alpha = pow$alpha)
+pow$wilcox_5NR_vs_17_screening <- mapply(function(d, a) pw_w(d, 5, 17, a), pow$effect, pow$alpha)
+pow2 <- expand.grid(rho = c(0.3, 0.4, 0.5, 0.6, 0.7), alpha = c(0.05, 0.002))
+pow2$spearman_n22 <- mapply(pw_s, pow2$rho, alpha = pow2$alpha)
+pow2$spearman_n17 <- mapply(function(r, a) pw_s(r, 17, a), pow2$rho, pow2$alpha)
+print(pow); print(pow2)
+## binary: NE-positive patients. power of Fisher to detect k/5 NR NE+ vs 1/28 R+I NE+
+fis <- sapply(1:5, function(k) fisher.test(matrix(c(k, 5 - k, 1, 27), 2))$p.value)
+cat("Fisher p if k/5 NR NE+ vs 1/28 others NE+: ", paste0(1:5, ":", signif(fis, 2)), "\n")
+write.csv(merge(pow, pow2, all = TRUE), op("C1_power.csv"), row.names = FALSE)
+
+```
+
+### 2. NE single-gene detection at patient level
+- Fraction of AOIs above LOQ for 15 NE and lineage genes per compartment and in control tissue. A logistic regression checks whether *CHGA* detection simply follows AOI sensitivity (% genes above LOQ).
+- Per patient and timepoint, the fraction of tumour AOIs (PSMA⁺ and PanCK⁺PSMA⁻ pooled) with each core NE gene above LOQ, and with ≥1 or ≥2 core genes. These are related to PSA change, *FOLH1*, *AR* and purity-adjusted *FOLH1*, and compared between non-responders and others.
+- AOI-level detail for SVH-004: raw NE counts and within-stratum percentiles of *FOLH1*, AR-output genes, *CHGA* and *MT1E*, with the patient's clinical and ctDNA record.
+
+```{r comp-33c-state-review-03}
+## ============================================================ 2. NE single-gene detection, patient level
+cat("\n==== 2. NE detection rates ====\n")
+NE <- c("CHGA", "CHGB", "SCG2", "INSM1", "ASCL1", "NEUROD1", "SYP", "ENO2", "NCAM1", "DLL3", "UCHL1", "HES6", "SRRM4", "ONECUT2", "POU2F3")
+NE <- intersect(NE, rownames(se))
+grp <- ifelse(cd$stratum == "Control", "Control", sub("__.*", "", cd$stratum))
+bg <- sapply(NE, function(g) tapply(above[g, ], grp, mean)); print(round(t(bg), 3))
+write.csv(round(t(bg), 3), op("C2_NE_detection_by_compartment.csv"))
+## specificity check: is detection driven by LOQ (low-LOQ AOIs detect everything)? fraction of all genes above LOQ
+cat("AOI pct genes above LOQ vs CHGA detection (tumour AOIs): \n")
+tum <- cd$stratum %in% TUM
+print(summary(glm(above["CHGA", tum] ~ loq$aoi[colnames(se)[tum], "pct_above_LOQ_std"], family = binomial))$coef)
+## patient x timepoint detection in tumour AOIs (both tumour segments)
+CORE <- c("CHGA", "CHGB", "SCG2", "INSM1", "ASCL1")
+ptd <- do.call(rbind, lapply(c("Archival", "Screening", "Cycle1"), function(tp) {
+  a <- colnames(se)[which(tum & cd$timepoint == tp)]
+  do.call(rbind, lapply(split(a, cd[a, "subject_id"]), function(ids) data.frame(subject_id = cd[ids[1], "subject_id"], timepoint = tp,
+    n_tum = length(ids), CHGA = mean(above["CHGA", ids]), CHGB = mean(above["CHGB", ids]), SCG2 = mean(above["SCG2", ids]),
+    INSM1 = mean(above["INSM1", ids]), ASCL1 = mean(above["ASCL1", ids]),
+    ge2core = mean(colSums(above[CORE, ids, drop = FALSE]) >= 2), any_core = mean(colSums(above[CORE, ids, drop = FALSE]) >= 1),
+    FOLH1 = mean(lcpm_aoi["FOLH1", ids]), AR = mean(lcpm_aoi["AR", ids]), purity = mean(cd[ids, "purity"], na.rm = TRUE)))) }))
+ptd <- merge(ptd, clin[, c("subject_id", "response_group_neat", "psa_change_capped", "r_pfstime", "r_pfsevent")], by = "subject_id")
+ptd$NR <- ptd$response_group_neat == "Non_Responder"
+ne_res <- do.call(rbind, lapply(c("Archival", "Screening", "Cycle1"), function(tp) {
+  d <- ptd[ptd$timepoint == tp, ]
+  do.call(rbind, lapply(c("CHGA", "CHGB", "SCG2", "INSM1", "ASCL1", "ge2core", "any_core"), function(v) {
+    s1 <- sp(d[[v]], d$psa_change_capped); s2 <- sp(d[[v]], d$FOLH1); s3 <- sp(d[[v]], d$AR); s4 <- prt(d[[v]], d$FOLH1, d$purity)
+    data.frame(timepoint = tp, var = v, n = nrow(d), n_pos_pat = sum(d[[v]] > 0), n_pos_NR = sum(d[[v]] > 0 & d$NR), n_NR = sum(d$NR),
+               mean_NR = mean(d[[v]][d$NR]), mean_other = mean(d[[v]][!d$NR]), p_NR_vs_other = wx(d[[v]], d$NR),
+               rho_psa = s1[1], p_psa = s1[2], rho_FOLH1 = s2[1], p_FOLH1 = s2[2], rho_AR = s3[1], p_AR = s3[2],
+               prho_FOLH1_purity = s4[1], pp_FOLH1_purity = s4[2]) })) }))
+rownames(ne_res) <- NULL; print(ne_res, digits = 2)
+write.csv(ne_res, op("C2_NE_detection_patient_level_tests.csv"), row.names = FALSE)
+write.csv(ptd, op("C2_NE_detection_patient_table.csv"), row.names = FALSE)
+
+## SVH-004 detail
+cat("\n---- SVH-004 ----\n")
+s4 <- colnames(se)[which(cd$subject_id == "SVH-004")]
+pct <- function(g, ids) sapply(ids, function(i) { ref <- colnames(se)[which(cd$stratum == cd[i, "stratum"])]; round(100 * mean(lcpm_aoi[g, ref] <= lcpm_aoi[g, i])) })
+svh <- data.frame(aoi = s4, stratum = cd[s4, "stratum"], batch = cd[s4, "study_batch"], purity = round(cd[s4, "purity"], 2),
+  LOQ = round(LOQ[match(s4, colnames(se))], 1), CHGA = cnt["CHGA", s4], CHGB = cnt["CHGB", s4], SYP = cnt["SYP", s4],
+  INSM1 = cnt["INSM1", s4], ASCL1 = cnt["ASCL1", s4], SCG2 = cnt["SCG2", s4],
+  FOLH1_pctile = pct("FOLH1", s4), AR_pctile = pct("AR", s4), KLK3_pctile = pct("KLK3", s4), NKX31_pctile = pct("NKX3-1", s4),
+  CHGA_pctile = pct("CHGA", s4), MT1E_pctile = pct("MT1E", s4))
+print(svh[order(svh$stratum), ], row.names = FALSE)
+print(clin[clin$subject_id == "SVH-004", c("response_group_neat", "max_psa_change", "r_pfstime", "PSMAPET_BL_SUVmean", "PSMAPET_BL_SUVmax", "FDG_BL_positive", "RECIP", "ctDNA_BL", grep("^alt_", colnames(clin), value = TRUE))])
+cat("cohort: alt_AR among NR:", table(clin$alt_AR[clin$response_group_neat == "Non_Responder"]), " others:", table(clin$alt_AR[clin$response_group_neat != "Non_Responder"]), "\n")
+write.csv(svh, op("C2_SVH004_aoi_detail.csv"), row.names = FALSE)
+
+```
+
+### 3. Metallothionein and basal-state lead
+- In each of the nine strata, pseudobulk metallothionein genes, their mean z-score, the *MTRNR2L* family (nuclear copies of mitochondrial rRNA, a known artefact signature) and a glucocorticoid-response mean z-score are related to PSA change. Each is also tested after excluding batch 3, against batch (Kruskal–Wallis), and by partial correlation given purity or log library size.
+- AOI-level correlation of these genes with quality metrics (LOQ, saturation, deduplicated reads, negative-probe background, purity) in tumour strata, and the *MTRNR2L* inter-correlation.
+- A patient-permutation test (2,000 shuffles) of AOI-mean *MT1E*, and Cox models for rPFS.
+- Multiplicity across the association analysis: global BH and Bonferroni over all signature × stratum tests and over the five test types pooled, with expected against observed numbers of P < 0.05.
+- A leverage table of patient values in pre-treatment PSMA⁺ bone.
+
+```{r comp-33c-state-review-04}
+## ============================================================ 3. Metallothionein / Basal hit
+cat("\n==== 3. Metallothionein ====\n")
+MT <- intersect(c("MT1E", "MT1X", "MT2A", "MT1M", "MT1F", "MT1G", "MT1H", "MT1A"), rownames(se))
+MTR <- grep("^MTRNR2L", rownames(se), value = TRUE)
+GC <- intersect(c("TSC22D3", "FKBP5", "PER1", "KLF9", "DUSP1", "ZBTB16"), rownames(se))
+STRESS <- intersect(c("HMOX1", "HSPA1A", "SLC30A1", "FOS", "JUN", "ATF3", "EGR1"), rownames(se))
+mt_res <- do.call(rbind, lapply(ALLST, function(st) {
+  L <- pb_lcpm(st); m <- pmeta(st); pu <- pat_purity(st)[m$subject_id]
+  mtz <- colMeans(t(scale(t(L[MT, ])))); gcz <- colMeans(t(scale(t(L[GC, ]))))
+  do.call(rbind, lapply(c(MT, "MT_meanz", MTR, "GC_meanz"), function(g) {
+    x <- if (g == "MT_meanz") mtz else if (g == "GC_meanz") gcz else L[g, ]
+    s <- sp(x, m$psa); kb <- suppressWarnings(kruskal.test(x, m$study_batch)$p.value)
+    pr <- prt(x, m$psa, pu); pl <- prt(x, m$psa, m$log_lib)
+    nb3 <- m$study_batch != "batch_3"; s3 <- sp(x[nb3], m$psa[nb3])
+    det <- if (g %in% rownames(above)) mean(above[g, which(cd$stratum == st)]) else NA
+    data.frame(stratum = st, gene = g, n = length(x), det_rate_AOI = det, rho_psa = s[1], p_psa = s[2], rho_psa_excl_b3 = s3[1], p_excl_b3 = s3[2],
+               p_kruskal_batch = kb, prho_psa_given_purity = pr[1], prho_psa_given_loglib = pl[1], p_given_loglib = pl[2],
+               rho_with_GC = sp(x, gcz)[1], rho_with_purity = sp(x, pu)[1]) })) }))
+rownames(mt_res) <- NULL
+print(mt_res[mt_res$gene %in% c("MT1E", "MT1X", "MT2A", "MT_meanz", "MTRNR2L8", "GC_meanz"), ], digits = 2)
+write.csv(mt_res, op("C3_metallothionein_patient_level.csv"), row.names = FALSE)
+## AOI-level association of MT/MTRNR2L genes with quality metrics in tumour AOIs
+q <- data.frame(pct_above_LOQ = loq$aoi[colnames(se), "pct_above_LOQ_std"], LOQ = LOQ, sat = cd$sequencing_saturation,
+                dedup = log2(cd$deduplicated_reads), neg = log2(cd$neg_probe_geomean), purity = cd$purity)
+mtq <- do.call(rbind, lapply(c("MT1E", "MT1X", "MT2A", "MTRNR2L8", "MTRNR2L1", "MTRNR2L10", "MTRNR2L7"), function(g) {
+  sapply(split(seq_len(ncol(se)), cd$stratum)[TUM], function(ix) sapply(q, function(v) round(sp(lcpm_aoi[g, ix], v[ix])[1], 2))) -> M
+  data.frame(gene = g, metric = rownames(M), M, check.names = FALSE) }))
+print(mtq, row.names = FALSE); write.csv(mtq, op("C3_MT_vs_AOI_quality.csv"), row.names = FALSE)
+## MTRNR2L family coherence (artefact signature: mito rRNA NUMT reads co-vary)
+ixs <- which(cd$stratum == "PSMA__Screening")
+cat("MTRNR2L inter-correlation PSMA__Screening AOIs:\n"); print(round(cor(t(lcpm_aoi[c(MTR, "MT1E", "MT2A"), ixs]), method = "spearman"), 2))
+## Screening vs DiseaseProgression? and Cycle1 replication via change
+## within-patient AOI-level permutation for MT1E in all tumour strata
+perm_aoi <- function(st, g, B = 2000) { a <- cd[which(cd$stratum == st), ]; a$y <- lcpm_aoi[g, rownames(a)]
+  a <- merge(a[, c("subject_id", "y")], clin[, c("subject_id", "psa_change_capped")], by = "subject_id"); a <- a[is.finite(a$psa_change_capped), ]
+  pm <- tapply(a$y, a$subject_id, mean); ps <- clin$psa_change_capped[match(names(pm), clin$subject_id)]
+  r0 <- cor(pm, ps, method = "spearman"); rb <- replicate(B, cor(pm, sample(ps), method = "spearman")); c(rho = r0, p_perm = mean(abs(rb) >= abs(r0))) }
+cat("MT1E AOI-mean vs PSA (patient permutation):\n"); print(sapply(ALLST, function(st) round(perm_aoi(st, "MT1E"), 3)))
+## Cox on MT1E in PSMA screening & cycle1
+for (st in c("PSMA__Screening", "PSMA__Cycle1", "PanCKPSMA__Screening", "CD45__Screening")) { L <- pb_lcpm(st); m <- pmeta(st)
+  f <- coxph(Surv(m$r_pfstime, m$r_pfsevent) ~ scale(L["MT1E", ])); cat(st, "MT1E rPFS HR/SD", round(exp(coef(f)), 2), "p", signif(summary(f)$coef[5], 2), "\n") }
+## Multiplicity across the association analyses
+a2 <- read.csv(file.path(COMP_DIR, "R11_pccat_states/state_association/2_state_vs_response.csv"))
+a2u <- a2[!a2$signature %in% c("Basal_all", "Hillock_all", "LPCs_all"), ]
+cat("Association response tests: rows", nrow(a2), " unique sigs", nrow(a2u), " x 5 test types =", 5 * nrow(a2u), "\n")
+a2u$fdr_global <- p.adjust(a2u$p_spearman, "BH"); a2u$bonf <- p.adjust(a2u$p_spearman, "bonferroni")
+print(head(a2u[order(a2u$p_spearman), c("stratum", "signature", "rho_psa", "p_spearman", "fdr_global", "bonf", "p_lm_batch")], 6))
+allp <- c(a2u$p_spearman, a2u$p_lm_batch, a2u$p_excl_b3, a2u$p_NR_vs_R, a2u$p_cox)
+cat("Global BH (all 5 test types pooled, n=", sum(!is.na(allp)), ") for Basal PSMA Screening spearman:",
+    signif(p.adjust(allp, "BH")[which(a2u$stratum == "PSMA__Screening" & a2u$signature == "Basal")], 3), "\n")
+cat("Expected # p<0.05 among", sum(!is.na(a2u$p_spearman)), "spearman tests:", round(0.05 * sum(!is.na(a2u$p_spearman)), 1), " observed:", sum(a2u$p_spearman < 0.05, na.rm = TRUE), "\n")
+## leverage: Basal / MT1E with the NR patients -- show patient values
+L <- pb_lcpm("PSMA__Screening"); m <- pmeta("PSMA__Screening")
+lv <- data.frame(m[, c("subject_id", "study_batch", "response_group_neat", "psa_change_capped", "n_aoi", "log_lib")], MT1E = round(L["MT1E", ], 2), MT2A = round(L["MT2A", ], 2), MTRNR2L8 = round(L["MTRNR2L8", ], 2),
+                 purity = round(pat_purity("PSMA__Screening")[m$subject_id], 2))
+print(lv[order(lv$MT1E), ], row.names = FALSE)
+cat("rho(MT1E, psa) dropping NR:", round(sp(lv$MT1E[lv$response_group_neat != "Non_Responder"], lv$psa_change_capped[lv$response_group_neat != "Non_Responder"]), 3), "\n")
+cat("rho(MT1E, log_lib):", round(sp(lv$MT1E, lv$log_lib), 3), " rho(MT1E,n_aoi):", round(sp(lv$MT1E, lv$n_aoi), 3), "\n")
+
+```
+
+### 4. Purity-safe double-negative genes
+For squamous and basal genes that might mark AR-indifferent tumour without being contaminated by immune or marrow signal (*KRT7*, *SFN*, *MUC1*, *TACSTD2*, *KRT5*, *TP63* and others), correlations with *FOLH1*, *AR*, PSA change and purity are computed in each tumour stratum, with partial correlations given purity. A final loop checks whether purity itself tracks *FOLH1*, *AR* or PSA change.
+
+```{r comp-33c-state-review-05}
+## ============================================================ 4. purity-safe DNPC genes
+cat("\n==== 4. purity-safe DNPC genes ====\n")
+DN <- c("KRT7", "SFN", "MUC1", "S100A6", "TACSTD2", "KRT5", "TP63", "KRT15", "KRT13")
+DN <- intersect(DN, rownames(se))
+dn_res <- do.call(rbind, lapply(TUM, function(st) { L <- pb_lcpm(st); m <- pmeta(st); pu <- pat_purity(st)[m$subject_id]
+  do.call(rbind, lapply(DN, function(g) { x <- L[g, ]
+    data.frame(stratum = st, gene = g, det_rate_AOI = mean(above[g, which(cd$stratum == st)]), in_LOQ_universe = g %in% rownames(pbs[[st]]$lcpm),
+      rho_FOLH1 = sp(x, L["FOLH1", ])[1], p_FOLH1 = sp(x, L["FOLH1", ])[2], prho_FOLH1_pur = prt(x, L["FOLH1", ], pu)[1], pp_FOLH1_pur = prt(x, L["FOLH1", ], pu)[2],
+      rho_AR = sp(x, L["AR", ])[1], p_AR = sp(x, L["AR", ])[2], rho_psa = sp(x, m$psa)[1], p_psa = sp(x, m$psa)[2],
+      prho_psa_pur = prt(x, m$psa, pu)[1], rho_purity = sp(x, pu)[1]) })) }))
+rownames(dn_res) <- NULL; print(dn_res, digits = 2); write.csv(dn_res, op("C4_purity_safe_DNPC_genes.csv"), row.names = FALSE)
+## Is purity on the causal path? does purity itself track FOLH1 / PSA?
+for (st in TUM) { L <- pb_lcpm(st); m <- pmeta(st); pu <- pat_purity(st)[m$subject_id]
+  cat(st, " purity~FOLH1 rho", round(sp(pu, L["FOLH1", ])[1], 2), " purity~AR", round(sp(pu, L["AR", ])[1], 2), " purity~PSA", round(sp(pu, m$psa)[1], 2), "p", signif(sp(pu, m$psa)[2], 2), "\n") }
+
+```
+
+### 5. Mediation and suppression
+For AR-related scores from `comp_33` (Hallmark androgen response, KLK4- and ERG-high luminal states, five-gene AR panel), compare the PSA-change regression on the score alone with the joint model alongside *FOLH1*. Also reported are the variance inflation factor, and a standardised *FOLH1*-minus-score difference, to check whether one term suppresses the other.
+
+```{r comp-33c-state-review-06}
+## ============================================================ 5. Mediation / suppression
+cat("\n==== 5. Mediation check ====\n")
+sc <- read.csv(file.path(COMP_DIR, "R11_pccat_states/C_patient_scores.csv"), check.names = FALSE)
+sc <- merge(sc, clin[, c("subject_id", "psa_change_capped")], by = "subject_id")
+med <- do.call(rbind, lapply(TUM, function(st) { d <- sc[sc$stratum == st & is.finite(sc$psa_change_capped), ]
+  do.call(rbind, lapply(c("AR_Hallmark", "Lum_KLK4", "Lum_ERG", "AR_panel5"), function(s) {
+    z <- function(v) as.numeric(scale(v)); y <- d$psa_change_capped / 50
+    f0 <- summary(lm(y ~ z(d[[s]])))$coef; f2 <- summary(lm(y ~ z(d$FOLH1) + z(d[[s]])))$coef
+    r <- cor(d$FOLH1, d[[s]]); dif <- z(z(d$FOLH1) - z(d[[s]])); f3 <- summary(lm(y ~ dif))$coef
+    data.frame(stratum = st, sig = s, n = nrow(d), r_FOLH1_sig = r, VIF = 1 / (1 - r^2), beta_sig_alone = f0[2, 1], p_sig_alone = f0[2, 4],
+      beta_FOLH1_joint = f2[2, 1], p_FOLH1_joint = f2[2, 4], beta_sig_joint = f2[3, 1], p_sig_joint = f2[3, 4],
+      beta_diff_score = f3[2, 1], p_diff_score = f3[2, 4], rho_diff_psa = sp(dif, y)[1], p_rho_diff = sp(dif, y)[2]) })) }))
+rownames(med) <- NULL; print(med, digits = 2); write.csv(med, op("C5_mediation_suppression.csv"), row.names = FALSE)
+
+```
+
+### 6. Candidate AR-indifferent markers
+A fixed list of YAP/TAZ, FGF/MAPK, EMT, stem-like and glucocorticoid-receptor genes is tested in primary and pre-treatment tumour strata. Each gene is correlated with *FOLH1*, *AR* and PSA change, unadjusted and partial on purity, with BH correction across all tests.
+
+```{r comp-33c-state-review-07}
+## ============================================================ 6. AR-indifferent / alternative markers
+cat("\n==== 6. alternative AR-indifferent markers ====\n")
+ALT <- intersect(c("YAP1", "WWTR1", "VIM", "KRT7", "FGFR1", "FGF2", "FGF8", "SPRY4", "DUSP6", "ETV4", "ETV5", "FOSL1", "CD44", "NR3C1",
+                   "MYCN", "EZH2", "SOX9", "TACSTD2", "KRT5", "ZEB1", "SNAI2", "TWIST1"), rownames(se))
+alt_res <- do.call(rbind, lapply(c("PSMA__Archival", "PSMA__Screening", "PanCKPSMA__Archival", "PanCKPSMA__Screening"), function(st) {
+  L <- pb_lcpm(st); m <- pmeta(st); pu <- pat_purity(st)[m$subject_id]
+  do.call(rbind, lapply(ALT, function(g) { x <- L[g, ]
+    data.frame(stratum = st, gene = g, det_rate_AOI = mean(above[g, which(cd$stratum == st)]),
+      rho_FOLH1 = sp(x, L["FOLH1", ])[1], p_FOLH1 = sp(x, L["FOLH1", ])[2], prho_FOLH1_pur = prt(x, L["FOLH1", ], pu)[1], pp_FOLH1_pur = prt(x, L["FOLH1", ], pu)[2],
+      rho_AR = sp(x, L["AR", ])[1], p_AR = sp(x, L["AR", ])[2], prho_AR_pur = prt(x, L["AR", ], pu)[1], pp_AR_pur = prt(x, L["AR", ], pu)[2],
+      rho_psa = sp(x, m$psa)[1], p_psa = sp(x, m$psa)[2], prho_psa_pur = prt(x, m$psa, pu)[1], pp_psa_pur = prt(x, m$psa, pu)[2], rho_purity = sp(x, pu)[1]) })) }))
+rownames(alt_res) <- NULL
+alt_res$fdr_psa <- p.adjust(alt_res$p_psa, "BH"); alt_res$fdr_FOLH1_pur <- p.adjust(alt_res$pp_FOLH1_pur, "BH"); alt_res$fdr_AR_pur <- p.adjust(alt_res$pp_AR_pur, "BH")
+print(alt_res[alt_res$p_psa < 0.05 | alt_res$pp_FOLH1_pur < 0.05 | alt_res$pp_AR_pur < 0.05, ], digits = 2)
+write.csv(alt_res, op("C6_alt_AR_indifferent_markers.csv"), row.names = FALSE)
+sink()
+
+```
+
+### 7. Follow-up checks
+- Noise floor: the median correlation with *FOLH1* of genes above LOQ in <5% of AOIs, as a null for correlations driven by sensitivity.
+- Archival *CHGA* detection against *FOLH1*, adjusted for mean AOI sensitivity.
+- Patients with any core NE detection in pre-treatment bone, and *INSM1* detection in control AOIs.
+- *MT1E* by recruiting site (subject-ID prefix) and batch.
+- *MT1E* consistency between pre- and on-treatment bone and between compartments, and its correlation with inflammation, hypoxia and stress genes.
+- ctDNA AR alteration by response group.
+
+```{r comp-33c-state-review-08}
+## ============================================================ 7. follow-ups: noise-floor artefact, CHGA archival, site
+sink(op("state_review_part2.log"), split = TRUE)
+cat("\n==== 7a. noise-floor null: rho(FOLH1, gene) for genes below LOQ in >=95% of AOIs ====\n")
+for (st in c("PSMA__Screening", "PSMA__Archival", "PanCKPSMA__Screening")) { L <- pb_lcpm(st); ix <- which(cd$stratum == st)
+  low <- names(which(rowMeans(above[, ix]) < 0.05)); low <- intersect(low, rownames(L))
+  r <- apply(L[low, ], 1, function(x) cor(x, L["FOLH1", ], method = "spearman"))
+  m <- pmeta(st); pq <- tapply(loq$aoi[colnames(se)[ix], "pct_above_LOQ_std"], cd$subject_id[ix], mean)[m$subject_id]
+  cat(st, ": n below-LOQ genes", length(low), " median rho with FOLH1", round(median(r), 2), " IQR", round(quantile(r, c(.25, .75)), 2),
+      " | rho(FOLH1, pct_above_LOQ)", round(sp(L["FOLH1", ], pq)[1], 2), " rho(DNPC_like-type noise: purity, pct_above_LOQ)", round(sp(pat_purity(st)[m$subject_id], pq)[1], 2), "\n") }
+cat("\n==== 7b. Archival CHGA detection vs FOLH1 adjusting for AOI sensitivity ====\n")
+a <- ptd[ptd$timepoint == "Archival", ]
+ixa <- which(tum & cd$timepoint == "Archival"); pqa <- tapply(loq$aoi[colnames(se)[ixa], "pct_above_LOQ_std"], cd$subject_id[ixa], mean)
+a$pq <- pqa[a$subject_id]
+print(rbind(raw = sp(a$CHGA, a$FOLH1), adj_sens = prt(a$CHGA, a$FOLH1, a$pq), CHGA_vs_sens = sp(a$CHGA, a$pq), FOLH1_vs_sens = sp(a$FOLH1, a$pq)))
+print(a[order(-a$CHGA), c("subject_id", "response_group_neat", "CHGA", "ge2core", "FOLH1", "AR", "pq")][1:13, ], digits = 2)
+cat("\n==== 7c. Screening core-NE positive patients ====\n")
+s <- ptd[ptd$timepoint == "Screening", ]; print(s[s$any_core > 0, c("subject_id", "response_group_neat", "n_tum", "CHGA", "CHGB", "INSM1", "ASCL1", "ge2core", "FOLH1", "AR")], digits = 2)
+cat("INSM1 detection in Control AOIs:", mean(above["INSM1", which(cd$stratum == "Control")]), "\n")
+cat("\n==== 7d. MT1E by site / batch (PSMA Screening + Cycle1) ====\n")
+for (st in c("PSMA__Screening", "PSMA__Cycle1", "CD45__Screening")) { L <- pb_lcpm(st); m <- pmeta(st); site <- substr(m$subject_id, 1, 3)
+  cat(st, " MT1E by site:", tapply(round(L["MT1E", ], 2), site, median), " KW p", signif(kruskal.test(L["MT1E", ], factor(site))$p.value, 2),
+      " | PSA by site KW p", signif(kruskal.test(m$psa, factor(site))$p.value, 2), "\n")
+  f <- lm(rank(m$psa) ~ rank(L["MT1E", ]) + factor(site) + factor(m$study_batch)); cat("   MT1E adj site+batch p", signif(summary(f)$coef[2, 4], 2), "\n") }
+## patient-level coherence: MT1E Screening vs Cycle1 in same patients, and tumour vs CD45
+Ls <- pb_lcpm("PSMA__Screening"); Lc <- pb_lcpm("PSMA__Cycle1"); Ld <- pb_lcpm("CD45__Screening")
+cm <- intersect(colnames(Ls), colnames(Lc)); cat("MT1E PSMA Screening vs Cycle1 same patients rho", round(sp(Ls["MT1E", cm], Lc["MT1E", cm]), 3), " n", length(cm), "\n")
+cm2 <- intersect(colnames(Ls), colnames(Ld)); cat("MT1E PSMA vs CD45 Screening same patients rho", round(sp(Ls["MT1E", cm2], Ld["MT1E", cm2]), 3), "\n")
+## inflammation (IL6/STAT3) and hypoxia link
+for (g in intersect(c("IL6", "SOCS3", "CXCL8", "HIF1A", "VEGFA", "SLC2A1", "CA9", "HMOX1", "HSPA1A", "SLC30A1", "NFE2L2", "TXNRD1", "SAA1", "CRP"), rownames(Ls)))
+  cat(g, " rho with MT1E (PSMA Scr):", round(sp(Ls[g, ], Ls["MT1E", ])[1], 2), " with PSA:", round(sp(Ls[g, ], pmeta("PSMA__Screening")$psa)[1], 2), "\n")
+cat("\n==== 7e. ctDNA AR alteration by response ====\n"); print(table(clin$response_group_neat, clin$alt_AR, useNA = "ifany"))
+cat("FOLH1 / NE in AR-altered vs not (Screening tumour patients):\n"); s$alt_AR <- clin$alt_AR[match(s$subject_id, clin$subject_id)]
+print(aggregate(cbind(FOLH1, AR, any_core) ~ alt_AR, s, median))
+sink()
+
+```
+
+### 8. Signal-depth artefact check
+Per stratum, relate PSA change to mean % genes above LOQ, and compare *MT1E* and *FOLH1* with the distribution of PSA correlations among below-LOQ and well-detected genes. Partial correlations given signal depth are reported. A detection-based *MT1E* measure (fraction of AOIs above LOQ), which does not depend on the CPM noise floor, is also related to PSA change.
+
+```{r comp-33c-state-review-09}
+## ============================================================ 8. is MT1E / FOLH1-PSA a signal-depth artefact?
+sink(op("state_review_part3.log"), split = TRUE)
+for (st in c("PSMA__Screening", "PSMA__Cycle1", "CD45__Screening", "PanCKPSMA__Screening", "PSMA__Archival")) {
+  L <- pb_lcpm(st); m <- pmeta(st); ix <- which(cd$stratum == st)
+  pq <- tapply(loq$aoi[colnames(se)[ix], "pct_above_LOQ_std"], cd$subject_id[ix], mean)[m$subject_id]
+  low <- intersect(names(which(rowMeans(above[, ix]) < 0.05)), rownames(L)); hi <- intersect(names(which(rowMeans(above[, ix]) > 0.5)), rownames(L))
+  rl <- apply(L[low, ], 1, function(x) cor(x, m$psa, method = "spearman")); rall <- apply(L, 1, function(x) cor(x, m$psa, method = "spearman"))
+  cat(sprintf("%s: rho(PSA, pct_above_LOQ)=%.2f p=%.3g | below-LOQ genes rho_psa median %.2f (IQR %.2f..%.2f) | detected genes median %.2f | MT1E rho_psa %.2f, percentile among all genes %.1f%%, partial|pctLOQ %.2f (p %.3g) | FOLH1 rho_psa %.2f partial|pctLOQ %.2f (p %.3g) | rho(MT1E,pctLOQ) %.2f\n",
+    st, sp(m$psa, pq)[1], sp(m$psa, pq)[2], median(rl), quantile(rl, .25), quantile(rl, .75), median(rall[hi]), rall["MT1E"], 100 * mean(rall <= rall["MT1E"]),
+    prt(L["MT1E", ], m$psa, pq)[1], prt(L["MT1E", ], m$psa, pq)[2], rall["FOLH1"], prt(L["FOLH1", ], m$psa, pq)[1], prt(L["FOLH1", ], m$psa, pq)[2], sp(L["MT1E", ], pq)[1]))
+}
+## Detection-based MT1E (fraction of AOIs above LOQ) -- immune to CPM noise floor
+for (st in c("PSMA__Screening", "PSMA__Cycle1", "CD45__Screening")) { ix <- which(cd$stratum == st); m <- pmeta(st)
+  dr <- tapply(above["MT1E", ix], cd$subject_id[ix], mean)[m$subject_id]
+  cat(st, " MT1E detection-rate vs PSA rho", round(sp(dr, m$psa), 3), " NR mean", round(mean(dr[m$response_group_neat == "Non_Responder"]), 2), " others", round(mean(dr[m$response_group_neat != "Non_Responder"]), 2), "\n") }
+sink()
+```

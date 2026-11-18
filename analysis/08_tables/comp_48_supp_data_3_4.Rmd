@@ -1,0 +1,133 @@
+---
+title: "Supplementary Data 3 and 4: per-AOI deconvolution fractions and programme scores"
+subtitle: "PRINCE spatial transcriptomics: `comp_48_supp_data_3_4`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+This script writes two Supplementary Data files that the manuscript lists but no earlier script had produced. Supplementary Data 3 holds the per-AOI deconvolution fractions in long format: SpatialDecon at cell-type and lineage level, and BayesPrism at cell-type level, each with its tissue-matched reference (PCCAT primary for archival tumours; GSE143791 plus PCCAT tumour profiles for bone). Supplementary Data 4 holds the per-AOI and per-patient scores of the pre-specified and post hoc genes and programmes.
+
+Gene and programme definitions are not copied by hand. They are parsed directly from the primary analysis script (comp_13b), so the exported scores use exactly the same definitions. Programme scores are the mean within-stratum z-score of log-CPM over LOQ-detected genes, with at least three genes required. Patient-level scores are computed on the patient pseudobulk used in the primary analysis. Control (technical-replicate) AOIs are excluded.
+
+**Manuscript items supported**
+
+- Supplementary Data 3 (per-AOI deconvolution fractions, SpatialDecon and BayesPrism)
+- Supplementary Data 4 (per-AOI and per-patient programme scores)
+
+**Pipeline step:** `./run_pipeline.sh --only 48_supp_data_3_4`. Approximate runtime: about a minute.
+
+**Inputs**
+
+- `data/phase2_se_qc_filtered.qs`
+- `results/C3_deconvolution/deconvolution_proportions.qs`
+- `results/R2_deconv_compare/bayesprism_primary.qs`
+- `results/R2_deconv_compare/bayesprism_bone.qs`
+- `results/R1_loq/loq_gene_universes.qs`
+- `results/C13_pseudobulk_LOQ/pseudobulk_strata.qs`
+- `data/reference/msigdb_gene_sets.rds`
+- `data/reference/ProstateCancer_GeneSignatures.R`
+- `.build/comp_13b_pseudobulk_loq.R`
+
+**Outputs**
+
+- `results/Manuscript_v5/Supplementary_Data_3_deconvolution_per_AOI.csv`
+- `results/Manuscript_v5/Supplementary_Data_4_programme_scores.csv`
+
+**Depends on**: `comp_03b`, `comp_16`, `comp_17`, `comp_13b`
+
+## Analysis
+
+### Supplementary Data 3 and 4
+
+The header describes the two exports and the scoring rule. Per-patient scores are taken from the patient pseudobulk, as in the primary analysis.
+
+Loads the bone-only QC-filtered GeoMx object and builds an AOI metadata table (patient, compartment, timepoint, response group, batch). This table is used to annotate both exports.
+
+```{r comp-48-supp-data-3-4-01}
+## ============================================================================
+## PRINCE manuscript v5 -- Supplementary Data 3 and 4 (listed in the manuscript but missing; audit 2026-10-27).
+##  SD3: per-AOI deconvolution fractions -- SpatialDecon (cell type and lineage) and BayesPrism (cell type), long format.
+##  SD4: per-AOI and per-patient programme scores -- mean z-score of log-CPM over LOQ-detected genes within each
+##       segment x timepoint stratum, with the same gene / programme definitions as comp_13b (a priori + post hoc).
+##       Per-patient scores are computed on the patient pseudobulk (C13_pseudobulk_LOQ), as in the primary analysis.
+## ============================================================================
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({ library(qs); library(SummarizedExperiment); library(dplyr); library(tidyr); library(edgeR) })
+setwd(PRINCE_DIR)
+out_dir <- file.path(COMP_DIR, "Manuscript_v5")
+se <- qs::qread("phase2_se_qc_filtered.qs"); cd <- as.data.frame(colData(se))
+meta <- data.frame(aoi = rownames(cd), patient = cd$subject_id, segment = cd$segment_name, timepoint = cd$timepoint,
+                   response_group = cd$response_group_neat, batch = cd$study_batch)
+
+```
+
+### Supplementary Data 3
+
+Converts the SpatialDecon cell-type and lineage fractions and the BayesPrism cell-type fractions (θ) to long format, labelling each with its method, level and reference. Control AOIs are dropped before writing.
+
+```{r comp-48-supp-data-3-4-02}
+## ---- SD3 ----
+dec <- qs::qread(out_path("C3_deconvolution", "deconvolution_proportions.qs"))
+lng <- function(m, method, level, ref) data.frame(m, check.names = FALSE) %>% mutate(aoi = rownames(m)) %>%
+  pivot_longer(-aoi, names_to = "cell_type", values_to = "fraction") %>% mutate(method = method, level = level, reference = ref)
+bp_p <- qs::qread(out_path("R2_deconv_compare", "bayesprism_primary.qs")); bp_b <- qs::qread(out_path("R2_deconv_compare", "bayesprism_bone.qs"))
+sd3 <- bind_rows(lng(dec$prop_primary, "SpatialDecon", "cell type", "PCCAT primary"), lng(dec$prop_bone, "SpatialDecon", "cell type", "GSE143791 + PCCAT tumour"),
+                 lng(dec$lineage_primary, "SpatialDecon", "lineage", "PCCAT primary"), lng(dec$lineage_bone, "SpatialDecon", "lineage", "GSE143791 + PCCAT tumour"),
+                 lng(bp_p$theta, "BayesPrism", "cell type", "PCCAT primary"), lng(bp_b$theta, "BayesPrism", "cell type", "GSE143791 + PCCAT tumour")) %>%
+  left_join(meta, by = "aoi") %>% filter(response_group != "Control") %>% select(aoi, patient, segment, timepoint, method, reference, level, cell_type, fraction)
+write.csv(sd3, file.path(out_dir, "Supplementary_Data_3_deconvolution_per_AOI.csv"), row.names = FALSE)
+
+```
+
+### Supplementary Data 4
+
+The gene and programme definitions are evaluated from the lines of comp_13b between `apriori_genes` and `posthoc_programmes`. For each compartment × timepoint stratum, AOI-level log-CPM is computed on that stratum's LOQ universe (genes above LOQ in at least 10% of AOIs, cross-hybridising probe families removed, TMM normalisation). Genes and programmes are then scored. The same scoring is applied to the stored patient pseudobulk. A final check prints archival PanCK⁺PSMA⁻ pseudobulk *FOLH1* values for comparison with comp_13b.
+
+```{r comp-48-supp-data-3-4-03}
+## ---- SD4 ----
+msig <- readRDS(file.path(PMCC_DIR, "msigdb_gene_sets.rds"))
+sig_env <- new.env(); sys.source(file.path(PMCC_DIR, "ProstateCancer_GeneSignatures.R"), envir = sig_env)
+src <- readLines(file.path(CODE_DIR, "comp_13b_pseudobulk_loq.R"))
+i0 <- grep("^apriori_genes <- ", src); i1 <- grep("^posthoc_programmes <- ", src)
+eval(parse(text = src[i0:i1]))                                   # identical definitions to the primary analysis
+score <- function(lc) {
+  z <- t(scale(t(lc)))
+  g <- t(lc[intersect(c(apriori_genes, posthoc_genes), rownames(lc)), , drop = FALSE])
+  pr <- sapply(c(programmes, posthoc_programmes), function(s) { s <- intersect(s, rownames(z)); if (length(s) >= 3) colMeans(z[s, , drop = FALSE]) else rep(NA, ncol(z)) })
+  cbind(g, pr)
+}
+loq <- qs::qread(file.path(COMP_DIR, "R1_loq", "loq_gene_universes.qs")); uni <- loq$universes
+artefact_re <- "^(USP17L|PRAMEF|NBPF|OR[0-9]+[A-Z]+[0-9]+)"
+raw <- assay(se, "all_count"); raw <- raw[!grepl(artefact_re, rownames(raw)), ]
+code <- c("CD45+" = "CD45", "PSMA+" = "PSMA", "PanCK+PSMA-" = "PanCKPSMA")
+aoi_s <- list()
+for (sg in names(code)) for (tp in c("Archival", "Screening", "Cycle1")) {
+  sid <- paste0(code[sg], "__", tp); idx <- which(cd$segment_name == sg & cd$timepoint == tp & cd$response_group_neat != "Control")
+  g <- intersect(uni[[sid]]$g10, rownames(raw))
+  lc <- cpm(calcNormFactors(DGEList(raw[g, idx])), log = TRUE, prior.count = 1)
+  aoi_s[[sid]] <- data.frame(level = "AOI", stratum = sid, id = colnames(lc), score(lc), check.names = FALSE)
+}
+pbs <- qs::qread(out_path("C13_pseudobulk_LOQ", "pseudobulk_strata.qs"))
+pt_s <- lapply(names(pbs), function(sid) data.frame(level = "patient pseudobulk", stratum = sid, id = pbs[[sid]]$meta$subject_id, score(pbs[[sid]]$lcpm), check.names = FALSE))
+sd4 <- bind_rows(c(aoi_s, pt_s)) %>% left_join(meta %>% select(aoi, patient), by = c("id" = "aoi")) %>%
+  mutate(patient = ifelse(level == "AOI", patient, id)) %>% relocate(level, stratum, id, patient)
+write.csv(sd4, file.path(out_dir, "Supplementary_Data_4_programme_scores.csv"), row.names = FALSE)
+cat("SD3 rows:", nrow(sd3), "| SD4 rows:", nrow(sd4), "(AOI", sum(sd4$level == "AOI"), ")\n")
+## consistency check against the primary analysis: pseudobulk FOLH1 / programme values must equal those used in comp_13b
+chk <- sd4 %>% filter(level == "patient pseudobulk", stratum == "PanCKPSMA__Archival")
+cat("PanCKPSMA__Archival FOLH1 (first 3):", head(round(chk$FOLH1, 3), 3), "\n")
+```

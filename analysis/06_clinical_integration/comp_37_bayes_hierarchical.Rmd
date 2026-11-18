@@ -1,0 +1,215 @@
+---
+title: "Bayesian hierarchical pooling of the response association across strata"
+subtitle: "PRINCE spatial transcriptomics: `comp_37_bayes_hierarchical`"
+author: "Ramyar Molania"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+---
+
+```{r knitr-setup, include=FALSE, purl=FALSE}
+## Rendering set-up only (not part of the analysis code). The working directory used by the
+## analysis is the repository folder below; PRINCE_ROOT is set by run_pipeline.sh.
+if (Sys.getenv("PRINCE_ROOT") == "") Sys.setenv(PRINCE_ROOT = normalizePath("../.."))
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, comment = "#>")
+knitr::opts_knit$set(root.dir = file.path(Sys.getenv("PRINCE_ROOT"), "data"))
+```
+
+## Overview
+
+Each stratum alone has 13–30 patients, so single-stratum tests are weak. The same patient also contributes to several strata, so the strata cannot be treated as independent replicates. For each pre-specified feature, this script fits one model across strata. The model is y (z-scored within stratum) = a_s + batch_s + β_s × PSA change + u_p + ε, with partial pooling β_s ~ N(μ, τ²), a patient random effect u_p shared across strata and stratum-specific residual s.d. Priors are μ ~ N(0, 1), τ ~ half-N(0, 0.5) with sensitivity scales 0.25 and 1, σ_u and σ_s ~ half-N(0, 1), a_s ~ N(0, 2) and batch ~ N(0, 1).
+
+The model is fitted to the six pre-treatment strata (primary analysis) and to all nine strata. A second part pools paired on-treatment change (Cycle1 − Screening, jointly normalised per compartment) over the three compartments, to ask whether induction tracks response. PSA change is the capped maximal change divided by 50, so a negative μ means a higher feature with better response.
+
+Posteriors are sampled with a blocked Gibbs sampler: location parameters are drawn jointly from their Gaussian full conditional and each scale by slice sampling on the log scale. Stan/NUTS was tried first but failed during warm-up in the local installation. Convergence is summarised by R-hat and bulk effective sample size from the posterior package.
+
+**Manuscript items supported**
+
+- Supplementary Fig. 1a,b (pooled effects; shrunken *FOLH1* stratum effects; drawn by `comp_39_supp_fig6`)
+- Supplementary Tables 80–82
+- Results: consistency of *FOLH1* across strata (pooled −0.26 s.d. per 50% worse PSA change; between-stratum s.d. 0.05); p53 baseline posterior probabilities in the radiobiology paragraph
+- Methods: Bayesian hierarchical pooling across strata
+
+**Pipeline step:** `./run_pipeline.sh --only 37_bayes_hierarchical`. Approximate runtime: about 4 min.
+
+**Inputs**
+
+- `data/phase2_se_qc_filtered.qs`
+- `data/reference/msigdb_gene_sets.rds`
+- `results/C1_clinical/patient_table.qs`
+- `results/C13_pseudobulk_LOQ/pseudobulk_strata.qs`
+- `results/R1_loq/loq_gene_universes.qs`
+
+**Outputs**
+
+- `results/R15_bayes_hierarchical/A_pooled_effect_mu.csv`
+- `results/R15_bayes_hierarchical/A_stratum_shrunken_beta.csv`
+- `results/R15_bayes_hierarchical/B_on_treatment_change_pooled.csv`
+- `results/R15_bayes_hierarchical/B_on_treatment_change_by_segment.csv`
+
+**Depends on**: `comp_00b_bone_cohort`, `comp_01_clinical`, `comp_13b_pseudobulk_loq`, `comp_16_loq_filter`
+
+## Analysis
+
+Header: model, priors, reported quantities (posterior mean and 95% credible interval of μ, P(μ < 0), shrunken β_s) and the two parts (A, levels across strata; B, on-treatment change).
+
+Set-up, features and sampler.
+- Features: *FOLH1* log-CPM; mean z-scores of Hallmark androgen response, HLA class I, Hallmark IFN-α, p53 core, metallothioneins, Buffa hypoxia and NRF2 targets; and *FOLH1* relative to AR (difference of standardised scores).
+- `slice_log` is a univariate stepping-out slice sampler on the log scale. `lp_scale` gives the log posterior of a log-s.d. under a half-normal prior, including the Jacobian.
+- `gibbs` builds one design matrix (stratum intercepts, stratum-specific batch dummies, μ, stratum deviations d_s = β_s − μ, patient effects). Each iteration draws all location parameters jointly via a Cholesky factor of the posterior precision, then updates σ_s, σ_u and τ by slice sampling. Defaults are 4,000 iterations with 1,000 burn-in.
+
+```{r comp-37-bayes-hierarchical-01}
+## ============================================================================
+## PRINCE -- R15: Bayesian hierarchical model pooling the response association across
+## compartments x timepoints (one model per feature, all patients at once).
+##   y[i] (feature z-scored within stratum s) = a_s + batch_s + beta_s * PSA_p + u_p + e_i
+##   beta_s ~ N(mu, tau)    -- partial pooling across strata
+##   u_p    ~ N(0, sd_u)    -- patient effect shared across strata (absorbs the correlation
+##                             between strata from the same patient)
+##   e_i    ~ N(0, sigma_s)
+## PSA = capped max PSA change / 50 (positive = worse). Priors: mu ~ N(0,1), tau ~ half-N(0,0.5)
+## (sensitivity: 0.25, 1), sd_u, sigma ~ half-N(0,1), a ~ N(0,2), batch ~ N(0,1).
+## Reports P(mu < 0) (higher feature with better response), 95% CrI, shrunken beta_s.
+## Sets: baseline (Archival + Screening, 6 strata; primary) and all 9 strata.
+##  B. On-treatment change (Cycle1 - Screening, jointly normalised per segment, as R9) pooled
+##     over the three segments: delta ~ PSA with the same hierarchy (does induction track response?).
+## Outputs: results/R15_bayes_hierarchical/
+## ============================================================================
+
+source(file.path(Sys.getenv("PRINCE_ROOT", "."), ".build", "comp_00_guard.R"))
+suppressMessages({ library(qs); library(SummarizedExperiment); library(dplyr); library(tidyr); library(edgeR); library(posterior) })
+setwd(PRINCE_DIR)
+check_ram_or_stop(20)
+out_dir <- file.path(COMP_DIR, "R15_bayes_hierarchical"); dir.create(out_dir, showWarnings = FALSE)
+se <- qs::qread("phase2_se_qc_filtered.qs"); cd <- as.data.frame(colData(se))
+pt <- qs::qread(out_path("C1_clinical", "patient_table.qs"))
+pbs <- qs::qread(out_path("C13_pseudobulk_LOQ", "pseudobulk_strata.qs"))
+uni <- qs::qread(file.path(COMP_DIR, "R1_loq", "loq_gene_universes.qs"))$universes
+msig <- readRDS(file.path(PMCC_DIR, "msigdb_gene_sets.rds"))
+code <- c("CD45+" = "CD45", "PSMA+" = "PSMA", "PanCK+PSMA-" = "PanCKPSMA")
+progs <- list(AR_Hallmark = msig$H$HALLMARK_ANDROGEN_RESPONSE, HLA_I = c("HLA-A", "HLA-B", "HLA-C", "B2M", "TAP1", "TAP2", "TAPBP"),
+  Hallmark_IFNa = msig$H$HALLMARK_INTERFERON_ALPHA_RESPONSE,
+  P53_core = c("CDKN1A", "MDM2", "DDB2", "PHLDA3", "GDF15", "TNFRSF10B", "SESN1", "ZMAT3", "RRM2B", "TP53I3"),
+  Metallothionein = c("MT1A", "MT1E", "MT1F", "MT1G", "MT1H", "MT1M", "MT1X", "MT2A"),
+  Hypoxia_Buffa = msig$C2_CGP$BUFFA_HYPOXIA_METAGENE, NRF2_targets = msig$C2_CGP$SINGH_NFE2L2_TARGETS)
+score <- function(lc) { z <- t(scale(t(lc)))
+  S <- cbind(FOLH1 = lc["FOLH1", ], sapply(progs, function(g) colMeans(z[intersect(g, rownames(z)), , drop = FALSE])))
+  cbind(S, FOLH1_rel_AR = as.numeric(scale(S[, "FOLH1"])) - as.numeric(scale(S[, "AR_Hallmark"]))) }
+
+## Inference: blocked Gibbs sampler (exact for this linear Gaussian model). Location parameters
+## theta = (a, batch, mu, d = beta - mu, u) are drawn jointly from their Gaussian full conditional;
+## each scale (sigma_s, sd_u, tau) by univariate slice sampling on the log scale under its half-normal
+## prior. (Stan/NUTS was tried first but its warm-up metric adaptation overflowed in this rstan build.)
+slice_log <- function(eta, logf, w = 1, m = 50) {
+  y0 <- logf(eta) - rexp(1); L <- eta - runif(1) * w; R <- L + w; j <- floor(runif(1) * m); k <- m - 1 - j
+  while (j > 0 && logf(L) > y0) { L <- L - w; j <- j - 1 }
+  while (k > 0 && logf(R) > y0) { R <- R + w; k <- k - 1 }
+  repeat { e1 <- runif(1, L, R); if (logf(e1) >= y0) return(e1); if (e1 < eta) L <- e1 else R <- e1 } }
+## log posterior of log-scale eta for scale sd with n residuals of sum of squares ss, prior half-N(0, h)
+lp_scale <- function(ss, n, h) function(eta) { v <- exp(2 * eta); -n * eta - ss / (2 * v) - v / (2 * h^2) + eta }
+
+gibbs <- function(y, x, s, p, X, S, P, tau_scale, n_iter = 4000, burn = 1000, seed = 1) {
+  set.seed(seed); N <- length(y); K <- ncol(X)
+  Z <- cbind(model.matrix(~ 0 + factor(s, levels = 1:S)), X, x, model.matrix(~ 0 + factor(s, levels = 1:S)) * x,
+             model.matrix(~ 0 + factor(p, levels = 1:P)))
+  ia <- 1:S; ig <- S + seq_len(K); imu <- S + K + 1; id <- imu + 1:S; iu <- max(id) + 1:P
+  sigma <- rep(1, S); sd_u <- 0.5; tau <- 0.2; keep <- n_iter - burn
+  out <- matrix(NA, keep, 3 + S + 1); colnames(out) <- c("mu", "tau", "sd_u", paste0("beta", 1:S), "lp")
+  for (it in seq_len(n_iter)) {
+    w <- 1 / sigma[s]^2
+    prec <- c(rep(1 / 4, S), rep(1, K), 1, rep(1 / tau^2, S), rep(1 / sd_u^2, P))
+    Q <- crossprod(Z * sqrt(w)) + diag(prec); R <- chol(Q)
+    b <- crossprod(Z, w * y); th <- backsolve(R, forwardsolve(t(R), b) + rnorm(ncol(Z)))
+    res <- y - as.numeric(Z %*% th)
+    for (k in 1:S) { r <- res[s == k]; sigma[k] <- exp(slice_log(log(sigma[k]), lp_scale(sum(r^2), length(r), 1))) }
+    sd_u <- exp(slice_log(log(sd_u), lp_scale(sum(th[iu]^2), P, 1)))
+    tau <- exp(slice_log(log(tau), lp_scale(sum(th[id]^2), S, tau_scale)))
+    if (it > burn) out[it - burn, ] <- c(th[imu], tau, sd_u, th[imu] + th[id], -sum(res^2 * w) / 2) }
+  out }
+
+```
+
+`fit_one` z-scores the feature within stratum and builds batch dummies only for strata with more than one batch. It runs four chains with distinct seeds, summarises R-hat and bulk ESS for μ, τ, σ_u and the β_s, and returns the pooled μ (mean, 95% CrI, P(μ < 0), τ, σ_u) and the shrunken stratum effects.
+
+```{r comp-37-bayes-hierarchical-02}
+fit_one <- function(dl, tau_scale = 0.5, seed = 1) {
+  d <- dl %>% filter(!is.na(y), !is.na(x))
+  d$y <- ave(d$y, d$stratum, FUN = function(v) as.numeric(scale(v)))
+  st <- factor(d$stratum); pid <- factor(d$subject_id)
+  ## stratum-specific batch dummies (drop each stratum's reference level)
+  X <- do.call(cbind, lapply(levels(st), function(l) { b <- factor(d$batch[st == l]); if (nlevels(b) < 2) return(NULL)
+    M <- matrix(0, nrow(d), nlevels(b) - 1); M[st == l, ] <- model.matrix(~ b)[, -1, drop = FALSE]; M }))
+  if (is.null(X)) X <- matrix(0, nrow(d), 0)
+  ch <- lapply(1:4, function(cn) gibbs(d$y, d$x, as.integer(st), as.integer(pid), X, nlevels(st), nlevels(pid), tau_scale, seed = 1000 * seed + cn))
+  dr <- posterior::as_draws_array(array(unlist(lapply(ch, as.numeric)), c(nrow(ch[[1]]), ncol(ch[[1]]), 4),
+                                        dimnames = list(NULL, colnames(ch[[1]]), NULL)) |> aperm(c(1, 3, 2)))
+  sm_ <- posterior::summarise_draws(posterior::subset_draws(dr, variable = c("mu", "tau", "sd_u", paste0("beta", seq_len(nlevels(st))))), "rhat", "ess_bulk")
+  e <- do.call(rbind, ch); B <- e[, grep("^beta", colnames(e)), drop = FALSE]
+  list(mu = data.frame(n_obs = nrow(d), n_patients = nlevels(pid), n_strata = nlevels(st),
+         mu_mean = mean(e[, "mu"]), mu_lo = quantile(e[, "mu"], 0.025), mu_hi = quantile(e[, "mu"], 0.975), P_mu_neg = mean(e[, "mu"] < 0),
+         tau_mean = mean(e[, "tau"]), sd_u_mean = mean(e[, "sd_u"]), max_rhat = max(sm_$rhat), min_ess = min(sm_$ess_bulk), divergent = NA),
+       beta = data.frame(stratum = levels(st), beta_mean = colMeans(B), beta_lo = apply(B, 2, quantile, 0.025),
+         beta_hi = apply(B, 2, quantile, 0.975), P_beta_neg = colMeans(B < 0))) }
+
+```
+
+### A. Pooling feature levels across strata
+Assemble patient pseudobulk features from every stratum in long format. For each feature, fit the baseline (six strata) and all-strata models with τ prior scale 0.5. The τ scale is varied to 0.25 and 1 for the baseline models only, as the prior sensitivity analysis.
+
+```{r comp-37-bayes-hierarchical-03}
+## ---- data: patient pseudobulk features, long format -----------------------------------------
+long <- bind_rows(lapply(names(pbs), function(sid) { p <- pbs[[sid]]
+  data.frame(stratum = sid, subject_id = p$meta$subject_id, batch = p$meta$study_batch, x = p$meta$psa_change_capped / 50, score(p$lcpm), check.names = FALSE) })) %>%
+  pivot_longer(-c(stratum, subject_id, batch, x), names_to = "feature", values_to = "y") %>% mutate(timepoint = sub(".*__", "", stratum))
+
+mu_rows <- list(); beta_rows <- list()
+runs <- expand.grid(feature = unique(long$feature), set = c("baseline", "all"), tau_scale = c(0.5, 0.25, 1), stringsAsFactors = FALSE) %>%
+  filter(tau_scale == 0.5 | set == "baseline")
+for (i in seq_len(nrow(runs))) { r <- runs[i, ]
+  dl <- long %>% filter(feature == r$feature, r$set == "all" | timepoint != "Cycle1")
+  fo <- fit_one(dl, r$tau_scale)
+  mu_rows[[i]] <- cbind(r, fo$mu); beta_rows[[i]] <- cbind(r[rep(1, nrow(fo$beta)), ], fo$beta)
+  message(sprintf("%s %s tau%.2f: mu %.2f [%.2f, %.2f] P(mu<0) %.3f", r$feature, r$set, r$tau_scale, fo$mu$mu_mean, fo$mu$mu_lo, fo$mu$mu_hi, fo$mu$P_mu_neg)) }
+mu_tab <- bind_rows(mu_rows); beta_tab <- bind_rows(beta_rows)
+
+```
+
+### B. On-treatment change pooled over compartments
+For each compartment, sum AOI counts per patient and timepoint over the union of the Screening and Cycle1 LOQ universes and TMM-normalise them jointly, keeping patients with both timepoints. Feature change (Cycle1 − Screening) is pooled over the three compartments with the same hierarchical model for *FOLH1*, AR, HLA class I, IFN-α and p53 core. All tables are written and summaries printed.
+
+```{r comp-37-bayes-hierarchical-04}
+## ---- B. on-treatment change pooled over segments ------------------------------------------------
+dlong <- list()
+for (sg in names(code)) {
+  g <- union(uni[[paste0(code[sg], "__Screening")]]$g10, uni[[paste0(code[sg], "__Cycle1")]]$g10)
+  idx <- which(cd$response_group_neat != "Control" & cd$segment_name == sg & cd$timepoint %in% c("Screening", "Cycle1")); d <- cd[idx, ]
+  key <- paste(d$subject_id, d$timepoint, sep = "|")
+  mm <- sapply(split(seq_along(key), key), function(i) rowSums(assay(se, "all_count")[g, idx[i], drop = FALSE]))
+  sid <- sub("\\|.*", "", colnames(mm)); both <- names(which(table(sid) == 2)); mm <- mm[, sid %in% both]
+  lc <- cpm(calcNormFactors(DGEList(mm)), log = TRUE, prior.count = 1); F <- score(lc)
+  s_ <- sub("\\|.*", "", colnames(lc)); t_ <- sub(".*\\|", "", colnames(lc))
+  D <- sapply(both, function(k) F[s_ == k & t_ == "Cycle1", ] - F[s_ == k & t_ == "Screening", ])
+  bt <- d$study_batch[match(both, d$subject_id)]
+  dlong[[sg]] <- data.frame(stratum = paste0(code[sg], "__delta"), subject_id = both, batch = bt,
+    x = pt$psa_change_capped[match(both, pt$subject_id)] / 50, t(D), check.names = FALSE) }
+dlong <- bind_rows(dlong) %>% pivot_longer(-c(stratum, subject_id, batch, x), names_to = "feature", values_to = "y")
+d_rows <- list(); db_rows <- list()
+for (f in c("FOLH1", "AR_Hallmark", "HLA_I", "Hallmark_IFNa", "P53_core")) {
+  fo <- fit_one(dlong %>% filter(feature == f)); d_rows[[f]] <- cbind(feature = f, fo$mu); db_rows[[f]] <- cbind(feature = f, fo$beta) }
+d_tab <- bind_rows(d_rows); db_tab <- bind_rows(db_rows)
+
+write.csv(mu_tab, file.path(out_dir, "A_pooled_effect_mu.csv"), row.names = FALSE)
+write.csv(beta_tab, file.path(out_dir, "A_stratum_shrunken_beta.csv"), row.names = FALSE)
+write.csv(d_tab, file.path(out_dir, "B_on_treatment_change_pooled.csv"), row.names = FALSE)
+write.csv(db_tab, file.path(out_dir, "B_on_treatment_change_by_segment.csv"), row.names = FALSE)
+options(width = 220); f2 <- function(x) as.data.frame(mutate(x, across(where(is.numeric), ~signif(.x, 2))))
+cat("\n==== A. pooled PSA effect (mu; negative = higher feature, better response) ====\n")
+print(f2(mu_tab %>% select(feature, set, tau_scale, n_obs, n_patients, n_strata, mu_mean, mu_lo, mu_hi, P_mu_neg, tau_mean, sd_u_mean, max_rhat, min_ess)), row.names = FALSE)
+cat("\n==== A. FOLH1 shrunken beta by stratum (baseline, tau 0.5 and all) ====\n")
+print(f2(beta_tab %>% filter(feature == "FOLH1", tau_scale == 0.5) %>% select(set, stratum, beta_mean, beta_lo, beta_hi, P_beta_neg)), row.names = FALSE)
+cat("\n==== B. on-treatment change vs PSA, pooled over segments ====\n")
+print(f2(d_tab %>% select(feature, n_obs, n_patients, mu_mean, mu_lo, mu_hi, P_mu_neg, tau_mean, max_rhat, min_ess)), row.names = FALSE)
+cat("R15 complete.\n")
+```
